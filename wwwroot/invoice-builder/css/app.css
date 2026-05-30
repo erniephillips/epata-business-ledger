@@ -901,8 +901,6 @@ table.li-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   display: flex;
   flex-direction: column;
   gap: 12px;
-  max-height: calc(100vh - 116px);
-  overflow: auto;
   padding-right: 2px;
 }
 
@@ -946,10 +944,8 @@ table.li-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 }
 
 .invoice-preview-stage {
-  height: calc(100vh - 150px);
-  min-height: 760px;
-  max-height: none;
-  overflow: auto;
+  min-height: 0;
+  overflow: visible;
   overflow-x: auto;
   border-radius: 12px;
   background:
@@ -966,7 +962,7 @@ table.li-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .invoice-preview-frame {
   width: 100%;
   min-width: 816px;
-  height: 1180px;
+  height: 1414px;
   display: block;
   margin: 0 auto;
   border: 0;
@@ -1281,7 +1277,7 @@ select.status-select { font-weight: 600; }
 /* ══════════════════════════════════════════════════════════════
    RESPONSIVE
    ══════════════════════════════════════════════════════════════ */
-@media (max-width: 1180px) {
+@media (max-width: 1280px) {
   .quote-primer,
   .formula-library,
   .price-tier-grid {
@@ -1296,7 +1292,7 @@ select.status-select { font-weight: 600; }
     position: static;
   }
   .invoice-preview-stage {
-    min-height: 680px;
+    overflow: auto;
   }
 }
 

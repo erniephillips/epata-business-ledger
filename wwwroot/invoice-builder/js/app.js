@@ -23,6 +23,8 @@ let activeRecordId  = null;
 let apiReady        = false;
 let appConfig       = {};
 let autoSaveTimer   = null;
+let saveInFlight    = null;
+let productLookups  = [];
 const AUTOSAVE_MS   = 30_000;
 
 // ── Init ──────────────────────────────────────────────
@@ -114,6 +116,7 @@ export async function init(initialView = 'dashboard') {
       appConfig = await api.getConfig();
       applyConfigToSettings(appConfig);
       applyConfigDefaults(appConfig);
+      await loadProductLookups();
     } catch (err) {
       toast('Settings could not load. Saving still works.', 'error', 5000);
       console.error(err);
@@ -132,7 +135,7 @@ export async function init(initialView = 'dashboard') {
       const latest = await api.latest();
       onDocumentLoaded(latest);
       activeRecordId = latest.id;
-      setDbStatus(`Ready — loaded #${latest.id}`, 'ready');
+      setDbStatus(`Ready — loaded ${latest.docNumber || `#${latest.id}`}`, 'ready');
     } catch {
       const num = await api.nextNumber('ESTIMATE').then(r => r.number).catch(() => '');
       newDocument('ESTIMATE', num);
@@ -263,6 +266,20 @@ async function startNew(type = 'ESTIMATE') {
 }
 
 async function saveRecord(forceNew = false) {
+  if (saveInFlight) {
+    toast(`Still saving ${textVal('docNumber') || 'document'}...`, 'info', 1600);
+    return saveInFlight;
+  }
+
+  saveInFlight = doSaveRecord(forceNew);
+  try {
+    return await saveInFlight;
+  } finally {
+    saveInFlight = null;
+  }
+}
+
+async function doSaveRecord(forceNew = false) {
   setAutoSaveStatus('saving');
   try {
     if (!await ensureApiReady()) {
@@ -293,19 +310,21 @@ async function saveRecord(forceNew = false) {
     let result;
     if (!forceNew && activeRecordId) {
       result = await api.update(activeRecordId, body);
-      toast(`Saved #${activeRecordId}`, 'success');
+      toast(`Saved ${result.docNumber || body.docNumber || 'document'}`, 'success');
     } else {
       result = await api.create(body);
       activeRecordId = result.id;
-      toast(`Created #${activeRecordId}`, 'success');
+      toast(`Created ${result.docNumber || body.docNumber || 'document'}`, 'success');
     }
+    if (result?.docNumber) setVal('docNumber', result.docNumber);
 
     updateActiveBar();
     await refreshRecords();
     refreshInvoicePreview();
     setAutoSaveStatus('saved');
     apiReady = true;
-    setDbStatus(`Ready — saved #${activeRecordId}`, 'ready');
+    setDbStatus(`Ready — saved ${result.docNumber || body.docNumber || 'document'}`, 'ready');
+    return result;
   } catch (err) {
     toast('Save failed: ' + err.message, 'error');
     apiReady = false;
@@ -346,6 +365,40 @@ function wireLiveCalculationUpdates() {
   document.addEventListener('epata:totals-updated', () => {
     // Keeps summary values, database payloads, and generated PDFs using the same live totals.
   });
+
+  el('projectName')?.addEventListener('change', applySelectedProduct);
+}
+
+async function loadProductLookups() {
+  const res = await fetch('/api/lookups');
+  if (!res.ok) return;
+  const data = await res.json();
+  productLookups = data.products || [];
+  const list = el('productOptions');
+  if (list) {
+    list.innerHTML = productLookups.map(p => `<option value="${escapeHtml(p.name || '')}">${escapeHtml([p.sku, p.targetPrice ? money(p.targetPrice) : ''].filter(Boolean).join(' · '))}</option>`).join('');
+  }
+}
+
+function applySelectedProduct() {
+  const selected = productLookups.find(p => (p.name || '').toLowerCase() === textVal('projectName').toLowerCase());
+  if (!selected) return;
+  if (selected.material) setVal('material', selected.material);
+  if (selected.color) setVal('color', selected.color);
+  if (selected.grams != null) setVal('calcGrams', selected.grams);
+  if (selected.printHours != null) setVal('calcHours', selected.printHours);
+  if (selected.materialCostPerGram != null) setVal('calcGramRate', selected.materialCostPerGram);
+  if (selected.machineRatePerHour != null) setVal('calcHourRate', selected.machineRatePerHour);
+  if (selected.designMinutes != null) setVal('calcDesignHours', Number(selected.designMinutes || 0) / 60);
+  const hasMeaningfulLine = Array.from(document.querySelectorAll('#lineItemsBody tr')).some(row =>
+    row.querySelector('.item-desc')?.value?.trim() || Number(row.querySelector('.item-rate')?.value || 0) > 0);
+  if (selected.targetPrice && !hasMeaningfulLine) {
+    const rows = document.querySelectorAll('#lineItemsBody tr');
+    rows.forEach(row => row.remove());
+    addLineItem({ description: selected.name, details: selected.sku || selected.category || '', qty: 1, rate: selected.targetPrice });
+  }
+  updateTotals();
+  refreshInvoicePreview();
 }
 
 // ── Auto-save ─────────────────────────────────────────
@@ -399,6 +452,17 @@ function refreshInvoicePreview() {
   if (!frame) return;
   const data = { ...getFormData(), ...appConfig, brandColor: appConfig.brandColor || '#17468f' };
   frame.srcdoc = renderInvoiceHtml(data);
+  frame.onload = () => resizePreviewFrame(frame);
+}
+
+function resizePreviewFrame(frame) {
+  try {
+    const doc = frame.contentDocument || frame.contentWindow?.document;
+    const height = Math.max(1414, doc?.documentElement?.scrollHeight || 0, doc?.body?.scrollHeight || 0);
+    frame.style.height = `${height}px`;
+  } catch {
+    frame.style.height = '1414px';
+  }
 }
 
 // ── Records ───────────────────────────────────────────
@@ -481,7 +545,7 @@ function updateActiveBar() {
   if (!bar || !txt) return;
   if (activeRecordId) {
     bar.classList.remove('hidden');
-    txt.textContent = `Editing #${activeRecordId} — Ctrl+S to save`;
+    txt.textContent = `Editing ${textVal('docNumber') || `#${activeRecordId}`} — Ctrl+S to save`;
   } else {
     bar.classList.remove('hidden');
     txt.textContent = 'New document — Ctrl+S to save';

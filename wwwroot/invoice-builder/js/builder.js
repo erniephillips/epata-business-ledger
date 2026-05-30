@@ -119,15 +119,15 @@ export function updateTotals() {
   const items    = getLineItems();
   const subtotal = items.reduce((s, li) => s + li.amount, 0);
   const discount = val('docDiscount');
-  const rush     = (subtotal - discount) * (val('docRushPercent') / 100);
-  const afterRush = subtotal - discount + rush;
-  const tax      = afterRush * (val('docTaxRate') / 100);
-  const total    = afterRush + tax;
-  // Treat estimate "Accepted" the same as invoice "Paid" — both mean closed/finalized
+  const rush     = subtotal * (val('docRushPercent') / 100);
+  const taxable  = Math.max(0, subtotal + rush - discount);
+  const tax      = taxable * (val('docTaxRate') / 100);
+  const total    = taxable + tax;
   const closedStatus = textVal('docStatus');
-  const isPaid   = closedStatus === 'Paid' || closedStatus === 'Accepted';
+  const isInvoice = textVal('docType') === 'INVOICE';
+  const isPaid   = isInvoice && closedStatus === 'Paid';
   const paid     = isPaid ? total : val('amountPaid');
-  const balance  = isPaid ? 0 : total - paid;
+  const balance  = isInvoice ? Math.max(0, total - paid) : 0;
 
   if (isPaid) setVal('amountPaid', total.toFixed(2));
 

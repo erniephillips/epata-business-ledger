@@ -114,11 +114,13 @@ export async function duplicateRecord(id) {
 }
 
 export async function deleteRecord(id, activeId, setActiveId) {
-  if (!confirm('Delete this record? This cannot be undone.')) return;
+  const record = _records.find(r => r.id === id);
+  const label = record?.docNumber || `record #${id}`;
+  if (!confirm(`Delete ${label}? This cannot be undone.`)) return;
   await api.delete(id);
   if (activeId === id) setActiveId(null);
   await refreshRecords();
-  toast('Record deleted', 'info');
+  toast(`${label} deleted`, 'info');
 }
 
 // ── Export CSV ────────────────────────────────────────

@@ -14,7 +14,7 @@ builder.WebHost.UseUrls(appUrl);
 
 builder.Services.AddDbContext<AppDbContext>(options =>
 {
-    var connectionString = builder.Configuration.GetConnectionString("DefaultConnection") ?? "Data Source=Data/epata-business-ledger.db";
+    var connectionString = ResolveConnectionString(builder.Configuration, builder.Environment.ContentRootPath);
     options.UseSqlite(connectionString);
 });
 
@@ -28,7 +28,7 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 
 var app = builder.Build();
 
-Directory.CreateDirectory(Path.Combine(app.Environment.ContentRootPath, "Data"));
+Directory.CreateDirectory(GetSqliteDataDirectory(app.Configuration, app.Environment.ContentRootPath));
 Directory.CreateDirectory(Path.Combine(app.Environment.ContentRootPath, "Backups"));
 
 using (var scope = app.Services.CreateScope())
@@ -60,11 +60,27 @@ MapCrud<AppSetting>(app, "settings");
 
 app.MapGet("/api/dashboard", async (DashboardService dashboard) => Results.Ok(await dashboard.BuildAsync()));
 
+app.MapGet("/api/tax-audit", async (AppDbContext db) => Results.Ok(await BuildTaxAuditAsync(db)));
+
 app.MapGet("/api/lookups", async (AppDbContext db) =>
 {
     var customers = await db.Parties.Where(x => !x.IsArchived && (x.PartyType == "Customer" || x.PartyType == "Both")).OrderBy(x => x.Name).Select(x => x.Name).ToListAsync();
     var vendors = await db.Parties.Where(x => !x.IsArchived && (x.PartyType == "Vendor" || x.PartyType == "Both")).OrderBy(x => x.Name).Select(x => x.Name).ToListAsync();
-    var products = await db.Products.Where(x => !x.IsArchived).OrderBy(x => x.Name).Select(x => new { x.Name, x.Sku, x.TargetPrice }).ToListAsync();
+    var products = await db.Products.Where(x => !x.IsArchived).OrderBy(x => x.Name).Select(x => new
+    {
+        x.Name,
+        x.Sku,
+        x.Category,
+        x.Material,
+        x.Color,
+        x.Grams,
+        x.PrintHours,
+        x.MaterialCostPerGram,
+        x.MachineRatePerHour,
+        x.PackagingCost,
+        x.DesignMinutes,
+        x.TargetPrice
+    }).ToListAsync();
     return Results.Ok(new { customers, vendors, products });
 });
 
@@ -74,10 +90,10 @@ app.MapPost("/api/import/invoice-app", async (InvoiceAppImportService importer, 
     return Results.Ok(result);
 });
 
-app.MapGet("/api/health", (IWebHostEnvironment env) => Results.Ok(new
+app.MapGet("/api/health", (IWebHostEnvironment env, IConfiguration config) => Results.Ok(new
 {
     status = "ok",
-    database = Path.Combine(env.ContentRootPath, "Data", "epata-business-ledger.db"),
+    database = GetDatabasePath(config, env),
     serverTimeUtc = DateTimeOffset.UtcNow,
     mode = "unified-ledger"
 }));
@@ -138,14 +154,18 @@ app.MapGet("/api/documents/stats", async (AppDbContext db) =>
     var all = await db.InvoiceDocuments.AsNoTracking()
         .Select(d => new { d.DocType, d.Status, d.Total, d.AmountPaid, d.Balance })
         .ToListAsync();
+    var invoices = all.Where(d => d.DocType == "INVOICE").ToList();
+    var openInvoices = invoices.Where(d => !IsClosedInvoiceDocumentStatus(d.Status)).ToList();
+    var paidInvoices = invoices.Where(d => d.Status != "Void").ToList();
 
     return Results.Ok(new
     {
         totalEstimates = all.Count(d => d.DocType == "ESTIMATE"),
-        totalInvoices = all.Count(d => d.DocType == "INVOICE"),
-        totalRevenue = all.Where(d => d.DocType == "INVOICE").Sum(d => d.Total),
-        paidRevenue = all.Where(d => d.DocType == "INVOICE" && d.Status == "Paid").Sum(d => d.Total),
-        unpaidBalance = all.Where(d => d.DocType == "INVOICE" && d.Status != "Paid" && d.Status != "Void").Sum(d => d.Balance),
+        totalInvoices = invoices.Count,
+        totalRevenue = paidInvoices.Sum(d => d.AmountPaid),
+        totalInvoiced = invoices.Where(d => d.Status != "Void").Sum(d => d.Total),
+        paidRevenue = paidInvoices.Sum(d => d.AmountPaid),
+        unpaidBalance = openInvoices.Sum(d => Math.Max(0, d.Balance)),
         draftCount = all.Count(d => d.Status == "Draft"),
         sentCount = all.Count(d => d.Status == "Sent"),
         paidCount = all.Count(d => d.Status == "Paid"),
@@ -178,13 +198,13 @@ app.MapGet("/api/documents/{id:int}", async (AppDbContext db, int id) =>
 app.MapPost("/api/documents", async (AppDbContext db, SaveInvoiceDocumentRequest request) =>
 {
     var doc = await CreateInvoiceDocumentAsync(db, request);
-    return Results.Ok(new { id = doc.Id });
+    return Results.Ok(ToInvoiceDocumentDto(doc));
 });
 
 app.MapPut("/api/documents/{id:int}", async (AppDbContext db, int id, SaveInvoiceDocumentRequest request) =>
 {
     var doc = await UpdateInvoiceDocumentAsync(db, id, request);
-    return doc is null ? Results.NotFound(new { message = $"Document {id} was not found." }) : Results.Ok(new { id = doc.Id });
+    return doc is null ? Results.NotFound(new { message = $"Document {id} was not found." }) : Results.Ok(ToInvoiceDocumentDto(doc));
 });
 
 app.MapDelete("/api/documents/{id:int}", async (AppDbContext db, int id) =>
@@ -206,9 +226,9 @@ app.MapPost("/api/documents/{id:int}/duplicate", async (AppDbContext db, int id)
     return copy is null ? Results.NotFound(new { message = $"Document {id} was not found." }) : Results.Ok(ToInvoiceDocumentDto(copy));
 });
 
-app.MapGet("/api/database/backup", async (AppDbContext db, IWebHostEnvironment env) =>
+app.MapGet("/api/database/backup", async (AppDbContext db, IWebHostEnvironment env, IConfiguration configuration) =>
 {
-    var backup = await CreateDatabaseBackupAsync(db, env);
+    var backup = await CreateDatabaseBackupAsync(db, env, configuration);
     return Results.File(backup.Bytes, "application/x-sqlite3", backup.FileName);
 });
 
@@ -225,14 +245,18 @@ app.MapGet("/api/invoice-documents/stats", async (AppDbContext db) =>
     var all = await db.InvoiceDocuments.AsNoTracking()
         .Select(d => new { d.DocType, d.Status, d.Total, d.AmountPaid, d.Balance })
         .ToListAsync();
+    var invoices = all.Where(d => d.DocType == "INVOICE").ToList();
+    var openInvoices = invoices.Where(d => !IsClosedInvoiceDocumentStatus(d.Status)).ToList();
+    var paidInvoices = invoices.Where(d => d.Status != "Void").ToList();
 
     return Results.Ok(new
     {
         totalEstimates = all.Count(d => d.DocType == "ESTIMATE"),
-        totalInvoices = all.Count(d => d.DocType == "INVOICE"),
-        totalRevenue = all.Where(d => d.DocType == "INVOICE").Sum(d => d.Total),
-        paidRevenue = all.Where(d => d.DocType == "INVOICE" && d.Status == "Paid").Sum(d => d.Total),
-        unpaidBalance = all.Where(d => d.DocType == "INVOICE" && d.Status != "Paid" && d.Status != "Void").Sum(d => d.Balance),
+        totalInvoices = invoices.Count,
+        totalRevenue = paidInvoices.Sum(d => d.AmountPaid),
+        totalInvoiced = invoices.Where(d => d.Status != "Void").Sum(d => d.Total),
+        paidRevenue = paidInvoices.Sum(d => d.AmountPaid),
+        unpaidBalance = openInvoices.Sum(d => Math.Max(0, d.Balance)),
         draftCount = all.Count(d => d.Status == "Draft"),
         sentCount = all.Count(d => d.Status == "Sent"),
         paidCount = all.Count(d => d.Status == "Paid"),
@@ -637,7 +661,7 @@ app.MapGet("/api/app-info", (IWebHostEnvironment env, IConfiguration config) =>
     Results.Ok(new {
         environment = env.EnvironmentName,
         isTest = env.EnvironmentName.Equals("Test", StringComparison.OrdinalIgnoreCase),
-        dbPath = config.GetConnectionString("DefaultConnection")
+        dbPath = new SqliteConnectionStringBuilder(ResolveConnectionString(config, env.ContentRootPath)).DataSource
     }));
 
 app.MapGet("/invoice-builder/", () => Results.Redirect("/invoice-builder/index.html"));
@@ -661,6 +685,180 @@ if (openBrowser)
 }
 
 await app.RunAsync();
+
+static async Task<object> BuildTaxAuditAsync(AppDbContext db)
+{
+    var issues = new List<TaxAuditIssue>();
+    var sales = await db.Sales.AsNoTracking().Where(x => !x.IsArchived).ToListAsync();
+    var invoices = await db.ReceivableInvoices.AsNoTracking().Where(x => !x.IsArchived).ToListAsync();
+    var docs = await db.InvoiceDocuments.AsNoTracking().ToListAsync();
+    var expenses = await db.Expenses.AsNoTracking().Where(x => !x.IsArchived).ToListAsync();
+    var assets = await db.Assets.AsNoTracking().Where(x => !x.IsArchived).ToListAsync();
+    var rewards = await db.MakerWorldRewards.AsNoTracking().Where(x => !x.IsArchived).ToListAsync();
+
+    if (expenses.Count == 0)
+    {
+        issues.Add(new("High", "No expenses entered", "Expenses",
+            "Tax Prep cannot be complete until business purchases from receipts are entered and classified."));
+    }
+
+    foreach (var sale in sales.Where(MoneyRules.IsReportableSale))
+    {
+        var expectedPaid = MoneyRules.SaleGrossReceipts(sale) + MoneyRules.SaleSalesTaxMemo(sale);
+        var actualPaid = MoneyRules.SaleCustomerPaid(sale);
+        if (actualPaid > 0 && Math.Abs(expectedPaid - actualPaid) > 0.02m)
+        {
+            issues.Add(new("High", "Sale paid-total mismatch", sale.InvoiceNumber ?? sale.OrderNumber ?? $"Sale #{sale.Id}",
+                $"CustomerPaid {actualPaid:C} does not equal item + shipping - refunds + sales tax {expectedPaid:C}."));
+        }
+    }
+
+    foreach (var invoice in invoices)
+    {
+        var expectedTotal = (invoice.Subtotal ?? 0) - (invoice.Discount ?? 0) + (invoice.RushFee ?? 0) + (invoice.SalesTax ?? 0);
+        if ((invoice.InvoiceTotal ?? 0) > 0 && Math.Abs(expectedTotal - (invoice.InvoiceTotal ?? 0)) > 0.02m)
+        {
+            issues.Add(new("High", "AR invoice total mismatch", invoice.InvoiceNumber,
+                $"InvoiceTotal {(invoice.InvoiceTotal ?? 0):C} does not equal subtotal - discount + rush + tax {expectedTotal:C}."));
+        }
+
+        var sale = sales.FirstOrDefault(x =>
+            x.Platform.Equals("Direct", StringComparison.OrdinalIgnoreCase)
+            && x.InvoiceNumber == invoice.InvoiceNumber
+            && x.IncludeInDashboard
+            && (x.CustomerName.Equals(invoice.CustomerName, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(x.SourceProof, $"Unified invoice {invoice.InvoiceNumber}", StringComparison.OrdinalIgnoreCase)));
+        var paid = invoice.AmountPaid ?? 0;
+        if (paid <= 0 && sale is not null && MoneyRules.IsReportableSale(sale))
+        {
+            issues.Add(new("Critical", "Unpaid invoice has reportable sale", invoice.InvoiceNumber,
+                "This invoice shows no payment, but a matching Direct Sale is still included in dashboard/tax totals."));
+        }
+        else if (paid > 0 && sale is null && !invoice.Status.Equals("Void", StringComparison.OrdinalIgnoreCase))
+        {
+            issues.Add(new("High", "Paid invoice missing sale", invoice.InvoiceNumber,
+                "This invoice has AmountPaid, but no matching included Direct Sale was found."));
+        }
+    }
+
+    foreach (var group in sales.Where(x => x.Platform.Equals("Direct", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(x.InvoiceNumber))
+        .GroupBy(x => x.InvoiceNumber!)
+        .Where(g => g.Select(x => x.CustomerName).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1))
+    {
+        issues.Add(new("High", "Duplicate direct invoice number across customers", group.Key,
+            "Invoice numbers should be unique for direct sales/invoices. Duplicate numbers can cause income matching errors."));
+    }
+
+    foreach (var group in invoices.Where(x => !string.IsNullOrWhiteSpace(x.InvoiceNumber))
+        .GroupBy(x => x.InvoiceNumber)
+        .Where(g => g.Select(x => x.CustomerName).Distinct(StringComparer.OrdinalIgnoreCase).Count() > 1))
+    {
+        issues.Add(new("High", "Duplicate AR invoice number across customers", group.Key,
+            "AR invoice numbers should be unique. Use Original PDF Invoice # for duplicate/wrong source PDFs."));
+    }
+
+    foreach (var doc in docs.Where(x => x.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase)))
+    {
+        var expectedTotal = doc.Subtotal - doc.DiscountAmount + doc.RushAmount + doc.TaxAmount;
+        if (Math.Abs(expectedTotal - doc.Total) > 0.02m)
+        {
+            issues.Add(new("High", "Invoice document total mismatch", doc.DocNumber ?? $"Invoice document #{doc.Id}",
+                $"Total {doc.Total:C} does not equal subtotal - discount + rush + tax {expectedTotal:C}."));
+        }
+
+        var expectedBalance = Math.Max(0, doc.Total - doc.AmountPaid);
+        if (Math.Abs(expectedBalance - doc.Balance) > 0.02m)
+        {
+            issues.Add(new("Medium", "Invoice document balance mismatch", doc.DocNumber ?? $"Invoice document #{doc.Id}",
+                $"Balance {doc.Balance:C} does not equal total - amount paid {expectedBalance:C}."));
+        }
+    }
+
+    foreach (var estimate in docs.Where(x => x.DocType.Equals("ESTIMATE", StringComparison.OrdinalIgnoreCase) && x.AmountPaid > 0))
+    {
+        issues.Add(new("Medium", "Estimate has Amount Paid", estimate.DocNumber ?? $"Estimate #{estimate.Id}",
+            "Accepted estimates are not cash receipts. Create/save a paid invoice when money is actually received."));
+    }
+
+    foreach (var expense in expenses)
+    {
+        if (expense.NeedsReview || expense.DeductibleStatus.Equals("Review", StringComparison.OrdinalIgnoreCase) || expense.TaxBucket.Equals("Review", StringComparison.OrdinalIgnoreCase))
+        {
+            issues.Add(new("Medium", "Expense needs tax classification", expense.Description.Length > 0 ? expense.Description : $"Expense #{expense.Id}",
+                "This expense is not counted as a deductible expense until tax bucket and deductibility are set intentionally."));
+        }
+    }
+
+    foreach (var asset in assets)
+    {
+        if (asset.NeedsReview || asset.TaxTreatment.Equals("Review", StringComparison.OrdinalIgnoreCase) || asset.TaxTreatment.Equals("Depreciation", StringComparison.OrdinalIgnoreCase))
+        {
+            issues.Add(new("Medium", "Asset needs tax treatment review", asset.Name,
+                "Assets are only counted automatically when marked Section 179 or De Minimis Expense and Expensed This Year."));
+        }
+    }
+
+    foreach (var reward in rewards.Where(x => x.IncomeStatus.Equals("Review", StringComparison.OrdinalIgnoreCase)))
+    {
+        issues.Add(new("Medium", "MakerWorld reward income review", reward.SourceProof ?? $"Reward #{reward.Id}",
+            "Set Income Status before filing so redeemed rewards are not missed or double-counted."));
+    }
+
+    return new
+    {
+        summary = new
+        {
+            reportableGrossReceipts = sales.Where(MoneyRules.IsReportableSale).Sum(MoneyRules.SaleGrossReceipts),
+            customerPaidIncludingTaxMemo = sales.Where(MoneyRules.IsReportableSale).Sum(MoneyRules.SaleCustomerPaid),
+            salesTaxMemo = sales.Where(MoneyRules.IsReportableSale).Sum(MoneyRules.SaleSalesTaxMemo),
+            deductibleExpenses = expenses.Sum(MoneyRules.TaxCountedExpenseAmount),
+            expensedAssets = assets.Sum(MoneyRules.FullyExpensedAssetAmount),
+            makerWorldIncome = rewards.Sum(MoneyRules.MakerWorldIncomeAmount),
+            criticalIssues = issues.Count(x => x.Severity == "Critical"),
+            highIssues = issues.Count(x => x.Severity == "High"),
+            mediumIssues = issues.Count(x => x.Severity == "Medium")
+        },
+        issues
+    };
+}
+
+static string ResolveConnectionString(IConfiguration configuration, string contentRootPath)
+{
+    var configured = configuration.GetConnectionString("DefaultConnection") ?? "Data Source=Data/epata-business-ledger.db";
+    var builder = new SqliteConnectionStringBuilder(configured);
+    var dataSource = builder.DataSource;
+    if (string.IsNullOrWhiteSpace(dataSource) || Path.IsPathRooted(dataSource) || dataSource.Equals(":memory:", StringComparison.OrdinalIgnoreCase))
+    {
+        return builder.ConnectionString;
+    }
+
+    var rootCandidate = Path.GetFullPath(Path.Combine(contentRootPath, dataSource));
+    var parentCandidate = Path.GetFullPath(Path.Combine(contentRootPath, "..", dataSource));
+    if (Path.GetFileName(contentRootPath).Equals("publish-win-x64", StringComparison.OrdinalIgnoreCase)
+        && (File.Exists(parentCandidate) || Directory.Exists(Path.GetDirectoryName(parentCandidate))))
+    {
+        builder.DataSource = parentCandidate;
+    }
+    else
+    {
+        builder.DataSource = rootCandidate;
+    }
+
+    return builder.ConnectionString;
+}
+
+static string GetSqliteDataDirectory(IConfiguration configuration, string contentRootPath)
+{
+    var connectionString = ResolveConnectionString(configuration, contentRootPath);
+    var builder = new SqliteConnectionStringBuilder(connectionString);
+    var dataSource = builder.DataSource;
+    if (string.IsNullOrWhiteSpace(dataSource) || dataSource.Equals(":memory:", StringComparison.OrdinalIgnoreCase))
+    {
+        return Path.Combine(contentRootPath, "Data");
+    }
+
+    return Path.GetDirectoryName(Path.GetFullPath(dataSource)) ?? Path.Combine(contentRootPath, "Data");
+}
 
 static void MapCrud<TEntity>(WebApplication app, string route) where TEntity : AuditableEntity
 {
@@ -913,10 +1111,10 @@ static async Task UpsertSettingAsync(AppDbContext db, string key, string? value)
     }
 }
 
-static async Task<(byte[] Bytes, string FileName)> CreateDatabaseBackupAsync(AppDbContext db, IWebHostEnvironment env)
+static async Task<(byte[] Bytes, string FileName)> CreateDatabaseBackupAsync(AppDbContext db, IWebHostEnvironment env, IConfiguration configuration)
 {
     await db.Database.CloseConnectionAsync();
-    var dbPath = Path.Combine(env.ContentRootPath, "Data", "epata-business-ledger.db");
+    var dbPath = GetDatabasePath(configuration, env);
     if (!System.IO.File.Exists(dbPath))
     {
         return ([], "epata-business-ledger-missing.db");
@@ -928,10 +1126,10 @@ static async Task<(byte[] Bytes, string FileName)> CreateDatabaseBackupAsync(App
 
 static string GetDatabasePath(IConfiguration configuration, IWebHostEnvironment env)
 {
-    var connectionString = configuration.GetConnectionString("DefaultConnection") ?? "Data Source=Data/epata-business-ledger.db";
+    var connectionString = ResolveConnectionString(configuration, env.ContentRootPath);
     var builder = new SqliteConnectionStringBuilder(connectionString);
     var dataSource = builder.DataSource;
-    return Path.IsPathRooted(dataSource) ? dataSource : Path.Combine(env.ContentRootPath, dataSource);
+    return Path.IsPathRooted(dataSource) ? dataSource : Path.GetFullPath(Path.Combine(env.ContentRootPath, dataSource));
 }
 
 static string MakeSafeFileName(string fileName)
@@ -1006,6 +1204,16 @@ static string NormalizeInvoiceStatus(string status, decimal total, decimal paid)
     if (paid > 0) return "Partial";
     if (status.Equals("Draft", StringComparison.OrdinalIgnoreCase)) return "Draft";
     return "Sent";
+}
+
+static bool IsClosedInvoiceDocumentStatus(string? status)
+{
+    return status is null
+        || status.Equals("Draft", StringComparison.OrdinalIgnoreCase)
+        || status.Equals("Paid", StringComparison.OrdinalIgnoreCase)
+        || status.Equals("Void", StringComparison.OrdinalIgnoreCase)
+        || status.Equals("Cancelled", StringComparison.OrdinalIgnoreCase)
+        || status.Equals("Canceled", StringComparison.OrdinalIgnoreCase);
 }
 
 static async Task EnsureUnifiedInvoiceTablesAsync(AppDbContext db)
@@ -1313,43 +1521,58 @@ static async Task SyncUnifiedInvoiceDocumentToLedgerAsync(AppDbContext db, Invoi
         invoice.IncludeInCashReports = doc.AmountPaid > 0;
         invoice.NeedsReview = doc.AmountPaid < doc.Total && !invoice.Status.Equals("Void", StringComparison.OrdinalIgnoreCase);
 
-        await SyncPaidInvoiceToSaleAsync(db, doc);
+        await SyncInvoicePaymentToSaleAsync(db, doc);
     }
 
     await db.SaveChangesAsync();
 }
 
-static async Task SyncPaidInvoiceToSaleAsync(AppDbContext db, InvoiceDocument doc)
+static async Task SyncInvoicePaymentToSaleAsync(AppDbContext db, InvoiceDocument doc)
 {
+    var unifiedSource = $"Unified invoice {doc.DocNumber}";
+    var sale = await db.Sales.FirstOrDefaultAsync(x =>
+        x.InvoiceNumber == doc.DocNumber
+        && x.Platform == "Direct"
+        && (x.SourceProof == unifiedSource || x.CustomerName == doc.CustomerName));
+
     if (doc.AmountPaid <= 0 || doc.Status.Equals("Void", StringComparison.OrdinalIgnoreCase))
     {
+        if (sale is not null && string.Equals(sale.SourceProof, unifiedSource, StringComparison.OrdinalIgnoreCase))
+        {
+            sale.IncludeInDashboard = false;
+            sale.Status = "Draft";
+            sale.NeedsReview = false;
+            sale.Notes = "Automatically hidden because the unified invoice is unpaid or void.";
+        }
+
         return;
     }
 
-    var sale = await db.Sales.FirstOrDefaultAsync(x => x.InvoiceNumber == doc.DocNumber && x.Platform == "Direct");
     if (sale is null)
     {
         sale = new Sale
         {
             Platform = "Direct",
             InvoiceNumber = doc.DocNumber,
-            SourceProof = $"Unified invoice {doc.DocNumber}",
+            SourceProof = unifiedSource,
             IncludeInDashboard = true,
             Notes = "Created automatically from a paid unified invoice."
         };
         db.Sales.Add(sale);
     }
 
+    var allocated = MoneyRules.AllocateInvoicePayment(doc.Subtotal, doc.DiscountAmount, doc.RushAmount, doc.TaxAmount, doc.Total, doc.AmountPaid);
     sale.SaleDate = ParseDate(doc.DocDate) ?? sale.SaleDate ?? DateTime.Today;
     sale.CustomerName = doc.CustomerName ?? sale.CustomerName;
     sale.ProductName = doc.ProjectName ?? sale.ProductName;
     sale.Color = doc.Color ?? sale.Color;
     sale.Quantity = 1;
-    sale.ItemSales = doc.Subtotal;
+    sale.ItemSales = allocated.SalesBase;
     sale.ShippingCharged = 0;
-    sale.SalesTaxCollected = doc.TaxAmount;
+    sale.SalesTaxCollected = allocated.TaxMemo;
     sale.CustomerPaid = doc.AmountPaid;
-    sale.Status = doc.AmountPaid >= doc.Total ? "Paid" : "Paid";
+    sale.Status = doc.AmountPaid >= doc.Total ? "Paid" : "Partial";
+    sale.IncludeInDashboard = true;
     sale.NeedsReview = false;
 }
 
@@ -1485,3 +1708,5 @@ public sealed record InvoiceLineItemRequest(
     decimal Quantity,
     decimal Rate,
     decimal Amount);
+
+public sealed record TaxAuditIssue(string Severity, string Title, string Record, string Detail);

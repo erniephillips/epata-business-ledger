@@ -369,6 +369,7 @@ const navGroups = [
       ['actions',configs.actions.nav,'!'],
       ['taxPrep','Tax Prep','%'],
       ['importExport','Import / Export','⇄'],
+      ['admin','Admin / Data','⚙'],
       ['workflowGuide','Workflow','▶'],
       ['help','Help / Glossary','?']
     ]
@@ -498,6 +499,7 @@ async function showPage(page) {
     else if (page === 'documentIntake') renderDocumentIntake(el);
     else if (page === 'taxPrep') await renderTaxPrep(el);
     else if (page === 'importExport') renderImportExport(el);
+    else if (page === 'admin') await renderAdmin(el);
     else if (page === 'help') renderHelp(el);
     else await renderEntity(el, configs[page]);
   } catch (err) {
@@ -885,6 +887,7 @@ function renderQuickAdd(el) {
       ${quickCard('Open Invoice / AR','You sent a direct invoice and are waiting for payment.','receivables','invoice')}
       ${quickCard('Bill / AP','You owe a vendor and have not paid yet.','bills','bill')}
       ${quickCard('Paid Expense','You already bought supplies, labels, software, etc.','expenses','expense')}
+      ${quickCard('Equipment / Asset Purchase','A printer, AMS, durable tool, computer, or higher-value item that needs tax-treatment review.','assets','assetPurchase')}
     </div>
     <div class="grid two">
       <div class="card"><h3>Clean Books Rule</h3><p><b>Sales</b> are money coming in. <b>AR invoices</b> are money customers owe you. <b>AP bills</b> are money you owe. <b>Expenses</b> are things already paid. <b>Customer Jobs</b> track the work itself.</p></div>
@@ -984,7 +987,8 @@ function quickOpen(configKey, kind) {
     directPaid: { platform: 'Direct', status: 'Paid', saleDate: today, quantity: 1, includeInDashboard: true },
     invoice: { status: 'Sent', invoiceDate: today, includeInCashReports: false, needsReview: false },
     bill: { status: 'Unpaid', billDate: today, taxDeductible: true },
-    expense: { expenseDate: today, taxDeductible: true }
+    expense: { expenseDate: today, taxDeductible: true, taxBucket: 'Review', deductibleStatus: 'Review', countedExpense: true, businessUsePercent: 100, needsReview: true, notes: 'Classify as COGS/Materials, Operating Expense, Asset, or Memo Only before filing.' },
+    assetPurchase: { purchaseDate: today, inServiceDate: today, category: 'Equipment', businessUsePercent: 100, taxTreatment: 'Review', countedExpenseThisYear: false, needsReview: true, notes: 'Review with tax preparer before choosing Section 179, De Minimis Expense, or Depreciation.' }
   };
   openModal(config, presets[kind] || null, true);
 }
@@ -1490,14 +1494,16 @@ function collectPricingCalculator() {
   const material = grams * gramRate;
   const machine = hours * hourRate;
   const design = designHours * designRate;
-  const base = Math.max(minimum, (material + machine + design + setupFee + postFee) * Math.max(0, difficulty));
-  const rushAmount = base * rush / 100;
-  const subtotal = Math.max(0, base + rushAmount - discount);
-  const taxAmount = subtotal * taxRate / 100;
+  const baseSubtotal = material + machine + design + setupFee + postFee;
+  const difficultyFee = baseSubtotal * Math.max(0, difficulty - 1);
+  const afterDifficulty = baseSubtotal + difficultyFee;
+  const rushAmount = afterDifficulty * rush / 100;
+  const taxable = Math.max(minimum, afterDifficulty + rushAmount - discount);
+  const taxAmount = taxable * taxRate / 100;
   return {
     ...data,
     grams, hours, designHours, setupFee, postFee, gramRate, hourRate, designRate, minimum, difficulty, rush, discount, taxRate,
-    material, machine, design, base, rushAmount, subtotal, taxAmount, total: subtotal + taxAmount,
+    material, machine, design, base: afterDifficulty, difficultyFee, rushAmount, subtotal: taxable, taxAmount, total: taxable + taxAmount,
     description: data.calcDescription || 'Custom 3D print service',
     details: data.calcDetails || ''
   };
@@ -1890,23 +1896,30 @@ function invoicePrintCss() {
 }
 
 async function renderTaxPrep(el) {
-  const [dashboard, sales, expenses, bills, docs] = await Promise.all([
+  const [dashboard, sales, expenses, bills, docs, assets, rewards, audit] = await Promise.all([
     api('/api/dashboard'),
     api('/api/sales'),
     api('/api/expenses'),
     api('/api/bills'),
-    api('/api/audit-documents')
+    api('/api/audit-documents'),
+    api('/api/assets'),
+    api('/api/makerworld-rewards'),
+    api('/api/tax-audit')
   ]);
   const k = dashboard.kpis;
-  const deductibleExpenses = expenses.filter(x => x.taxDeductible !== false);
-  const nonDeductibleExpenses = expenses.filter(x => x.taxDeductible === false);
-  const deductibleTotal = sum(deductibleExpenses, x => x.total ?? x.amount);
+  const deductibleExpenses = expenses.filter(isTaxCountedExpense);
+  const nonDeductibleExpenses = expenses.filter(x => !isTaxCountedExpense(x));
+  const reviewExpenses = expenses.filter(x => equalsText(x.deductibleStatus, 'Review') || equalsText(x.taxBucket, 'Review') || x.needsReview);
+  const assetExpenses = expenses.filter(x => equalsText(x.taxBucket, 'Asset'));
+  const expensedAssets = assets.filter(isFullyExpensedAsset);
+  const makerWorldIncome = sum(rewards.filter(x => equalsText(x.incomeStatus, 'Yes - Count as income')), x => x.giftCardAmount);
+  const deductibleTotal = sum(deductibleExpenses, taxExpenseAmount) + sum(expensedAssets, taxAssetAmount);
   const openProofGaps = [
     ...sales.filter(x => x.needsReview || !x.sourceProof),
     ...expenses.filter(x => x.needsReview || !x.receiptProof),
     ...bills.filter(x => x.needsReview || !x.sourceProof)
   ];
-  const expenseGroups = groupMoney(deductibleExpenses, 'category', x => x.total ?? x.amount);
+  const expenseGroups = groupMoney(deductibleExpenses, 'category', taxExpenseAmount);
   const billGroups = groupMoney(bills.filter(x => x.taxDeductible !== false), 'category', x => x.total ?? x.amount);
   el.innerHTML = `
     <section class="workspace-hero">
@@ -1922,8 +1935,9 @@ async function renderTaxPrep(el) {
     </section>
     <section class="kpi-grid">
       ${kpi('Gross Receipts', k.grossReceipts, 'Gross receipts from included sales.', 'good')}
-      ${kpi('Deductible Expenses', deductibleTotal, 'Expenses marked tax deductible.', deductibleTotal > 0 ? 'warn' : '')}
+      ${kpi('Deductible Expenses', deductibleTotal, 'Counted expenses plus assets marked expensed this year, adjusted for business-use percent.', deductibleTotal > 0 ? 'warn' : '')}
       ${kpi('Sales Tax Memo', k.salesTaxMemo, 'Sales tax shown on orders/invoices. Marketplace tax may be handled by the marketplace.', 'warn')}
+      ${kpi('MakerWorld Income Review', makerWorldIncome, 'Rewards marked Yes - Count as income. Review before filing.', makerWorldIncome > 0 ? 'warn' : '', true)}
       ${kpi('Proof Gaps', openProofGaps.length, 'Rows missing proof or marked Needs Review.', openProofGaps.length ? 'bad' : 'good', false)}
     </section>
     <div class="grid two">
@@ -1942,7 +1956,10 @@ async function renderTaxPrep(el) {
         <div class="help-list">
           <div class="help-item"><strong>Needs Review</strong><p>${dashboard.kpis.needsReviewCount} rows are marked Needs Review. Clear these or document why they are estimates.</p></div>
           <div class="help-item"><strong>Missing Proof</strong><p>${openProofGaps.length} sales/expenses/bills are missing proof or need review.</p></div>
-          <div class="help-item"><strong>Non-Deductible</strong><p>${nonDeductibleExpenses.length} expenses are marked non-deductible. Keep them separate.</p></div>
+          <div class="help-item"><strong>Excluded / Non-Deductible</strong><p>${nonDeductibleExpenses.length} expenses are excluded because they are non-deductible, memo-only, assets, unchecked, or review-only.</p></div>
+          <div class="help-item"><strong>Expense Review</strong><p>${reviewExpenses.length} expenses need category or deductibility review before filing.</p></div>
+          <div class="help-item"><strong>Asset Review</strong><p>${assetExpenses.length} expenses are marked Asset, and ${assets.filter(x => x.needsReview || equalsText(x.taxTreatment, 'Review') || equalsText(x.taxTreatment, 'Depreciation')).length} asset rows need tax-treatment or depreciation review.</p></div>
+          <div class="help-item"><strong>Total Filing Prep Income</strong><p>${formatMoney(Number(k.grossReceipts || 0) + makerWorldIncome)} combines gross receipts and MakerWorld rewards marked as income. Sales-tax memo stays separate.</p></div>
           <div class="help-item"><strong>Uploaded Proof</strong><p>${docs.length} audit documents are indexed.</p></div>
         </div>
       </div>
@@ -1958,6 +1975,11 @@ async function renderTaxPrep(el) {
       </div>
     </div>
     <div class="card">
+      <div class="card-header-lite"><h3>Calculation Audit</h3><span class="badge ${audit.summary.criticalIssues || audit.summary.highIssues ? 'bad' : audit.summary.mediumIssues ? 'warn' : 'good'}">${audit.issues.length} findings</span></div>
+      <p>This checks for mismatched totals, paid invoices without sales, unpaid invoices with sales, tax-classification gaps, and asset/reward review items.</p>
+      ${audit.issues.length ? smallTable(audit.issues.slice(0, 12), ['severity','title','record','detail']) : emptyState('No calculation audit findings.', 'The current entered records pass the built-in consistency checks.')}
+    </div>
+    <div class="card">
       <div class="card-header-lite"><h3>Sales Tax Memo</h3><span class="badge warn">${formatMoney(k.salesTaxMemo)}</span></div>
       <p>Use this as a memo/checking number, not as automatic tax filing advice. Etsy and other marketplaces may collect/remit marketplace sales tax. Direct invoices may be different. Verify with your accountant or tax software.</p>
       ${smallTable(dashboard.monthly, ['month','grossReceipts','salesTaxMemo','estimatedCosts','estimatedNet','orders'])}
@@ -1966,6 +1988,31 @@ async function renderTaxPrep(el) {
 
 function sum(rows, pick) {
   return rows.reduce((total, row) => total + Number(pick(row) || 0), 0);
+}
+
+function equalsText(value, expected) {
+  return String(value || '').trim().toLowerCase() === String(expected || '').trim().toLowerCase();
+}
+
+function isTaxCountedExpense(x) {
+  if (x.countedExpense === false || x.taxDeductible === false) return false;
+  if (!equalsText(x.deductibleStatus, 'Yes')) return false;
+  return equalsText(x.taxBucket, 'Operating Expense') || equalsText(x.taxBucket, 'COGS/Materials');
+}
+
+function taxExpenseAmount(x) {
+  const businessUse = Math.min(100, Math.max(0, Number(x.businessUsePercent ?? 100))) / 100;
+  return Number(x.total ?? x.amount ?? 0) * businessUse;
+}
+
+function taxAssetAmount(x) {
+  const businessUse = Math.min(100, Math.max(0, Number(x.businessUsePercent ?? 100))) / 100;
+  return Number(x.cost ?? 0) * businessUse;
+}
+
+function isFullyExpensedAsset(x) {
+  if (x.countedExpenseThisYear !== true) return false;
+  return equalsText(x.taxTreatment, 'Section 179') || equalsText(x.taxTreatment, 'De Minimis Expense');
 }
 function groupMoney(rows, key, pick) {
   const map = new Map();
@@ -2066,6 +2113,61 @@ function renderImportExport(el) {
   qs('#tryImportBtn').onclick = tryInvoiceImport;
 }
 
+async function renderAdmin(el) {
+  let info = null;
+  try {
+    info = await api('/api/app-info');
+  } catch {
+    info = null;
+  }
+  const dbPath = String(info?.dbPath || 'Unknown');
+  const isOneDrive = dbPath.toLowerCase().includes('onedrive');
+  const dbStatus = info ? (isOneDrive ? 'OneDrive path' : 'Local path') : 'Path unavailable';
+  el.innerHTML = `
+    <section class="workspace-hero">
+      <div>
+        <span class="eyebrow">Admin / Data Safety</span>
+        <h2>Control the parts that affect trust.</h2>
+        <p>Use this page to see the active database, back it up, and decide what should become editable instead of hard-coded.</p>
+      </div>
+      <div class="hero-actions">
+        <button class="primary-button" onclick="backupDb()">Backup DB Now</button>
+        <button class="ghost-button dark" onclick="showPage('importExport')">Open Exports</button>
+      </div>
+    </section>
+
+    <div class="grid two">
+      <div class="card">
+        <div class="card-header-lite"><h3>Active Database</h3><span class="badge ${!info || isOneDrive ? 'warn' : 'good'}">${dbStatus}</span></div>
+        <p><code>${escapeHtml(dbPath)}</code></p>
+        <div class="help-list">
+          <div class="help-item"><strong>Single database</strong><p>The ledger, estimates, invoices, jobs, products, proof, actions, and tax prep all use this SQLite database.</p></div>
+          <div class="help-item"><strong>OneDrive caution</strong><p>An active SQLite file inside OneDrive can hit sync locks or conflict copies while the app is writing. The safer pattern is local active DB plus automatic backups copied to OneDrive.</p></div>
+          <div class="help-item"><strong>Current safety move</strong><p>Use Backup DB before big edits. Close the app before manually copying or replacing the database.</p></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header-lite"><h3>Good Admin Settings To Add</h3><span class="badge">Roadmap</span></div>
+        <div class="help-list">
+          <div class="help-item"><strong>Data location</strong><p>Choose active DB folder and backup folder from the app.</p></div>
+          <div class="help-item"><strong>Tax buckets</strong><p>Edit expense categories, tax buckets, deductibility defaults, business-use defaults, and review rules.</p></div>
+          <div class="help-item"><strong>Products/pricing</strong><p>Manage default products, materials, machine rates, packaging rates, and invoice dropdown options.</p></div>
+          <div class="help-item"><strong>Document rules</strong><p>Map receipt filenames/vendors to Expense, Asset, Audit Doc, or Review automatically.</p></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header-lite"><h3>Careful Delete Policy</h3><span class="badge warn">Designed for audit history</span></div>
+      <p>Delete should be available for drafts, accidental duplicates, and uploaded proof that is genuinely wrong. For tax/audit records, archive is safer than permanent removal because you can explain what changed later.</p>
+      <div class="actions">
+        <button class="ghost-button" onclick="showPage('actions')">Review Actions</button>
+        <button class="ghost-button" onclick="showPage('auditDocs')">Review Audit Docs</button>
+        <button class="ghost-button" onclick="showPage('products')">Review Products</button>
+      </div>
+    </div>`;
+}
+
 async function tryInvoiceImport() {
   const out = qs('#importResult');
   out.style.display = 'block';
@@ -2164,7 +2266,6 @@ function renderHelp(el) {
       <div class="card">
         <h3>When Do I Enter More Than One Record?</h3>
         <div class="help-list">
-          <div class="help-item"><strong>Etsy order</strong><p>Usually one Sale record plus attached proof. Do not create AR because Etsy is not an unpaid direct invoice.</p></div>
           <div class="help-item"><strong>Etsy order</strong><p>Usually one Sale record plus attached proof. Do not create AR because Etsy is not an unpaid direct invoice.</p></div>
           <div class="help-item"><strong>Direct custom job</strong><p>Job first if you need to track the work. AR Invoice when you send the invoice. Sale when money is received.</p></div>
           <div class="help-item"><strong>Receipt for filament you already bought</strong><p>One Expense record plus attached receipt. No AP Bill because you do not owe anything.</p></div>
