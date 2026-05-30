@@ -2,7 +2,8 @@ const appState = {
   currentPage: 'dashboard',
   modal: { config: null, row: null, mode: 'create' },
   globalSearchTimer: null,
-  invoicePdfModule: null
+  invoicePdfModule: null,
+  invoiceToolSnapshot: null
 };
 
 const moneyFields = new Set(['itemSales','shippingCharged','salesTaxCollected','customerPaid','platformFees','shippingLabelCost','refunds','estimatedCogs','subtotal','discount','rushFee','salesTax','invoiceTotal','amountPaid','balanceDue','amount','total','openingBalance','currentBalance','cost','giftCardAmount','quoteAmount','invoiceAmount','targetPrice','grams','materialCostPerGram','printHours','machineRatePerHour','packagingCost','designMinutes','rewardValue','pointsValue','notYetExpensed','netBeforeCogs','estNetAfterCogs']);
@@ -480,8 +481,16 @@ function renderNav() {
 }
 
 async function showPage(page) {
+  const invoicePages = ['invoiceCenter','estimates','invoices','pricingCalculator','invoiceRecords'];
+  const movingWithinInvoiceTool = invoicePages.includes(appState.currentPage) && invoicePages.includes(page);
+  if (movingWithinInvoiceTool && window._invoiceToolSnapshot) {
+    appState.invoiceToolSnapshot = window._invoiceToolSnapshot() || appState.invoiceToolSnapshot;
+  } else if (!invoicePages.includes(page)) {
+    appState.invoiceToolSnapshot = null;
+  }
+
   appState.currentPage = page;
-  toggleMergedInvoiceStyles(['invoiceCenter','estimates','invoices','pricingCalculator','invoiceRecords'].includes(page));
+  toggleMergedInvoiceStyles(invoicePages.includes(page));
   if (page !== 'globalSearch') qs('#globalSearch').value = '';
   qsa('.nav-button').forEach(b => b.classList.toggle('active', b.dataset.page === page));
   const el = qs('#app');
@@ -490,11 +499,11 @@ async function showPage(page) {
     if (page === 'dashboard') await renderDashboard(el);
     else if (page === 'globalSearch') await renderGlobalSearch(el);
     else if (page === 'quickAdd') renderQuickAdd(el);
-    else if (page === 'invoiceCenter') await renderMergedInvoiceTool(el, 'dashboard');
-    else if (page === 'estimates') await renderMergedInvoiceTool(el, 'builder', 'ESTIMATE');
-    else if (page === 'invoices') await renderMergedInvoiceTool(el, 'builder', 'INVOICE');
-    else if (page === 'pricingCalculator') await renderMergedInvoiceTool(el, 'calculator');
-    else if (page === 'invoiceRecords') await renderMergedInvoiceTool(el, 'records');
+    else if (page === 'invoiceCenter') await renderMergedInvoiceTool(el, 'dashboard', '', appState.invoiceToolSnapshot);
+    else if (page === 'estimates') await renderMergedInvoiceTool(el, 'builder', 'ESTIMATE', appState.invoiceToolSnapshot);
+    else if (page === 'invoices') await renderMergedInvoiceTool(el, 'builder', 'INVOICE', appState.invoiceToolSnapshot);
+    else if (page === 'pricingCalculator') await renderMergedInvoiceTool(el, 'calculator', '', appState.invoiceToolSnapshot);
+    else if (page === 'invoiceRecords') await renderMergedInvoiceTool(el, 'records', '', appState.invoiceToolSnapshot);
     else if (page === 'workflowGuide') renderWorkflowGuide(el);
     else if (page === 'documentIntake') renderDocumentIntake(el);
     else if (page === 'taxPrep') await renderTaxPrep(el);
@@ -1234,7 +1243,7 @@ function resultCard({ key, config, row }) {
   </button>`;
 }
 
-async function renderMergedInvoiceTool(el, initialView = 'dashboard', newType = '') {
+async function renderMergedInvoiceTool(el, initialView = 'dashboard', newType = '', restoreSnapshot = null) {
   ensureMergedInvoiceStyles();
   const html = await fetch('/invoice-builder/index.html').then(r => {
     if (!r.ok) throw new Error(`Invoice builder shell failed to load: ${r.status}`);
@@ -1280,9 +1289,9 @@ async function renderMergedInvoiceTool(el, initialView = 'dashboard', newType = 
     });
   });
 
-  const module = await import('/invoice-builder/js/app.js?v=2');
-  await module.init(initialView);
-  if (newType) {
+  const module = await import('/invoice-builder/js/app.js?v=3');
+  await module.init({ initialView, restoreSnapshot });
+  if (newType && !restoreSnapshot) {
     const buttonId = newType === 'INVOICE' ? 'btnNewInvoice' : 'btnNewEstimate';
     setTimeout(() => qs(`#${buttonId}`)?.click(), 50);
   }

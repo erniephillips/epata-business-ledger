@@ -29,6 +29,9 @@ const AUTOSAVE_MS   = 30_000;
 
 // ── Init ──────────────────────────────────────────────
 export async function init(initialView = 'dashboard') {
+  const options = typeof initialView === 'object' && initialView !== null ? initialView : {};
+  if (typeof initialView === 'object' && initialView !== null) initialView = options.initialView || 'dashboard';
+
   // Expose global handlers for inline onclick attributes
   window._builderUpdate  = () => { updateTotals(); refreshInvoicePreview(); scheduleAutoSave(); };
   window._removeLineItem = removeLineItem;
@@ -36,6 +39,7 @@ export async function init(initialView = 'dashboard') {
   window._dupeRecord     = (id) => onDuplicateRecord(id);
   window._delRecord      = (id) => onDeleteRecord(id);
   window._copyText       = copyText;
+  window._invoiceToolSnapshot = createDocumentSnapshot;
 
   // Override the shim — expose addLineItem globally for onclick handlers
   window.addLineItem     = addLineItem;
@@ -130,9 +134,15 @@ export async function init(initialView = 'dashboard') {
       console.error(err);
     }
 
-    const num = await api.nextNumber('ESTIMATE').then(r => r.number).catch(() => '');
-    startCleanDocument('ESTIMATE', num);
-    setDbStatus('Ready — new estimate', 'ready');
+    if (options.restoreSnapshot) {
+      restoreDocumentSnapshot(options.restoreSnapshot);
+      setDbStatus(`Ready — ${activeRecordId ? 'editing' : 'draft'} ${textVal('docNumber') || 'document'}`, 'ready');
+    } else {
+      const num = await api.nextNumber('ESTIMATE').then(r => r.number).catch(() => '');
+      activeRecordId = null;
+      startCleanDocument('ESTIMATE', num);
+      setDbStatus('Ready — new estimate', 'ready');
+    }
 
     // Refresh dashboard stats
     await loadDashboardStats().catch(err => console.error('Dashboard stats error', err));
@@ -262,6 +272,67 @@ function startCleanDocument(type = 'ESTIMATE', number = '') {
   cancelPendingAutoSave();
   newDocument(type, number);
   restoreCalcState(defaultCalcState());
+}
+
+function createDocumentSnapshot() {
+  if (!document.getElementById('main') || !el('docType')) return null;
+  try {
+    return {
+      activeRecordId,
+      formData: getFormData(),
+      calcState: getCalcState(),
+      legacy: captureState(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function restoreDocumentSnapshot(snapshot) {
+  if (!snapshot) return false;
+  cancelPendingAutoSave();
+  const doc = snapshot.formData || {};
+  restoreState({
+    formValues: {
+      docType: doc.docType,
+      docStatus: doc.status,
+      docNumber: doc.docNumber,
+      docDate: doc.docDate,
+      dueDate: doc.dueDate,
+      preparedFor: doc.preparedFor,
+      customerName: doc.customerName,
+      customerPhone: doc.customerPhone,
+      customerAddress: doc.customerAddress,
+      customerEmail: doc.customerEmail,
+      projectName: doc.projectName,
+      material: doc.material,
+      color: doc.color,
+      infill: doc.infill,
+      projectDescription: doc.projectDescription,
+      projectNotes: doc.projectNotes,
+      pageSize: doc.pageSize,
+      docDiscount: doc.discountAmount ?? 0,
+      docRushPercent: doc.subtotal ? Math.round(((doc.rushAmount || 0) / doc.subtotal) * 100) : 0,
+      docTaxRate: doc.calcTaxRate ?? 0,
+      amountPaid: doc.amountPaid ?? 0,
+      pricingGuide: doc.pricingGuide,
+      termsNotes: doc.termsNotes,
+      standardTurnaround: doc.standardTurnaround,
+      rushTurnaround: doc.rushTurnaround,
+    },
+    lineItems: (doc.lineItems || []).map(li => ({
+      desc: li.description,
+      details: li.details,
+      qty: li.quantity,
+      rate: li.rate,
+    })),
+  });
+  restoreCalcState(snapshot.calcState || {});
+  syncDifficultyButtons();
+  activeRecordId = snapshot.activeRecordId || null;
+  updateActiveBar();
+  refreshInvoicePreview();
+  return true;
 }
 
 async function saveRecord(forceNew = false) {

@@ -10,6 +10,7 @@ $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $dbPath = Join-Path $root 'Data\full-acceptance.db'
 $base = "http://127.0.0.1:$Port"
 $project = Join-Path $root 'EPATA.BusinessLedger.csproj'
+$builtDll = Join-Path $root 'bin\Release\net10.0\EPATA.BusinessLedger.dll'
 $uploadProbe = Join-Path $root 'Data\acceptance-upload-proof.txt'
 $serverJob = $null
 
@@ -187,10 +188,14 @@ try {
 
     Write-Step "Starting app on $base"
     $serverJob = Start-Job -ScriptBlock {
-        param($root, $project, $port, $dbPath)
+        param($root, $project, $builtDll, $port, $dbPath)
         Set-Location $root
-        dotnet run --no-build -c Release --no-launch-profile --project $project -- "App:Url=http://127.0.0.1:$port" "ConnectionStrings:DefaultConnection=Data Source=$dbPath" "App:OpenBrowserOnStart=false"
-    } -ArgumentList $root, $project, $Port, $dbPath
+        if (Test-Path -LiteralPath $builtDll) {
+            dotnet $builtDll "App:Url=http://127.0.0.1:$port" "ConnectionStrings:DefaultConnection=Data Source=$dbPath" "App:OpenBrowserOnStart=false"
+        } else {
+            dotnet run --no-build -c Release --no-launch-profile --project $project -- "App:Url=http://127.0.0.1:$port" "ConnectionStrings:DefaultConnection=Data Source=$dbPath" "App:OpenBrowserOnStart=false"
+        }
+    } -ArgumentList $root, $project, $builtDll, $Port, $dbPath
 
     $ready = $false
     for ($i = 0; $i -lt 45; $i++) {
