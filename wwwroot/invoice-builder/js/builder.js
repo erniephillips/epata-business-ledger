@@ -126,10 +126,11 @@ export function updateTotals() {
   const closedStatus = textVal('docStatus');
   const isInvoice = textVal('docType') === 'INVOICE';
   const isPaid   = isInvoice && closedStatus === 'Paid';
-  const paid     = isPaid ? total : val('amountPaid');
+  const paid     = isInvoice ? (isPaid ? total : val('amountPaid')) : 0;
   const balance  = isInvoice ? Math.max(0, total - paid) : 0;
 
   if (isPaid) setVal('amountPaid', total.toFixed(2));
+  else if (!isInvoice) setVal('amountPaid', '0');
 
   setText('bSubtotal',  money(subtotal));
   setText('bDiscount',  '-' + money(discount));

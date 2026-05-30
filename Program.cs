@@ -40,6 +40,7 @@ using (var scope = app.Services.CreateScope())
     await DbSeeder.SeedPatchAsync(db);
     await SeedUnifiedInvoiceDocumentsFromLedgerAsync(db);
     await NormalizeInvoiceDocumentRowsAsync(db);
+    await ReconcileUnifiedDocumentsToLedgerAsync(db);
     await NormalizeLedgerMoneyRowsAsync(db);
     await RepairInvoiceProofCustomerMismatchesAsync(db);
     await RepairDirectPaidSalesMissingArAsync(db);
@@ -796,8 +797,18 @@ static async Task<object> BuildTaxAuditAsync(AppDbContext db)
             "This Customer Job says it came from the unified estimate builder, but the source document no longer exists."));
     }
 
-    foreach (var doc in docs.Where(x => x.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase)))
+    var docLineItems = await db.InvoiceDocuments.AsNoTracking()
+        .Include(d => d.LineItems)
+        .ToListAsync();
+    foreach (var doc in docLineItems)
     {
+        var lineSubtotal = doc.LineItems.Sum(x => Math.Max(0, x.Quantity) * Math.Max(0, x.Rate));
+        if (doc.LineItems.Count > 0 && Math.Abs(lineSubtotal - doc.Subtotal) > 0.02m)
+        {
+            issues.Add(new("High", "Document subtotal does not match line items", doc.DocNumber ?? $"Document #{doc.Id}",
+                $"Subtotal {doc.Subtotal:C} does not equal line item total {lineSubtotal:C}."));
+        }
+
         var expectedTotal = doc.Subtotal - doc.DiscountAmount + doc.RushAmount + doc.TaxAmount;
         if (Math.Abs(expectedTotal - doc.Total) > 0.02m)
         {
@@ -806,7 +817,7 @@ static async Task<object> BuildTaxAuditAsync(AppDbContext db)
         }
 
         var expectedBalance = Math.Max(0, doc.Total - doc.AmountPaid);
-        if (Math.Abs(expectedBalance - doc.Balance) > 0.02m)
+        if (doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase) && Math.Abs(expectedBalance - doc.Balance) > 0.02m)
         {
             issues.Add(new("Medium", "Invoice document balance mismatch", doc.DocNumber ?? $"Invoice document #{doc.Id}",
                 $"Balance {doc.Balance:C} does not equal total - amount paid {expectedBalance:C}."));
@@ -1511,6 +1522,39 @@ static async Task SeedUnifiedInvoiceDocumentsFromLedgerAsync(AppDbContext db)
 static async Task NormalizeInvoiceDocumentRowsAsync(AppDbContext db)
 {
     var changed = false;
+    var allDocs = await db.InvoiceDocuments.Include(d => d.LineItems).ToListAsync();
+    foreach (var doc in allDocs)
+    {
+        var subtotal = doc.LineItems.Count > 0 ? doc.LineItems.Sum(x => Math.Max(0, x.Quantity) * Math.Max(0, x.Rate)) : doc.Subtotal;
+        var discount = Math.Max(0, doc.DiscountAmount);
+        var rush = Math.Max(0, doc.RushAmount);
+        var taxRate = Math.Clamp(doc.CalcTaxRate, 0, 30);
+        var taxable = MoneyRules.InvoiceTaxableSalesBase(subtotal, discount, rush);
+        var tax = taxRate > 0 ? taxable * taxRate / 100m : Math.Max(0, doc.TaxAmount);
+        var total = taxable + tax;
+        var paid = doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase) ? Math.Min(Math.Max(0, doc.AmountPaid), total) : 0;
+        var balance = doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase) ? Math.Max(0, total - paid) : 0;
+
+        if (Math.Abs(doc.Subtotal - subtotal) > 0.02m
+            || Math.Abs(doc.DiscountAmount - discount) > 0.02m
+            || Math.Abs(doc.RushAmount - rush) > 0.02m
+            || Math.Abs(doc.TaxAmount - tax) > 0.02m
+            || Math.Abs(doc.Total - total) > 0.02m
+            || Math.Abs(doc.AmountPaid - paid) > 0.02m
+            || Math.Abs(doc.Balance - balance) > 0.02m)
+        {
+            doc.Subtotal = subtotal;
+            doc.DiscountAmount = discount;
+            doc.RushAmount = rush;
+            doc.TaxAmount = tax;
+            doc.Total = total;
+            doc.AmountPaid = paid;
+            doc.Balance = balance;
+            doc.UpdatedAt = DateTimeOffset.UtcNow.ToString("O");
+            changed = true;
+        }
+    }
+
     var estimatesWithPayment = await db.InvoiceDocuments
         .Where(d => d.DocType == "ESTIMATE" && (d.AmountPaid != 0 || d.Balance != 0 || d.Status == "Paid"))
         .ToListAsync();
@@ -1571,8 +1615,8 @@ static async Task NormalizeLedgerMoneyRowsAsync(AppDbContext db)
         var expectedTotal = (bill.Amount ?? 0) + (bill.SalesTax ?? 0);
         if (Math.Abs(expectedTotal - (bill.Total ?? 0)) > 0.02m)
         {
-            bill.NeedsReview = true;
-            bill.Notes = AppendNote(bill.Notes, $"Review total: amount + sales tax equals {expectedTotal:C}, but Total is {(bill.Total ?? 0):C}.");
+            bill.Notes = AppendNote(bill.Notes, $"Startup corrected Total from {(bill.Total ?? 0):C} to {expectedTotal:C} because amount + sales tax is the canonical bill total.");
+            bill.Total = expectedTotal;
             bill.UpdatedAtUtc = DateTime.UtcNow;
             changed = true;
         }
@@ -1586,8 +1630,8 @@ static async Task NormalizeLedgerMoneyRowsAsync(AppDbContext db)
         var expectedTotal = (expense.Amount ?? 0) + (expense.SalesTax ?? 0);
         if (Math.Abs(expectedTotal - (expense.Total ?? 0)) > 0.02m)
         {
-            expense.NeedsReview = true;
-            expense.Notes = AppendNote(expense.Notes, $"Review total: amount + sales tax equals {expectedTotal:C}, but Total is {(expense.Total ?? 0):C}.");
+            expense.Notes = AppendNote(expense.Notes, $"Startup corrected Total from {(expense.Total ?? 0):C} to {expectedTotal:C} because amount + sales tax is the canonical expense total.");
+            expense.Total = expectedTotal;
             expense.UpdatedAtUtc = DateTime.UtcNow;
             changed = true;
         }
@@ -1607,6 +1651,19 @@ static async Task NormalizeLedgerMoneyRowsAsync(AppDbContext db)
     if (changed)
     {
         await db.SaveChangesAsync();
+    }
+}
+
+static async Task ReconcileUnifiedDocumentsToLedgerAsync(AppDbContext db)
+{
+    var docs = await db.InvoiceDocuments
+        .Include(d => d.LineItems)
+        .Where(d => d.DocNumber != null && d.DocNumber != "")
+        .ToListAsync();
+
+    foreach (var doc in docs)
+    {
+        await SyncUnifiedInvoiceDocumentToLedgerAsync(db, doc);
     }
 }
 
@@ -1798,22 +1855,6 @@ static void ApplyInvoiceDocumentRequest(InvoiceDocument doc, SaveInvoiceDocument
     doc.PageSize = request.PageSize;
     doc.DocDate = request.DocDate;
     doc.DueDate = request.DueDate;
-    doc.Subtotal = request.Subtotal;
-    doc.DiscountAmount = request.DiscountAmount;
-    doc.RushAmount = request.RushAmount;
-    doc.TaxAmount = request.TaxAmount;
-    doc.Total = request.Total;
-    doc.AmountPaid = request.AmountPaid;
-    doc.Balance = request.Balance;
-    if (doc.DocType.Equals("ESTIMATE", StringComparison.OrdinalIgnoreCase))
-    {
-        doc.AmountPaid = 0;
-        doc.Balance = 0;
-        if (doc.Status.Equals("Paid", StringComparison.OrdinalIgnoreCase))
-        {
-            doc.Status = "Accepted";
-        }
-    }
     doc.PricingGuide = request.PricingGuide;
     doc.TermsNotes = request.TermsNotes;
     doc.StandardTurnaround = request.StandardTurnaround;
@@ -1841,11 +1882,50 @@ static void ApplyInvoiceDocumentRequest(InvoiceDocument doc, SaveInvoiceDocument
             SortOrder = line.SortOrder > 0 ? line.SortOrder : index + 1,
             Description = line.Description,
             Details = line.Details,
-            Quantity = line.Quantity,
-            Rate = line.Rate,
-            Amount = line.Amount
+            Quantity = Math.Max(0, line.Quantity),
+            Rate = Math.Max(0, line.Rate),
+            Amount = Math.Max(0, line.Quantity) * Math.Max(0, line.Rate)
         }));
     }
+
+    NormalizeInvoiceDocumentMoney(doc, request);
+}
+
+static void NormalizeInvoiceDocumentMoney(InvoiceDocument doc, SaveInvoiceDocumentRequest request)
+{
+    var lineSubtotal = doc.LineItems.Count > 0
+        ? doc.LineItems.Sum(x => x.Quantity * x.Rate)
+        : request.Subtotal;
+    var discount = Math.Max(0, request.DiscountAmount);
+    var rush = Math.Max(0, request.RushAmount);
+    var taxable = MoneyRules.InvoiceTaxableSalesBase(lineSubtotal, discount, rush);
+    var taxRate = Math.Clamp(request.CalcTaxRate, 0, 30);
+    var tax = taxRate > 0 ? taxable * taxRate / 100m : Math.Max(0, request.TaxAmount);
+    var total = taxable + tax;
+    var paid = Math.Max(0, request.AmountPaid);
+
+    if (doc.DocType.Equals("ESTIMATE", StringComparison.OrdinalIgnoreCase))
+    {
+        paid = 0;
+        if (doc.Status.Equals("Paid", StringComparison.OrdinalIgnoreCase))
+        {
+            doc.Status = "Accepted";
+        }
+    }
+    else if (doc.Status.Equals("Paid", StringComparison.OrdinalIgnoreCase) && paid <= 0 && total > 0)
+    {
+        paid = total;
+    }
+
+    doc.Subtotal = lineSubtotal;
+    doc.DiscountAmount = discount;
+    doc.RushAmount = rush;
+    doc.TaxAmount = tax;
+    doc.Total = total;
+    doc.AmountPaid = doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase) ? Math.Min(paid, total) : 0;
+    doc.Balance = doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase)
+        ? Math.Max(0, total - doc.AmountPaid)
+        : 0;
 }
 
 static async Task SyncUnifiedInvoiceDocumentToLedgerAsync(AppDbContext db, InvoiceDocument doc)

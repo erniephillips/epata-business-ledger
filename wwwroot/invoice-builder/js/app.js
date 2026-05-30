@@ -130,17 +130,9 @@ export async function init(initialView = 'dashboard') {
       console.error(err);
     }
 
-    // Load latest or start fresh
-    try {
-      const latest = await api.latest();
-      onDocumentLoaded(latest);
-      activeRecordId = latest.id;
-      setDbStatus(`Ready — loaded ${latest.docNumber || `#${latest.id}`}`, 'ready');
-    } catch {
-      const num = await api.nextNumber('ESTIMATE').then(r => r.number).catch(() => '');
-      newDocument('ESTIMATE', num);
-      setDbStatus('Ready — new document', 'ready');
-    }
+    const num = await api.nextNumber('ESTIMATE').then(r => r.number).catch(() => '');
+    startCleanDocument('ESTIMATE', num);
+    setDbStatus('Ready — new estimate', 'ready');
 
     // Refresh dashboard stats
     await loadDashboardStats().catch(err => console.error('Dashboard stats error', err));
@@ -204,6 +196,7 @@ async function loadDashboardStats() {
 
 // ── Document lifecycle ────────────────────────────────
 function onDocumentLoaded(doc) {
+  cancelPendingAutoSave();
   // Restore form fields
   restoreState({
     formValues: {
@@ -258,11 +251,17 @@ function onDocumentLoaded(doc) {
 
 async function startNew(type = 'ESTIMATE') {
   const num = apiReady ? await api.nextNumber(type).then(r => r.number).catch(() => '') : '';
-  newDocument(type, num);
+  startCleanDocument(type, num);
   activeRecordId = null;
   updateActiveBar();
   refreshInvoicePreview();
   showView('builder');
+}
+
+function startCleanDocument(type = 'ESTIMATE', number = '') {
+  cancelPendingAutoSave();
+  newDocument(type, number);
+  restoreCalcState(defaultCalcState());
 }
 
 async function saveRecord(forceNew = false) {
@@ -401,6 +400,24 @@ function applySelectedProduct() {
   refreshInvoicePreview();
 }
 
+function defaultCalcState() {
+  return {
+    grams: 0,
+    hours: 0,
+    designHours: 0,
+    setupFee: appConfig.calcSetupFee ?? 0,
+    postFee: appConfig.calcPostFee ?? 0,
+    gramRate: appConfig.calcGramRate ?? 0.05,
+    hourRate: appConfig.calcHourRate ?? 3,
+    designRate: appConfig.calcDesignRate ?? 25,
+    minimum: appConfig.calcMinimum ?? 15,
+    difficulty: 1,
+    rush: 0,
+    discount: 0,
+    taxRate: 0,
+  };
+}
+
 // ── Auto-save ─────────────────────────────────────────
 function scheduleAutoSave() {
   if (!activeRecordId || !apiReady) return;
@@ -410,6 +427,12 @@ function scheduleAutoSave() {
     try { await saveRecord(false); }
     catch { setAutoSaveStatus(''); }
   }, AUTOSAVE_MS);
+}
+
+function cancelPendingAutoSave() {
+  clearTimeout(autoSaveTimer);
+  autoSaveTimer = null;
+  setAutoSaveStatus('');
 }
 
 function setAutoSaveStatus(state) {
