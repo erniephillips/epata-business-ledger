@@ -1501,19 +1501,19 @@ function renderPricingCalculator(el) {
 function collectPricingCalculator() {
   const form = qs('#pricingCalcForm');
   const data = Object.fromEntries(new FormData(form).entries());
-  const grams = Number(data.calcGrams || 0);
-  const hours = Number(data.calcHours || 0);
-  const designHours = Number(data.calcDesignHours || 0);
-  const setupFee = Number(data.calcSetupFee || 0);
-  const postFee = Number(data.calcPostFee || 0);
-  const gramRate = Number(data.calcGramRate || 0.05);
-  const hourRate = Number(data.calcHourRate || 3);
-  const designRate = Number(data.calcDesignRate || 25);
-  const minimum = Number(data.calcMinimum || 15);
-  const difficulty = Number(data.calcDifficulty || 1);
-  const rush = Number(data.calcRush || 0);
-  const discount = Number(data.calcDiscount || 0);
-  const taxRate = Number(data.calcTaxRate || 0);
+  const grams = nonNegative(data.calcGrams);
+  const hours = nonNegative(data.calcHours);
+  const designHours = nonNegative(data.calcDesignHours);
+  const setupFee = nonNegative(data.calcSetupFee);
+  const postFee = nonNegative(data.calcPostFee);
+  const gramRate = nonNegative(data.calcGramRate, 0.05);
+  const hourRate = nonNegative(data.calcHourRate, 3);
+  const designRate = nonNegative(data.calcDesignRate, 25);
+  const minimum = nonNegative(data.calcMinimum, 15);
+  const difficulty = Math.max(1, nonNegative(data.calcDifficulty, 1));
+  const rush = nonNegative(data.calcRush);
+  const discount = nonNegative(data.calcDiscount);
+  const taxRate = Math.min(30, nonNegative(data.calcTaxRate));
   const material = grams * gramRate;
   const machine = hours * hourRate;
   const design = designHours * designRate;
@@ -1565,7 +1565,8 @@ async function createEstimateFromCalculator() {
   doc.taxAmount = calc.taxAmount;
   doc.subtotal = calc.base;
   doc.total = calc.total;
-  doc.balance = calc.total;
+  doc.amountPaid = 0;
+  doc.balance = 0;
   doc.lineItems = [{
     sortOrder: 1,
     description: calc.description,
@@ -1708,8 +1709,8 @@ function renderInvoiceLines() {
     <div class="invoice-line" data-line="${index}">
       <input data-line-field="description" placeholder="Description" value="${escapeHtml(line.description || '')}">
       <input data-line-field="details" placeholder="Details" value="${escapeHtml(line.details || '')}">
-      <input data-line-field="quantity" type="number" step="0.01" value="${Number(line.quantity || 1)}">
-      <input data-line-field="rate" type="number" step="0.01" value="${Number(line.rate || 0)}">
+      <input data-line-field="quantity" type="number" min="0" step="0.01" value="${Number(line.quantity ?? 1)}">
+      <input data-line-field="rate" type="number" min="0" step="0.01" value="${Number(line.rate ?? 0)}">
       <strong>${formatMoney(line.amount)}</strong>
       <button class="icon-button" type="button" data-remove-line="${index}" title="Remove line">×</button>
     </div>`).join('');
@@ -1727,8 +1728,8 @@ function handleInvoiceLineChange(event) {
   const field = event.target.dataset.lineField;
   const form = qs('#invoiceDocForm');
   const line = form._lineItems[index];
-  line[field] = ['quantity','rate'].includes(field) ? Number(event.target.value || 0) : event.target.value;
-  line.amount = Number(line.quantity || 0) * Number(line.rate || 0);
+  line[field] = ['quantity','rate'].includes(field) ? nonNegative(event.target.value) : event.target.value;
+  line.amount = nonNegative(line.quantity) * nonNegative(line.rate);
   renderInvoiceLines();
   updateInvoicePreview();
 }
@@ -1764,29 +1765,31 @@ function collectInvoiceDocument() {
     sortOrder: index + 1,
     description: line.description || '',
     details: line.details || '',
-    quantity: Number(line.quantity || 0),
-    rate: Number(line.rate || 0),
-    amount: Number(line.quantity || 0) * Number(line.rate || 0)
+    quantity: nonNegative(line.quantity),
+    rate: nonNegative(line.rate),
+    amount: nonNegative(line.quantity) * nonNegative(line.rate)
   }));
   const subtotal = lines.reduce((sum, line) => sum + line.amount, 0);
-  const discountAmount = Number(data.discountAmount || 0);
-  const rushAmount = Number(data.rushAmount || 0);
-  const calcTaxRate = Number(data.calcTaxRate || 0);
+  const discountAmount = nonNegative(data.discountAmount);
+  const rushAmount = nonNegative(data.rushAmount);
+  const calcTaxRate = Math.min(30, nonNegative(data.calcTaxRate));
   const taxable = Math.max(0, subtotal - discountAmount + rushAmount);
   const taxAmount = taxable * calcTaxRate / 100;
   const total = taxable + taxAmount;
   const isInvoice = data.docType === 'INVOICE';
-  const amountPaid = isInvoice ? Number(data.amountPaid || 0) : 0;
+  const status = isInvoice && data.status === 'Paid' ? 'Paid' : data.status;
+  const amountPaid = isInvoice ? Math.min(total, status === 'Paid' ? total : nonNegative(data.amountPaid)) : 0;
   return {
     ...data,
+    status: !isInvoice && data.status === 'Paid' ? 'Accepted' : status,
     subtotal, discountAmount, rushAmount, calcTaxRate, taxAmount, total, amountPaid,
     balance: isInvoice ? Math.max(0, total - amountPaid) : 0,
-    calcGrams: Number(data.calcGrams || 0), calcHours: Number(data.calcHours || 0),
-    calcDesignHours: Number(data.calcDesignHours || 0), calcSetupFee: Number(data.calcSetupFee || 0),
-    calcPostFee: Number(data.calcPostFee || 0), calcGramRate: Number(data.calcGramRate || 0.05),
-    calcHourRate: Number(data.calcHourRate || 3), calcDesignRate: Number(data.calcDesignRate || 25),
-    calcMinimum: Number(data.calcMinimum || 15), calcDifficulty: Number(data.calcDifficulty || 1),
-    calcRush: Number(data.calcRush || 0), calcDiscount: Number(data.calcDiscount || 0),
+    calcGrams: nonNegative(data.calcGrams), calcHours: nonNegative(data.calcHours),
+    calcDesignHours: nonNegative(data.calcDesignHours), calcSetupFee: nonNegative(data.calcSetupFee),
+    calcPostFee: nonNegative(data.calcPostFee), calcGramRate: nonNegative(data.calcGramRate, 0.05),
+    calcHourRate: nonNegative(data.calcHourRate, 3), calcDesignRate: nonNegative(data.calcDesignRate, 25),
+    calcMinimum: nonNegative(data.calcMinimum, 15), calcDifficulty: Math.max(1, nonNegative(data.calcDifficulty, 1)),
+    calcRush: nonNegative(data.calcRush), calcDiscount: nonNegative(data.calcDiscount),
     pricingGuide: '', termsNotes: data.docType === 'INVOICE' ? 'Payment due by the due date shown above.' : 'Estimate is valid for 14 days unless otherwise noted.',
     standardTurnaround: '', rushTurnaround: '', pageSize: 'Letter',
     lineItems: lines,
@@ -2008,6 +2011,11 @@ async function renderTaxPrep(el) {
       <p>Use this as a memo/checking number, not as automatic tax filing advice. Etsy and other marketplaces may collect/remit marketplace sales tax. Direct invoices may be different. Verify with your accountant or tax software.</p>
       ${smallTable(dashboard.monthly, ['month','grossReceipts','salesTaxMemo','estimatedCosts','estimatedNet','orders'])}
     </div>`;
+}
+
+function nonNegative(value, fallback = 0) {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.max(0, n) : fallback;
 }
 
 function sum(rows, pick) {

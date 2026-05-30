@@ -162,15 +162,15 @@ app.MapGet("/api/documents/stats", async (AppDbContext db) =>
         .ToListAsync();
     var invoices = all.Where(d => d.DocType == "INVOICE").ToList();
     var openInvoices = invoices.Where(d => !IsClosedInvoiceDocumentStatus(d.Status)).ToList();
-    var paidInvoices = invoices.Where(d => d.Status != "Void").ToList();
+    var activeInvoices = invoices.Where(d => !d.Status.Equals("Draft", StringComparison.OrdinalIgnoreCase) && !d.Status.Equals("Void", StringComparison.OrdinalIgnoreCase)).ToList();
 
     return Results.Ok(new
     {
         totalEstimates = all.Count(d => d.DocType == "ESTIMATE"),
         totalInvoices = invoices.Count,
-        totalRevenue = paidInvoices.Sum(d => d.AmountPaid),
-        totalInvoiced = invoices.Where(d => d.Status != "Void").Sum(d => d.Total),
-        paidRevenue = paidInvoices.Sum(d => d.AmountPaid),
+        totalRevenue = activeInvoices.Sum(d => d.AmountPaid),
+        totalInvoiced = activeInvoices.Sum(d => d.Total),
+        paidRevenue = activeInvoices.Sum(d => d.AmountPaid),
         unpaidBalance = openInvoices.Sum(d => Math.Max(0, d.Balance)),
         draftCount = all.Count(d => d.Status == "Draft"),
         sentCount = all.Count(d => d.Status == "Sent"),
@@ -245,15 +245,15 @@ app.MapGet("/api/invoice-documents/stats", async (AppDbContext db) =>
         .ToListAsync();
     var invoices = all.Where(d => d.DocType == "INVOICE").ToList();
     var openInvoices = invoices.Where(d => !IsClosedInvoiceDocumentStatus(d.Status)).ToList();
-    var paidInvoices = invoices.Where(d => d.Status != "Void").ToList();
+    var activeInvoices = invoices.Where(d => !d.Status.Equals("Draft", StringComparison.OrdinalIgnoreCase) && !d.Status.Equals("Void", StringComparison.OrdinalIgnoreCase)).ToList();
 
     return Results.Ok(new
     {
         totalEstimates = all.Count(d => d.DocType == "ESTIMATE"),
         totalInvoices = invoices.Count,
-        totalRevenue = paidInvoices.Sum(d => d.AmountPaid),
-        totalInvoiced = invoices.Where(d => d.Status != "Void").Sum(d => d.Total),
-        paidRevenue = paidInvoices.Sum(d => d.AmountPaid),
+        totalRevenue = activeInvoices.Sum(d => d.AmountPaid),
+        totalInvoiced = activeInvoices.Sum(d => d.Total),
+        paidRevenue = activeInvoices.Sum(d => d.AmountPaid),
         unpaidBalance = openInvoices.Sum(d => Math.Max(0, d.Balance)),
         draftCount = all.Count(d => d.Status == "Draft"),
         sentCount = all.Count(d => d.Status == "Sent"),
@@ -289,33 +289,14 @@ app.MapGet("/api/invoice-documents/{id:int}", async (AppDbContext db, int id) =>
 
 app.MapPost("/api/invoice-documents", async (AppDbContext db, SaveInvoiceDocumentRequest request) =>
 {
-    var now = DateTimeOffset.UtcNow.ToString("O");
-    var doc = new InvoiceDocument
-    {
-        CreatedAt = now,
-        UpdatedAt = now,
-        DocNumber = string.IsNullOrWhiteSpace(request.DocNumber) ? await NextInvoiceDocumentNumberAsync(db, request.DocType ?? "ESTIMATE") : request.DocNumber
-    };
-    ApplyInvoiceDocumentRequest(doc, request);
-    db.InvoiceDocuments.Add(doc);
-    await db.SaveChangesAsync();
-    await SyncUnifiedInvoiceDocumentToLedgerAsync(db, doc);
+    var doc = await CreateInvoiceDocumentAsync(db, request);
     return Results.Ok(ToInvoiceDocumentDto(doc));
 });
 
 app.MapPut("/api/invoice-documents/{id:int}", async (AppDbContext db, int id, SaveInvoiceDocumentRequest request) =>
 {
-    var doc = await db.InvoiceDocuments.Include(d => d.LineItems).FirstOrDefaultAsync(d => d.Id == id);
-    if (doc is null)
-    {
-        return Results.NotFound(new { message = $"Document {id} was not found." });
-    }
-
-    doc.UpdatedAt = DateTimeOffset.UtcNow.ToString("O");
-    ApplyInvoiceDocumentRequest(doc, request);
-    await db.SaveChangesAsync();
-    await SyncUnifiedInvoiceDocumentToLedgerAsync(db, doc);
-    return Results.Ok(ToInvoiceDocumentDto(doc));
+    var doc = await UpdateInvoiceDocumentAsync(db, id, request);
+    return doc is null ? Results.NotFound(new { message = $"Document {id} was not found." }) : Results.Ok(ToInvoiceDocumentDto(doc));
 });
 
 app.MapDelete("/api/invoice-documents/{id:int}", async (AppDbContext db, int id) =>
@@ -325,155 +306,35 @@ app.MapDelete("/api/invoice-documents/{id:int}", async (AppDbContext db, int id)
 
 app.MapPost("/api/invoice-documents/{id:int}/duplicate", async (AppDbContext db, int id) =>
 {
-    var source = await db.InvoiceDocuments.AsNoTracking()
-        .Include(d => d.LineItems.OrderBy(li => li.SortOrder))
-        .FirstOrDefaultAsync(d => d.Id == id);
-    if (source is null)
-    {
-        return Results.NotFound(new { message = $"Document {id} was not found." });
-    }
-
-    var now = DateTimeOffset.UtcNow.ToString("O");
-    var copy = new InvoiceDocument
-    {
-        DocNumber = await NextInvoiceDocumentNumberAsync(db, source.DocType),
-        DocType = source.DocType,
-        Status = "Draft",
-        CustomerName = source.CustomerName,
-        CustomerPhone = source.CustomerPhone,
-        CustomerAddress = source.CustomerAddress,
-        CustomerEmail = source.CustomerEmail,
-        PreparedFor = source.PreparedFor,
-        ProjectName = source.ProjectName,
-        Material = source.Material,
-        Color = source.Color,
-        Infill = source.Infill,
-        ProjectDescription = source.ProjectDescription,
-        ProjectNotes = source.ProjectNotes,
-        PageSize = source.PageSize,
-        DocDate = DateTime.Now.ToString("yyyy-MM-dd"),
-        DueDate = DateTime.Now.AddDays(source.DocType == "INVOICE" ? 7 : 14).ToString("yyyy-MM-dd"),
-        Subtotal = source.Subtotal,
-        DiscountAmount = source.DiscountAmount,
-        RushAmount = source.RushAmount,
-        TaxAmount = source.TaxAmount,
-        Total = source.Total,
-        AmountPaid = 0,
-        Balance = source.DocType == "INVOICE" ? source.Total : 0,
-        PricingGuide = source.PricingGuide,
-        TermsNotes = source.TermsNotes,
-        StandardTurnaround = source.StandardTurnaround,
-        RushTurnaround = source.RushTurnaround,
-        CalcGrams = source.CalcGrams,
-        CalcHours = source.CalcHours,
-        CalcDesignHours = source.CalcDesignHours,
-        CalcSetupFee = source.CalcSetupFee,
-        CalcPostFee = source.CalcPostFee,
-        CalcGramRate = source.CalcGramRate,
-        CalcHourRate = source.CalcHourRate,
-        CalcDesignRate = source.CalcDesignRate,
-        CalcMinimum = source.CalcMinimum,
-        CalcDifficulty = source.CalcDifficulty,
-        CalcRush = source.CalcRush,
-        CalcDiscount = source.CalcDiscount,
-        CalcTaxRate = source.CalcTaxRate,
-        Json = source.Json,
-        CreatedAt = now,
-        UpdatedAt = now,
-        LineItems = source.LineItems.Select(li => new InvoiceLineItem
-        {
-            SortOrder = li.SortOrder,
-            Description = li.Description,
-            Details = li.Details,
-            Quantity = li.Quantity,
-            Rate = li.Rate,
-            Amount = li.Amount
-        }).ToList()
-    };
-
-    db.InvoiceDocuments.Add(copy);
-    await db.SaveChangesAsync();
-    await SyncUnifiedInvoiceDocumentToLedgerAsync(db, copy);
-    return Results.Ok(ToInvoiceDocumentDto(copy));
+    var copy = await DuplicateInvoiceDocumentAsync(db, id, null);
+    return copy is null ? Results.NotFound(new { message = $"Document {id} was not found." }) : Results.Ok(ToInvoiceDocumentDto(copy));
 });
 
 app.MapPost("/api/invoice-documents/{id:int}/convert-to-invoice", async (AppDbContext db, int id) =>
 {
-    var source = await db.InvoiceDocuments.AsNoTracking()
-        .Include(d => d.LineItems.OrderBy(li => li.SortOrder))
-        .FirstOrDefaultAsync(d => d.Id == id);
-    if (source is null)
-    {
-        return Results.NotFound(new { message = $"Document {id} was not found." });
-    }
-
-    var now = DateTimeOffset.UtcNow.ToString("O");
-    var invoice = new InvoiceDocument
-    {
-        DocNumber = await NextInvoiceDocumentNumberAsync(db, "INVOICE"),
-        DocType = "INVOICE",
-        Status = "Draft",
-        CustomerName = source.CustomerName,
-        CustomerPhone = source.CustomerPhone,
-        CustomerAddress = source.CustomerAddress,
-        CustomerEmail = source.CustomerEmail,
-        PreparedFor = source.PreparedFor,
-        ProjectName = source.ProjectName,
-        Material = source.Material,
-        Color = source.Color,
-        Infill = source.Infill,
-        ProjectDescription = source.ProjectDescription,
-        ProjectNotes = $"Converted from estimate {source.DocNumber}. {source.ProjectNotes}".Trim(),
-        PageSize = source.PageSize,
-        DocDate = DateTime.Now.ToString("yyyy-MM-dd"),
-        DueDate = DateTime.Now.AddDays(7).ToString("yyyy-MM-dd"),
-        Subtotal = source.Subtotal,
-        DiscountAmount = source.DiscountAmount,
-        RushAmount = source.RushAmount,
-        TaxAmount = source.TaxAmount,
-        Total = source.Total,
-        AmountPaid = 0,
-        Balance = source.Total,
-        PricingGuide = source.PricingGuide,
-        TermsNotes = "Payment due by the due date shown above.",
-        StandardTurnaround = source.StandardTurnaround,
-        RushTurnaround = source.RushTurnaround,
-        CalcGrams = source.CalcGrams,
-        CalcHours = source.CalcHours,
-        CalcDesignHours = source.CalcDesignHours,
-        CalcSetupFee = source.CalcSetupFee,
-        CalcPostFee = source.CalcPostFee,
-        CalcGramRate = source.CalcGramRate,
-        CalcHourRate = source.CalcHourRate,
-        CalcDesignRate = source.CalcDesignRate,
-        CalcMinimum = source.CalcMinimum,
-        CalcDifficulty = source.CalcDifficulty,
-        CalcRush = source.CalcRush,
-        CalcDiscount = source.CalcDiscount,
-        CalcTaxRate = source.CalcTaxRate,
-        Json = source.Json,
-        CreatedAt = now,
-        UpdatedAt = now,
-        LineItems = source.LineItems.Select(li => new InvoiceLineItem
-        {
-            SortOrder = li.SortOrder,
-            Description = li.Description,
-            Details = li.Details,
-            Quantity = li.Quantity,
-            Rate = li.Rate,
-            Amount = li.Amount
-        }).ToList()
-    };
-
-    db.InvoiceDocuments.Add(invoice);
-    await db.SaveChangesAsync();
-    await SyncUnifiedInvoiceDocumentToLedgerAsync(db, invoice);
-    return Results.Ok(ToInvoiceDocumentDto(invoice));
+    var invoice = await DuplicateInvoiceDocumentAsync(db, id, "INVOICE");
+    return invoice is null ? Results.NotFound(new { message = $"Document {id} was not found." }) : Results.Ok(ToInvoiceDocumentDto(invoice));
 });
 
 app.MapPost("/api/invoice-documents/import-from-legacy", async (InvoiceAppImportService importer, AppDbContext db) =>
 {
-    var docs = await importer.ReadFullDocumentsAsync();
+    List<InvoiceAppFullDocument> docs;
+    try
+    {
+        docs = await importer.ReadFullDocumentsAsync();
+    }
+    catch (HttpRequestException ex)
+    {
+        return Results.Ok(new
+        {
+            success = false,
+            imported = 0,
+            created = 0,
+            updated = 0,
+            message = $"Could not reach the old invoice app at http://localhost:5057. Open it first if you still need a one-time legacy import. {ex.Message}"
+        });
+    }
+
     var created = 0;
     var updated = 0;
 
@@ -540,10 +401,11 @@ app.MapPost("/api/invoice-documents/import-from-legacy", async (InvoiceAppImport
             SortOrder = line.SortOrder > 0 ? line.SortOrder : index + 1,
             Description = line.Description,
             Details = line.Details,
-            Quantity = line.Quantity,
-            Rate = line.Rate,
-            Amount = line.Amount
+            Quantity = Math.Max(0, line.Quantity),
+            Rate = Math.Max(0, line.Rate),
+            Amount = Math.Max(0, line.Quantity) * Math.Max(0, line.Rate)
         }));
+        NormalizeExistingInvoiceDocumentMoney(doc);
         doc.UpdatedAt = old.UpdatedAt ?? DateTimeOffset.UtcNow.ToString("O");
     }
 
@@ -553,7 +415,7 @@ app.MapPost("/api/invoice-documents/import-from-legacy", async (InvoiceAppImport
         await SyncUnifiedInvoiceDocumentToLedgerAsync(db, doc);
     }
 
-    return Results.Ok(new { imported = docs.Count, created, updated });
+    return Results.Ok(new { success = true, imported = docs.Count, created, updated });
 });
 
 app.MapPost("/api/documents/upload", async (HttpRequest request, AppDbContext db, IWebHostEnvironment env) =>
@@ -632,19 +494,10 @@ app.MapGet("/api/export/{entity}", async (string entity, AppDbContext db, bool i
     };
 });
 
-app.MapPost("/api/system/backup", (IConfiguration configuration, IWebHostEnvironment env) =>
+app.MapPost("/api/system/backup", async (AppDbContext db, IConfiguration configuration, IWebHostEnvironment env) =>
 {
-    var dbPath = GetDatabasePath(configuration, env);
-    if (!System.IO.File.Exists(dbPath))
-    {
-        return Results.NotFound(new { message = "Database file was not found yet. Enter data first, then try backup again." });
-    }
-
-    var backupDir = Path.Combine(env.ContentRootPath, "Backups");
-    Directory.CreateDirectory(backupDir);
-    var backupPath = Path.Combine(backupDir, $"epata-business-ledger-{DateTime.Now:yyyyMMdd-HHmmss}.db");
-    System.IO.File.Copy(dbPath, backupPath, overwrite: true);
-    return Results.File(backupPath, "application/octet-stream", Path.GetFileName(backupPath));
+    var backup = await CreateDatabaseBackupAsync(db, env, configuration);
+    return Results.File(backup.Bytes, "application/octet-stream", backup.FileName);
 });
 
 app.MapGet("/api/app-info", (IWebHostEnvironment env, IConfiguration config) =>
@@ -978,7 +831,9 @@ static void MapCrud<TEntity>(WebApplication app, string route) where TEntity : A
         entity.Id = 0;
         entity.CreatedAtUtc = DateTime.UtcNow;
         entity.UpdatedAtUtc = DateTime.UtcNow;
+        NormalizeCrudEntity(entity);
         db.Set<TEntity>().Add(entity);
+        await ApplyCrudSideEffectsAsync(db, entity);
         await db.SaveChangesAsync();
         return Results.Created($"/api/{route}/{entity.Id}", entity);
     });
@@ -996,6 +851,8 @@ static void MapCrud<TEntity>(WebApplication app, string route) where TEntity : A
         existing.Id = id;
         existing.CreatedAtUtc = created;
         existing.UpdatedAtUtc = DateTime.UtcNow;
+        NormalizeCrudEntity(existing);
+        await ApplyCrudSideEffectsAsync(db, existing);
         await db.SaveChangesAsync();
         return Results.Ok(existing);
     });
@@ -1032,6 +889,122 @@ static void MapCrud<TEntity>(WebApplication app, string route) where TEntity : A
 static IResult Csv(string fileName, string csv)
 {
     return Results.File(Encoding.UTF8.GetBytes(csv), "text/csv", fileName);
+}
+
+static void NormalizeCrudEntity<TEntity>(TEntity entity) where TEntity : AuditableEntity
+{
+    switch (entity)
+    {
+        case Bill bill:
+            bill.Amount = ClampMoney(bill.Amount);
+            bill.SalesTax = ClampMoney(bill.SalesTax);
+            bill.Total = (bill.Amount ?? 0) + (bill.SalesTax ?? 0);
+            bill.AmountPaid = ClampMoney(bill.AmountPaid);
+            if (bill.Status.Equals("Paid", StringComparison.OrdinalIgnoreCase) && (bill.AmountPaid ?? 0) <= 0 && (bill.Total ?? 0) > 0)
+            {
+                bill.AmountPaid = bill.Total;
+            }
+            break;
+        case Expense expense:
+            expense.Amount = ClampMoney(expense.Amount);
+            expense.SalesTax = ClampMoney(expense.SalesTax);
+            expense.Total = (expense.Amount ?? 0) + (expense.SalesTax ?? 0);
+            expense.BusinessUsePercent = ClampPercent(expense.BusinessUsePercent);
+            break;
+        case ReceivableInvoice invoice:
+            invoice.Subtotal = ClampMoney(invoice.Subtotal);
+            invoice.Discount = ClampMoney(invoice.Discount);
+            invoice.RushFee = ClampMoney(invoice.RushFee);
+            invoice.SalesTax = ClampMoney(invoice.SalesTax);
+            invoice.InvoiceTotal = Math.Max(0, (invoice.Subtotal ?? 0) - (invoice.Discount ?? 0) + (invoice.RushFee ?? 0) + (invoice.SalesTax ?? 0));
+            invoice.AmountPaid = Math.Min(invoice.InvoiceTotal ?? 0, ClampMoney(invoice.AmountPaid) ?? 0);
+            if (invoice.Status.Equals("Paid", StringComparison.OrdinalIgnoreCase) && invoice.AmountPaid <= 0 && invoice.InvoiceTotal > 0)
+            {
+                invoice.AmountPaid = invoice.InvoiceTotal;
+            }
+            invoice.IncludeInCashReports = invoice.AmountPaid > 0 && !invoice.Status.Equals("Void", StringComparison.OrdinalIgnoreCase);
+            if (invoice.Status.Equals("Void", StringComparison.OrdinalIgnoreCase))
+            {
+                invoice.AmountPaid = 0;
+                invoice.IncludeInCashReports = false;
+            }
+            break;
+        case Sale sale:
+            sale.Quantity = ClampMoney(sale.Quantity);
+            sale.ItemSales = ClampMoney(sale.ItemSales);
+            sale.ShippingCharged = ClampMoney(sale.ShippingCharged);
+            sale.SalesTaxCollected = ClampMoney(sale.SalesTaxCollected);
+            sale.PlatformFees = ClampMoney(sale.PlatformFees);
+            sale.ShippingLabelCost = ClampMoney(sale.ShippingLabelCost);
+            sale.Refunds = ClampMoney(sale.Refunds);
+            sale.EstimatedCogs = ClampMoney(sale.EstimatedCogs);
+            sale.CustomerPaid = ClampMoney(sale.CustomerPaid);
+            var expectedCustomerPaid = MoneyRules.SaleGrossReceipts(sale) + MoneyRules.SaleSalesTaxMemo(sale);
+            if (expectedCustomerPaid > 0 && !sale.Status.Equals("Draft", StringComparison.OrdinalIgnoreCase))
+            {
+                sale.CustomerPaid = expectedCustomerPaid;
+            }
+            if (sale.Status.Equals("Draft", StringComparison.OrdinalIgnoreCase)
+                || sale.Status.Equals("Void", StringComparison.OrdinalIgnoreCase)
+                || sale.Status.Equals("Cancelled", StringComparison.OrdinalIgnoreCase)
+                || sale.Status.Equals("Canceled", StringComparison.OrdinalIgnoreCase))
+            {
+                sale.IncludeInDashboard = false;
+            }
+            break;
+        case CustomerJob job:
+            job.QuoteAmount = ClampMoney(job.QuoteAmount);
+            job.InvoiceAmount = ClampMoney(job.InvoiceAmount);
+            job.AmountPaid = ClampMoney(job.AmountPaid);
+            if (!string.IsNullOrWhiteSpace(job.RelatedInvoiceNumber)
+                && job.RelatedInvoiceNumber.StartsWith("EST-", StringComparison.OrdinalIgnoreCase))
+            {
+                job.JobType = "Estimate";
+                job.InvoiceAmount = null;
+                job.AmountPaid = null;
+                if (job.Status.Equals("Paid", StringComparison.OrdinalIgnoreCase))
+                {
+                    job.Status = "Quoted";
+                }
+            }
+            break;
+        case Asset asset:
+            asset.Cost = ClampMoney(asset.Cost);
+            asset.BusinessUsePercent = ClampPercent(asset.BusinessUsePercent);
+            asset.NotYetExpensed = ClampMoney(asset.NotYetExpensed);
+            break;
+        case MakerWorldReward reward:
+            reward.GiftCardAmount = ClampMoney(reward.GiftCardAmount);
+            reward.PointsChange ??= 0;
+            break;
+        case Product product:
+            product.TargetPrice = ClampMoney(product.TargetPrice);
+            product.Grams = ClampMoney(product.Grams);
+            product.MaterialCostPerGram = ClampMoney(product.MaterialCostPerGram);
+            product.PrintHours = ClampMoney(product.PrintHours);
+            product.MachineRatePerHour = ClampMoney(product.MachineRatePerHour);
+            product.PackagingCost = ClampMoney(product.PackagingCost);
+            product.DesignMinutes = ClampMoney(product.DesignMinutes);
+            break;
+    }
+}
+
+static async Task ApplyCrudSideEffectsAsync<TEntity>(AppDbContext db, TEntity entity) where TEntity : AuditableEntity
+{
+    if (entity is ReceivableInvoice invoice)
+    {
+        await SyncManualReceivableInvoiceToSaleAsync(db, invoice);
+    }
+}
+
+static decimal? ClampMoney(decimal? value)
+{
+    return value is null ? null : Math.Max(0, value.Value);
+}
+
+static decimal? ClampPercent(decimal? value)
+{
+    return value is null ? null : Math.Clamp(value.Value, 0, 100);
 }
 
 static IQueryable<T> ActiveRows<T>(IQueryable<T> query, bool includeArchived) where T : AuditableEntity
@@ -1189,6 +1162,7 @@ static async Task<InvoiceDocument?> DuplicateInvoiceDocumentAsync(AppDbContext d
         }).ToList()
     };
 
+    NormalizeExistingInvoiceDocumentMoney(copy);
     db.InvoiceDocuments.Add(copy);
     await db.SaveChangesAsync();
     await SyncUnifiedInvoiceDocumentToLedgerAsync(db, copy);
@@ -1260,15 +1234,33 @@ static async Task UpsertSettingAsync(AppDbContext db, string key, string? value)
 
 static async Task<(byte[] Bytes, string FileName)> CreateDatabaseBackupAsync(AppDbContext db, IWebHostEnvironment env, IConfiguration configuration)
 {
-    await db.Database.CloseConnectionAsync();
     var dbPath = GetDatabasePath(configuration, env);
     if (!System.IO.File.Exists(dbPath))
     {
         return ([], "epata-business-ledger-missing.db");
     }
 
-    var bytes = await System.IO.File.ReadAllBytesAsync(dbPath);
-    return (bytes, $"epata-business-ledger-{DateTime.Now:yyyyMMdd-HHmmss}.db");
+    var fileName = $"epata-business-ledger-{DateTime.Now:yyyyMMdd-HHmmss-fff}-{Guid.NewGuid().ToString("N")[..8]}.db";
+    var backupDir = Path.Combine(env.ContentRootPath, "Backups");
+    Directory.CreateDirectory(backupDir);
+    var backupPath = Path.Combine(backupDir, fileName);
+    var sourceConnectionString = new SqliteConnectionStringBuilder(ResolveConnectionString(configuration, env.ContentRootPath))
+    {
+        Pooling = false
+    }.ToString();
+    var destinationConnectionString = new SqliteConnectionStringBuilder { DataSource = backupPath, Pooling = false }.ToString();
+
+    await using (var source = new SqliteConnection(sourceConnectionString))
+    await using (var destination = new SqliteConnection(destinationConnectionString))
+    {
+        await source.OpenAsync();
+        await destination.OpenAsync();
+        source.BackupDatabase(destination);
+    }
+
+    SqliteConnection.ClearAllPools();
+    var bytes = await System.IO.File.ReadAllBytesAsync(backupPath);
+    return (bytes, fileName);
 }
 
 static string GetDatabasePath(IConfiguration configuration, IWebHostEnvironment env)
@@ -1928,6 +1920,39 @@ static void NormalizeInvoiceDocumentMoney(InvoiceDocument doc, SaveInvoiceDocume
         : 0;
 }
 
+static void NormalizeExistingInvoiceDocumentMoney(InvoiceDocument doc)
+{
+    var subtotal = doc.LineItems.Count > 0
+        ? doc.LineItems.Sum(x => Math.Max(0, x.Quantity) * Math.Max(0, x.Rate))
+        : Math.Max(0, doc.Subtotal);
+    var discount = Math.Max(0, doc.DiscountAmount);
+    var rush = Math.Max(0, doc.RushAmount);
+    var taxRate = Math.Clamp(doc.CalcTaxRate, 0, 30);
+    var taxable = MoneyRules.InvoiceTaxableSalesBase(subtotal, discount, rush);
+    var tax = taxRate > 0 ? taxable * taxRate / 100m : Math.Max(0, doc.TaxAmount);
+    var total = taxable + tax;
+    var paid = doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase)
+        ? Math.Min(Math.Max(0, doc.AmountPaid), total)
+        : 0;
+
+    if (doc.DocType.Equals("ESTIMATE", StringComparison.OrdinalIgnoreCase) && doc.Status.Equals("Paid", StringComparison.OrdinalIgnoreCase))
+    {
+        doc.Status = "Accepted";
+    }
+    else if (doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase) && doc.Status.Equals("Paid", StringComparison.OrdinalIgnoreCase) && paid <= 0 && total > 0)
+    {
+        paid = total;
+    }
+
+    doc.Subtotal = subtotal;
+    doc.DiscountAmount = discount;
+    doc.RushAmount = rush;
+    doc.TaxAmount = tax;
+    doc.Total = total;
+    doc.AmountPaid = doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase) ? paid : 0;
+    doc.Balance = doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase) ? Math.Max(0, total - paid) : 0;
+}
+
 static async Task SyncUnifiedInvoiceDocumentToLedgerAsync(AppDbContext db, InvoiceDocument doc)
 {
     if (string.IsNullOrWhiteSpace(doc.DocNumber))
@@ -2050,6 +2075,69 @@ static async Task SyncInvoicePaymentToSaleAsync(AppDbContext db, InvoiceDocument
     sale.SalesTaxCollected = allocated.TaxMemo;
     sale.CustomerPaid = doc.AmountPaid;
     sale.Status = doc.AmountPaid >= doc.Total ? "Paid" : "Partial";
+    sale.IncludeInDashboard = true;
+    sale.NeedsReview = false;
+}
+
+static async Task SyncManualReceivableInvoiceToSaleAsync(AppDbContext db, ReceivableInvoice invoice)
+{
+    if (string.IsNullOrWhiteSpace(invoice.InvoiceNumber))
+    {
+        return;
+    }
+
+    var sourceProof = string.IsNullOrWhiteSpace(invoice.SourceProof)
+        ? $"Receivable invoice {invoice.InvoiceNumber}"
+        : invoice.SourceProof;
+    var sale = await db.Sales.FirstOrDefaultAsync(x =>
+        x.Platform == "Direct"
+        && x.InvoiceNumber == invoice.InvoiceNumber
+        && (x.SourceProof == sourceProof || x.CustomerName == invoice.CustomerName));
+    var paid = invoice.AmountPaid ?? 0;
+    var total = invoice.InvoiceTotal ?? 0;
+
+    if (paid <= 0 || invoice.Status.Equals("Void", StringComparison.OrdinalIgnoreCase))
+    {
+        if (sale is not null && string.Equals(sale.SourceProof, sourceProof, StringComparison.OrdinalIgnoreCase))
+        {
+            sale.IncludeInDashboard = false;
+            sale.Status = "Draft";
+            sale.NeedsReview = false;
+            sale.Notes = "Automatically hidden because the receivable invoice is unpaid or void.";
+        }
+
+        return;
+    }
+
+    if (sale is null)
+    {
+        sale = new Sale
+        {
+            Platform = "Direct",
+            InvoiceNumber = invoice.InvoiceNumber,
+            SourceProof = sourceProof,
+            IncludeInDashboard = true,
+            Notes = "Created automatically from a paid receivable invoice."
+        };
+        db.Sales.Add(sale);
+    }
+
+    var allocated = MoneyRules.AllocateInvoicePayment(
+        invoice.Subtotal ?? 0,
+        invoice.Discount ?? 0,
+        invoice.RushFee ?? 0,
+        invoice.SalesTax ?? 0,
+        total,
+        paid);
+    sale.SaleDate = invoice.InvoiceDate ?? sale.SaleDate ?? DateTime.Today;
+    sale.CustomerName = invoice.CustomerName;
+    sale.ProductName = invoice.ProjectName ?? "Receivable invoice";
+    sale.Quantity = 1;
+    sale.ItemSales = allocated.SalesBase;
+    sale.ShippingCharged = 0;
+    sale.SalesTaxCollected = allocated.TaxMemo;
+    sale.CustomerPaid = paid;
+    sale.Status = paid >= total ? "Paid" : "Partial";
     sale.IncludeInDashboard = true;
     sale.NeedsReview = false;
 }
