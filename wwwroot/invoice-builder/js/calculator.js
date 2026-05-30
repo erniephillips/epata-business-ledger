@@ -18,6 +18,18 @@ export function initCalculator() {
     node.addEventListener('input', run);
     node.addEventListener('change', run);
   });
+
+  // Wire difficulty preset cards (ABS, Nylon, Exotic, PLA)
+  document.querySelectorAll('#difficultyGrid .diff-card').forEach(btn => {
+    btn.addEventListener('click', () => {
+      document.querySelectorAll('#difficultyGrid .diff-card').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const hidden = el('difficulty');
+      if (hidden) { hidden.value = btn.dataset.val; hidden.dispatchEvent(new Event('change')); }
+    });
+  });
+
+  syncDifficultyButtons();
   calculate();
 }
 
@@ -97,7 +109,7 @@ function updateFormulaText(calc) {
   setText(
     'difficultyExplainText',
     calc.difficultyFactor > 1
-      ? `Difficulty adds ${money(calc.difficultyFee)} because ${money(calc.baseSubtotal)} x ${(calc.difficultyFactor - 1) * 100}% = ${money(calc.difficultyFee)}.`
+      ? `Difficulty adds ${money(calc.difficultyFee)} because ${money(calc.baseSubtotal)} x ${parseFloat(((calc.difficultyFactor - 1) * 100).toFixed(4))}% = ${money(calc.difficultyFee)}.`
       : 'Difficulty adds $0.00 because the multiplier is 1.0x.'
   );
   setText(
@@ -129,7 +141,15 @@ export function getCalcState() {
 
 export function restoreCalcState(state = {}) {
   INPUT_IDS.forEach(id => { if (el(id) && state[id] != null) el(id).value = state[id]; });
+  syncDifficultyButtons();
   calculate();
+}
+
+export function syncDifficultyButtons() {
+  const current = parseFloat(document.getElementById('difficulty')?.value) || 1;
+  document.querySelectorAll('#difficultyGrid .diff-card').forEach(btn => {
+    btn.classList.toggle('active', parseFloat(btn.dataset.val) === current);
+  });
 }
 
 export function applyConfigDefaults(cfg) {

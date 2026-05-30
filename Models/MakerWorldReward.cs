@@ -18,6 +18,9 @@ public class MakerWorldReward : AuditableEntity
     [MaxLength(80)]
     public string Status { get; set; } = "Available"; // Available, Redeemed, Expired
 
+    [MaxLength(80)]
+    public string IncomeStatus { get; set; } = "Review"; // Yes - Count as income, No, Memo only, Review
+
     [MaxLength(220)]
     public string? SourceProof { get; set; }
 

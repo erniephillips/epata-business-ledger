@@ -37,6 +37,7 @@ using (var scope = app.Services.CreateScope())
     await db.Database.EnsureCreatedAsync();
     await EnsureUnifiedInvoiceTablesAsync(db);
     await DbSeeder.SeedAsync(db, app.Configuration);
+    await DbSeeder.SeedPatchAsync(db);
     await SeedUnifiedInvoiceDocumentsFromLedgerAsync(db);
 }
 
@@ -632,6 +633,13 @@ app.MapPost("/api/system/backup", (IConfiguration configuration, IWebHostEnviron
     return Results.File(backupPath, "application/octet-stream", Path.GetFileName(backupPath));
 });
 
+app.MapGet("/api/app-info", (IWebHostEnvironment env, IConfiguration config) =>
+    Results.Ok(new {
+        environment = env.EnvironmentName,
+        isTest = env.EnvironmentName.Equals("Test", StringComparison.OrdinalIgnoreCase),
+        dbPath = config.GetConnectionString("DefaultConnection")
+    }));
+
 app.MapGet("/invoice-builder/", () => Results.Redirect("/invoice-builder/index.html"));
 
 app.MapFallbackToFile("index.html");
@@ -1070,6 +1078,29 @@ static async Task EnsureUnifiedInvoiceTablesAsync(AppDbContext db)
     await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_InvoiceDocuments_DocNumber\" ON \"InvoiceDocuments\" (\"DocNumber\");");
     await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_InvoiceDocuments_UpdatedAt\" ON \"InvoiceDocuments\" (\"UpdatedAt\");");
     await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_InvoiceLineItems_InvoiceDocumentId\" ON \"InvoiceLineItems\" (\"InvoiceDocumentId\");");
+
+    // ── Schema migrations for new fields (safe on existing DBs) ──────────────
+    var alterations = new[]
+    {
+        // Expenses
+        "ALTER TABLE \"Expenses\" ADD COLUMN \"TaxBucket\" TEXT NOT NULL DEFAULT 'Operating Expense'",
+        "ALTER TABLE \"Expenses\" ADD COLUMN \"DeductibleStatus\" TEXT NOT NULL DEFAULT 'Yes'",
+        "ALTER TABLE \"Expenses\" ADD COLUMN \"BusinessUsePercent\" TEXT NULL",
+        "ALTER TABLE \"Expenses\" ADD COLUMN \"CountedExpense\" INTEGER NOT NULL DEFAULT 1",
+        // Assets
+        "ALTER TABLE \"Assets\" ADD COLUMN \"InServiceDate\" TEXT NULL",
+        "ALTER TABLE \"Assets\" ADD COLUMN \"TaxTreatment\" TEXT NOT NULL DEFAULT 'Review'",
+        "ALTER TABLE \"Assets\" ADD COLUMN \"CountedExpenseThisYear\" INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE \"Assets\" ADD COLUMN \"NotYetExpensed\" TEXT NULL",
+        // MakerWorld
+        "ALTER TABLE \"MakerWorldRewards\" ADD COLUMN \"IncomeStatus\" TEXT NOT NULL DEFAULT 'Review'",
+    };
+
+    foreach (var sql in alterations)
+    {
+        try { await db.Database.ExecuteSqlRawAsync(sql); }
+        catch { /* Column already exists — safe to ignore */ }
+    }
 }
 
 static async Task SeedUnifiedInvoiceDocumentsFromLedgerAsync(AppDbContext db)

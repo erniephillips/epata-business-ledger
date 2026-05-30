@@ -87,4 +87,60 @@ public static class DbSeeder
 
         await db.SaveChangesAsync();
     }
+
+    /// <summary>Patch seeder — adds rows missed by the initial seed. Safe to run on an existing DB.</summary>
+    public static async Task SeedPatchAsync(AppDbContext db)
+    {
+        // ── Patch 2026-05-31-001: Add Bambu P1S asset + MakerWorld rewards ──
+        if (!await db.AppSettings.AnyAsync(x => x.Key == "SeedPatch" && x.Value == "2026-05-31-001"))
+        {
+            // Asset: Bambu Lab P1S
+            if (!await db.Assets.AnyAsync(a => a.Name == "Bambu Lab P1S 3D Printer AMS 2 Pro Combo"))
+            {
+                db.Assets.Add(new Asset
+                {
+                    Name             = "Bambu Lab P1S 3D Printer AMS 2 Pro Combo",
+                    PurchaseDate     = new DateTime(2025, 6, 23),
+                    VendorName       = "Bambu Lab",
+                    Category         = "Equipment",
+                    Cost             = 1123.83m,
+                    BusinessUsePercent = 100m,
+                    InServiceDate    = new DateTime(2026, 2, 1),
+                    TaxTreatment     = "Review",
+                    CountedExpenseThisYear = false,
+                    NotYetExpensed   = 1123.83m,
+                    SourceProof      = "Expenses.zip/Bambu/20250623_P1S_Order.pdf",
+                    NeedsReview      = true,
+                    Notes            = "Printer was bought before Etsy sales shown here. Track as asset/startup conversion; decide Section 179/depreciation/de minimis with tax preparer before counting."
+                });
+            }
+
+            // MakerWorld rewards
+            var mwRows = new[]
+            {
+                new MakerWorldReward { RewardDate = new DateTime(2026, 2, 11), RewardType = "Gift Card", PointsChange = 490, GiftCardAmount = 40m, Status = "Redeemed", IncomeStatus = "Yes - Count as income", SourceProof = "20260211_Cash Card Redemption.png", Notes = "Non-cash reward/gift card. If earned through business activity and used for business supplies, track both income/reward and the purchase." },
+                new MakerWorldReward { RewardDate = new DateTime(2026, 2, 11), RewardType = "Gift Card", PointsChange = 490, GiftCardAmount = 40m, Status = "Redeemed", IncomeStatus = "Yes - Count as income", SourceProof = "20260211_Cash Card Redemption.png", Notes = "Second $40 gift card from redemption history." },
+                new MakerWorldReward { RewardDate = new DateTime(2026, 5,  9), RewardType = "Points",    PointsChange = 1277, GiftCardAmount = 84.28m, Status = "Available", IncomeStatus = "Memo only", SourceProof = "20260509_Exclusive Points Current.png", Notes = "Current exclusive points shown as cash equivalent. Do not count as income until redeemed/cashed out; minimum cash redemption shown as $100." },
+                new MakerWorldReward { RewardDate = new DateTime(2026, 5,  9), RewardType = "Points",    PointsChange = 45,   GiftCardAmount = 0m,     Status = "Available", IncomeStatus = "Memo only", SourceProof = "20260509_Exclusive Points Current.png", Notes = "Current regular points balance. Memo only." },
+            };
+
+            foreach (var row in mwRows)
+            {
+                bool exists = await db.MakerWorldRewards.AnyAsync(m =>
+                    m.RewardDate == row.RewardDate &&
+                    m.RewardType == row.RewardType &&
+                    m.Notes == row.Notes);
+                if (!exists) db.MakerWorldRewards.Add(row);
+            }
+
+            db.AppSettings.Add(new AppSetting
+            {
+                Key   = "SeedPatch",
+                Value = "2026-05-31-001",
+                Notes = "Added Bambu P1S asset and MakerWorld rewards from user Excel data."
+            });
+
+            await db.SaveChangesAsync();
+        }
+    }
 }

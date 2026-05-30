@@ -25,6 +25,16 @@ public class Expense : AuditableEntity
     [MaxLength(220)]
     public string? ReceiptProof { get; set; }
 
+    // Tax & deductibility tracking
+    [MaxLength(80)]
+    public string TaxBucket { get; set; } = "Operating Expense"; // Operating Expense, COGS/Materials, Asset, Memo Only, Review
+
+    [MaxLength(40)]
+    public string DeductibleStatus { get; set; } = "Yes"; // Yes, No, Review
+
+    public decimal? BusinessUsePercent { get; set; } = 100;
+    public bool CountedExpense { get; set; } = true;
+
     public bool TaxDeductible { get; set; } = true;
     public bool NeedsReview { get; set; }
     public string? Notes { get; set; }

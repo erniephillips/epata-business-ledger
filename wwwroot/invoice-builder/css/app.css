@@ -947,9 +947,10 @@ table.li-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 
 .invoice-preview-stage {
   height: calc(100vh - 150px);
-  min-height: 860px;
+  min-height: 760px;
   max-height: none;
   overflow: auto;
+  overflow-x: auto;
   border-radius: 12px;
   background:
     linear-gradient(45deg, rgba(148,163,184,.16) 25%, transparent 25%),
@@ -964,6 +965,7 @@ table.li-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 
 .invoice-preview-frame {
   width: 100%;
+  min-width: 816px;
   height: 1180px;
   display: block;
   margin: 0 auto;

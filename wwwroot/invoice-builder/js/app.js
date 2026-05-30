@@ -3,20 +3,20 @@
 //  .NET 10 SPA Entry Point
 // ═══════════════════════════════════════════════════════
 
-import { api }                                    from './api.js';
+import { api }                                    from './api.js?v=2';
 import { el, toast, money, setVal, textVal,
          fmtDateTime, statusBadge, typeBadge,
-         debounce, todayStr }                     from './utils.js';
+         debounce, todayStr }                     from './utils.js?v=2';
 import { initCalculator, calculate, getCalcState,
          restoreCalcState, pushToBuilder,
-         applyConfigDefaults }                    from './calculator.js';
+         applyConfigDefaults, syncDifficultyButtons } from './calculator.js?v=2';
 import { initBuilder, addLineItem, removeLineItem,
          getLineItems, updateTotals, captureState,
-         restoreState, getFormData, newDocument } from './builder.js';
+         restoreState, getFormData, newDocument } from './builder.js?v=2';
 import { initRecords, refreshRecords, loadRecord,
          duplicateRecord, deleteRecord, exportCsv,
-         getRecords }                             from './records.js';
-import { generatePdf, renderInvoiceHtml }         from './pdf.js';
+         getRecords }                             from './records.js?v=2';
+import { generatePdf, renderInvoiceHtml }         from './pdf.js?v=2';
 
 // ── State ─────────────────────────────────────────────
 let activeRecordId  = null;
@@ -147,6 +147,14 @@ export async function init(initialView = 'dashboard') {
   showView(initialView);
 }
 
+// ── Difficulty card global (called from inline onclick in index.html) ──
+window.diffCardClick = function(btn) {
+  document.querySelectorAll('#difficultyGrid .diff-card').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  const hidden = el('difficulty');
+  if (hidden) { hidden.value = btn.dataset.val; hidden.dispatchEvent(new Event('change')); }
+};
+
 // ── View routing ──────────────────────────────────────
 export function showView(name) {
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
@@ -238,6 +246,7 @@ function onDocumentLoaded(doc) {
     rush: doc.calcRush, discount: doc.calcDiscount,
     taxRate: doc.calcTaxRate,
   });
+  syncDifficultyButtons();
 
   activeRecordId = doc.id;
   updateActiveBar();

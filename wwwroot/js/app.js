@@ -5,7 +5,7 @@ const appState = {
   invoicePdfModule: null
 };
 
-const moneyFields = new Set(['itemSales','shippingCharged','salesTaxCollected','customerPaid','platformFees','shippingLabelCost','refunds','estimatedCogs','subtotal','discount','rushFee','salesTax','invoiceTotal','amountPaid','amount','total','openingBalance','currentBalance','cost','giftCardAmount','quoteAmount','invoiceAmount','targetPrice','grams','materialCostPerGram','printHours','machineRatePerHour','packagingCost','designMinutes','businessUsePercent']);
+const moneyFields = new Set(['itemSales','shippingCharged','salesTaxCollected','customerPaid','platformFees','shippingLabelCost','refunds','estimatedCogs','subtotal','discount','rushFee','salesTax','invoiceTotal','amountPaid','balanceDue','amount','total','openingBalance','currentBalance','cost','giftCardAmount','quoteAmount','invoiceAmount','targetPrice','grams','materialCostPerGram','printHours','machineRatePerHour','packagingCost','designMinutes','rewardValue','pointsValue','notYetExpensed','netBeforeCogs','estNetAfterCogs']);
 const dateFields = new Set(['saleDate','shipByDate','invoiceDate','dueDate','billDate','paymentDate','expenseDate','purchaseDate','warrantyEndDate','rewardDate','documentDate','jobDate']);
 
 const commonOptions = {
@@ -81,7 +81,7 @@ const configs = {
     title: 'Sales / Income',
     nav: 'Sales',
     purpose: 'Use this for actual sales and paid customer orders. Etsy orders and paid direct invoices go here. Draft quotes do not belong here until paid.',
-    columns: ['saleDate','platform','orderNumber','invoiceNumber','customerName','productName','itemSales','shippingCharged','salesTaxCollected','customerPaid','status','needsReview'],
+    columns: ['saleDate','platform','orderNumber','customerName','productName','customerPaid','platformFees','estimatedCogs','netBeforeCogs','estNetAfterCogs','status','needsReview'],
     fields: [
       f('saleDate','Sale Date','date','Order date or paid date.'),
       f('platform','Platform','select','Where the sale happened.', commonOptions.platform),
@@ -169,7 +169,7 @@ const configs = {
     title: 'Expenses / Paid Purchases',
     nav: 'Expenses',
     purpose: 'Use this for purchases already paid: filament, labels, packaging, tools, software, marketplace fees, ads, and office supplies.',
-    columns: ['expenseDate','vendorName','category','description','paymentAccount','total','taxDeductible','needsReview'],
+    columns: ['expenseDate','vendorName','category','description','total','taxBucket','deductibleStatus','needsReview'],
     fields: [
       f('expenseDate','Expense Date','date','Date you paid or receipt date.'),
       f('vendorName','Vendor Name','text','Store/vendor name.'),
@@ -179,6 +179,10 @@ const configs = {
       f('amount','Amount Before Tax','number','Pre-tax amount.'),
       f('salesTax','Sales Tax','number','Tax paid.'),
       f('total','Total','number','Full paid amount.'),
+      f('taxBucket','Tax Bucket','select','How this expense is classified for taxes.', ['Operating Expense','COGS/Materials','Asset','Memo Only','Review']),
+      f('deductibleStatus','Deductible','select','Is this expense tax-deductible?', ['Yes','No','Review']),
+      f('businessUsePercent','Business Use %','number','Percent used for business. 100 for fully business, lower if mixed personal/business.'),
+      f('countedExpense','Count as Expense','checkbox','Turn off to exclude from totals (e.g. personal or duplicate).'),
       f('receiptProof','Receipt / Proof','text','Receipt file, screenshot, or order number.'),
       f('taxDeductible','Tax Deductible','checkbox','Turn off if not a business expense.'),
       f('needsReview','Needs Review','checkbox',help.needsReview),
@@ -212,7 +216,7 @@ const configs = {
     title: 'Products & Costing',
     nav: 'Products / Costing',
     purpose: 'Estimate what items cost to make. This helps you price repeat items without doing math every time.',
-    columns: ['name','sku','category','material','color','grams','printHours','targetPrice','estimatedCost','needsReview'],
+    columns: ['name','sku','material','grams','printHours','targetPrice','estimatedCost','needsReview'],
     fields: [
       f('name','Product Name','text','Product or common custom-job type.'),
       f('sku','SKU','text','Your product code.'),
@@ -235,16 +239,20 @@ const configs = {
     title: 'Assets / Equipment',
     nav: 'Assets',
     purpose: 'Track bigger business property: printers, AMS, tools, computers, high-value equipment, and warranty info.',
-    columns: ['purchaseDate','name','vendorName','category','cost','businessUsePercent','warrantyEndDate','needsReview'],
+    columns: ['purchaseDate','name','vendorName','cost','taxTreatment','countedExpenseThisYear','notYetExpensed','needsReview'],
     fields: [
       f('name','Asset Name','text','Printer, tool, laptop, AMS, etc.'),
       f('purchaseDate','Purchase Date','date','Date purchased.'),
+      f('inServiceDate','In-Service Date','date','Date the asset was placed in business service. Required for Section 179 and depreciation.'),
       f('vendorName','Vendor','text','Where you bought it.'),
       f('category','Category','text','Equipment, tool, computer, etc.'),
       f('cost','Cost','number','Purchase cost.'),
       f('serialNumber','Serial #','text','Serial number.'),
       f('warrantyEndDate','Warranty End','date','Warranty expiration date.'),
       f('businessUsePercent','Business Use %','number','Usually 100 for business-only equipment.'),
+      f('taxTreatment','Tax Treatment','select','How this asset is handled on taxes.', ['Section 179','De Minimis Expense','Depreciation','Review','Not Deductible']),
+      f('countedExpenseThisYear','Expensed This Year','checkbox','Check when this asset has been fully expensed this tax year (Section 179 or De Minimis).'),
+      f('notYetExpensed','Not Yet Expensed','number','Remaining cost not yet deducted. Use for partial-year or multi-year depreciation tracking.'),
       f('sourceProof','Source / Proof','text',help.sourceProof),
       f('needsReview','Needs Review','checkbox',help.needsReview),
       f('notes','Notes','textarea','Warranty, repair, depreciation, or setup notes.', null, 'full')
@@ -255,7 +263,7 @@ const configs = {
     title: 'MakerWorld Rewards',
     nav: 'MakerWorld',
     purpose: help.makerworld,
-    columns: ['rewardDate','rewardType','pointsChange','giftCardAmount','codeLast4','status','needsReview'],
+    columns: ['rewardDate','rewardType','pointsChange','giftCardAmount','status','incomeStatus','needsReview'],
     fields: [
       f('rewardDate','Date','date','Date points/gift card/reward changed.'),
       f('rewardType','Reward Type','select','Kind of reward.', ['Points','Gift Card','Redemption','Other']),
@@ -263,6 +271,7 @@ const configs = {
       f('giftCardAmount','Gift Card Amount','number','Dollar value if a gift card was issued or used.'),
       f('codeLast4','Code Last 4','text','Last four characters only. Do not store full gift card codes here.'),
       f('status','Status','select','Reward status.', ['Available','Redeemed','Expired','Pending']),
+      f('incomeStatus','Income Status','select','Should this count as taxable income?', ['Yes - Count as income','No','Memo only','Review']),
       f('sourceProof','Source / Proof','text',help.sourceProof),
       f('needsReview','Needs Review','checkbox',help.needsReview),
       f('notes','Notes','textarea','What it was used for or where to find the proof.', null, 'full')
@@ -496,11 +505,25 @@ async function showPage(page) {
   }
 }
 
+function milestonePulse(net) {
+  const milestones = [100, 250, 500, 1000, 2500, 5000];
+  const n = Number(net || 0);
+  const next = milestones.find(m => m > n) || milestones[milestones.length - 1];
+  const prev = milestones[milestones.indexOf(next) - 1] || 0;
+  const pct = Math.min(100, Math.max(0, ((n - prev) / (next - prev)) * 100)).toFixed(1);
+  const label = n >= milestones[milestones.length - 1] ? `🎉 Past $${milestones[milestones.length-1].toLocaleString()}!` : `Next milestone: $${next.toLocaleString()} net`;
+  return `<div class="milestone-pulse">
+    <div class="milestone-label"><span>${label}</span><span>${formatMoney(n)} / $${next.toLocaleString()}</span></div>
+    <div class="milestone-bar"><div class="milestone-fill" style="width:${pct}%"></div></div>
+  </div>`;
+}
+
 async function renderDashboard(el) {
-  const data = await api('/api/dashboard');
+  const [data, appInfo] = await Promise.all([api('/api/dashboard'), api('/api/app-info').catch(() => null)]);
   const k = data.kpis;
   const monthlyMax = Math.max(...(data.monthly || []).map(x => Number(x.grossReceipts || 0)), 1);
   el.innerHTML = `
+    ${appInfo?.isTest ? `<div style="background:#d97706;color:#fff;padding:.5rem 1rem;border-radius:8px;margin-bottom:.75rem;font-weight:700;font-size:.9rem;">⚠ TEST MODE — using separate test database. Production data is untouched.</div>` : ''}
     <section class="workspace-hero">
       <div>
         <span class="eyebrow">EPATA Ledger Command</span>
@@ -537,6 +560,7 @@ async function renderDashboard(el) {
       ${insight('Cleanup Queue', k.needsReviewCount > 0 ? `${k.needsReviewCount} rows are marked for review.` : 'Nothing is currently marked for review.', 'Use this as your bookkeeping punch list before tax time.')}
       ${insight('Proof Discipline', 'Upload receipts, PDFs, screenshots, and order files into Document Intake.', 'Each upload creates an Audit Doc so records point back to proof.')}
     </section>
+    ${milestonePulse(k.estimatedNet)}
     <section class="chart-grid">
       <div class="chart-card wide">
         <div class="card-header-lite">
@@ -742,6 +766,8 @@ async function renderEntity(el, config) {
   renderEntityTable(config, rows, '');
 }
 
+const tablePageState = {};
+
 function renderEntityTable(config, rows, filter) {
   const f = (filter || '').toLowerCase();
   const statusFilter = qs('#statusFilter')?.value || '';
@@ -754,11 +780,41 @@ function renderEntityTable(config, rows, filter) {
     return true;
   });
   const cols = config.columns;
+  const tableArea = qs('#tableArea');
   if (filtered.length === 0) {
-    qs('#tableArea').innerHTML = emptyState('No matching rows.', 'Clear the search or change the filter.');
+    tableArea.innerHTML = emptyState('No matching rows.', 'Clear the search or change the filter.');
     return;
   }
-  qs('#tableArea').innerHTML = `<div class="table-wrap"><table><thead><tr>${cols.map(c=>`<th>${labelize(c)}</th>`).join('')}<th>Actions</th></tr></thead><tbody>${filtered.map(row => `
+
+  const key = config.route;
+  if (!tablePageState[key]) tablePageState[key] = { page: 0, pageSize: 25 };
+  const state = tablePageState[key];
+  // Reset to page 0 when filter changes
+  if (filter !== state._lastFilter || statusFilter !== state._lastStatus) {
+    state.page = 0;
+    state._lastFilter = filter;
+    state._lastStatus = statusFilter;
+  }
+  const pageSize = state.pageSize;
+  const totalPages = Math.ceil(filtered.length / pageSize);
+  if (state.page >= totalPages) state.page = totalPages - 1;
+  const pageRows = filtered.slice(state.page * pageSize, (state.page + 1) * pageSize);
+
+  const pagerHtml = filtered.length > 25 ? `
+    <div class="table-pager">
+      <span class="pager-info">${filtered.length} rows &nbsp;|&nbsp; Page ${state.page + 1} of ${totalPages}</span>
+      <span class="pager-controls">
+        <button class="ghost-button pager-btn" id="pgFirst" ${state.page === 0 ? 'disabled' : ''}>«</button>
+        <button class="ghost-button pager-btn" id="pgPrev" ${state.page === 0 ? 'disabled' : ''}>‹ Prev</button>
+        <select id="pgSize" class="pager-size">
+          ${[25,50,100].map(n => `<option value="${n}"${n === pageSize ? ' selected' : ''}>${n} / page</option>`).join('')}
+        </select>
+        <button class="ghost-button pager-btn" id="pgNext" ${state.page >= totalPages - 1 ? 'disabled' : ''}>Next ›</button>
+        <button class="ghost-button pager-btn" id="pgLast" ${state.page >= totalPages - 1 ? 'disabled' : ''}>»</button>
+      </span>
+    </div>` : '';
+
+  tableArea.innerHTML = `<div class="table-wrap"><table><thead><tr>${cols.map(c=>`<th>${labelize(c)}</th>`).join('')}<th>Actions</th></tr></thead><tbody>${pageRows.map(row => `
     <tr>
       ${cols.map(c => `<td>${cell(row, c)}</td>`).join('')}
       <td class="row-actions">
@@ -766,10 +822,19 @@ function renderEntityTable(config, rows, filter) {
         ${row.needsReview === true ? `<button class="ghost-button" data-reviewed="${row.id}">Reviewed</button>` : ''}
         <button class="danger-button" data-delete="${row.id}">Archive</button>
       </td>
-    </tr>`).join('')}</tbody></table></div>`;
+    </tr>`).join('')}</tbody></table></div>${pagerHtml}`;
+
   qsa('[data-edit]').forEach(btn => btn.onclick = () => openModal(config, filtered.find(r => r.id == btn.dataset.edit)));
   qsa('[data-reviewed]').forEach(btn => btn.onclick = () => markReviewed(config, filtered.find(r => r.id == btn.dataset.reviewed)));
   qsa('[data-delete]').forEach(btn => btn.onclick = () => archiveRow(config, btn.dataset.delete));
+
+  if (filtered.length > 25) {
+    qs('#pgFirst')?.addEventListener('click', () => { state.page = 0; renderEntityTable(config, rows, filter); });
+    qs('#pgPrev')?.addEventListener('click', () => { state.page--; renderEntityTable(config, rows, filter); });
+    qs('#pgNext')?.addEventListener('click', () => { state.page++; renderEntityTable(config, rows, filter); });
+    qs('#pgLast')?.addEventListener('click', () => { state.page = totalPages - 1; renderEntityTable(config, rows, filter); });
+    qs('#pgSize')?.addEventListener('change', e => { state.pageSize = Number(e.target.value); state.page = 0; renderEntityTable(config, rows, filter); });
+  }
 }
 
 function summarizeMoney(rows, config) {
@@ -783,6 +848,25 @@ function summarizeMoney(rows, config) {
 function cell(row, key) {
   if (key === 'needsReview') return row.needsReview ? badgeFor('Needs Review', true) : badgeFor('OK');
   if (key.toLowerCase().includes('status') || key === 'priority') return badgeFor(row[key], row.needsReview);
+  if (key === 'estimatedCost') {
+    const cost = (Number(row.grams || 0) * Number(row.materialCostPerGram || 0))
+               + (Number(row.printHours || 0) * Number(row.machineRatePerHour || 0))
+               + Number(row.packagingCost || 0);
+    const price = Number(row.targetPrice || 0);
+    const label = formatMoney(cost);
+    if (cost > 0 && price > 0 && price < cost) return `<span style="color:#dc2626;font-weight:700" title="Target price is below estimated cost">${label} ⚠</span>`;
+    return escapeHtml(label);
+  }
+  if (key === 'netBeforeCogs') {
+    const net = Number(row.customerPaid || 0) - Number(row.platformFees || 0) - Number(row.shippingLabelCost || 0) - Number(row.refunds || 0);
+    return escapeHtml(formatMoney(net));
+  }
+  if (key === 'estNetAfterCogs') {
+    const net = Number(row.customerPaid || 0) - Number(row.platformFees || 0) - Number(row.shippingLabelCost || 0) - Number(row.refunds || 0) - Number(row.estimatedCogs || 0);
+    const label = formatMoney(net);
+    if (net < 0) return `<span style="color:#dc2626;font-weight:700" title="Est. net is negative after COGS">${escapeHtml(label)} ⚠</span>`;
+    return escapeHtml(label);
+  }
   return escapeHtml(formatValue(row[key], key));
 }
 
@@ -794,7 +878,7 @@ function renderQuickAdd(el) {
   el.innerHTML = `
     <div class="page-head"><div><h2>Quick Add</h2><p>Use this for simple ledger events: paid sale, unpaid invoice entered outside the builder, paid expense, vendor bill, or manual quote record.</p></div><div class="actions"><button class="ghost-button" onclick="showPage('estimates')">New Estimate</button><button class="ghost-button" onclick="showPage('invoices')">New Invoice</button><button class="ghost-button" onclick="showPage('workflowGuide')">Workflow Guide</button></div></div>
     <div class="quick-grid">
-      ${quickCard('Estimate Sent','You sent an estimate/quote and are waiting for approval.','customerJobs','estimateSent')}
+      ${quickCard('Estimate Sent (External)','You sent a quote made outside this app and are waiting for approval. The built-in Estimates builder tracks these automatically.','customerJobs','estimateSent')}
       ${quickLinkCard('New Estimate PDF','Build a real customer estimate with calculator, line items, and PDF preview.','estimates')}
       ${quickLinkCard('New Invoice PDF','Build a real customer invoice with line items, AR sync, and PDF preview.','invoices')}
       ${quickCard('Etsy Sale','A paid Etsy order or marketplace sale.','sales','etsy')}
@@ -877,12 +961,13 @@ function renderWorkflowGuide(el) {
         </div>
       </div>
       <div class="card">
-        <h3>AI Automation Path</h3>
-        <p>A local LLM could help read receipts/PDFs later, but it should propose records for your review, not silently write the books.</p>
+        <h3>Growing Past $1K</h3>
+        <p>Once you cross $1K net profit these habits pay off fast. Start them now so they are automatic later.</p>
         <div class="help-list">
-          <div class="help-item"><strong>Ollama</strong><p>Free/local model runner. Easy install, but it runs a local API service.</p></div>
-          <div class="help-item"><strong>LLamaSharp</strong><p>Embedded .NET library for GGUF models. No cloud API, but setup is heavier and model files are large.</p></div>
-          <div class="help-item"><strong>Rules first</strong><p>For invoices/receipts, deterministic parsing plus an approval screen may be more reliable than asking a small model to do accounting.</p></div>
+          <div class="help-item"><strong>Every sale has proof</strong><p>Etsy order PDF, direct invoice, or screenshot attached as an Audit Doc. The IRS wants receipts, not memory.</p></div>
+          <div class="help-item"><strong>Separate bank account</strong><p>Business-only checking makes end-of-year reconciliation hours faster and keeps personal spending out of COGS.</p></div>
+          <div class="help-item"><strong>Review weekly</strong><p>Five minutes once a week clearing Needs Review rows is easier than one marathon before taxes.</p></div>
+          <div class="help-item"><strong>Track COGS per item</strong><p>Use Products / Costing to record filament cost, print hours, and packaging so you know which jobs actually make money.</p></div>
         </div>
       </div>
     </div>`;
@@ -1154,7 +1239,22 @@ async function renderMergedInvoiceTool(el, initialView = 'dashboard', newType = 
     </section>`;
 
   qsa('#epataInvoiceMerged [onclick*="window.location.href"]').forEach(button => button.remove());
-  const module = await import('/invoice-builder/js/app.js');
+
+  // Wire difficulty preset cards directly — no module dependency
+  qsa('#difficultyGrid .diff-card').forEach(btn => {
+    btn.addEventListener('click', () => {
+      qsa('#difficultyGrid .diff-card').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const hidden = document.getElementById('difficulty');
+      if (hidden) {
+        hidden.value = btn.dataset.val;
+        hidden.dispatchEvent(new Event('change'));
+        hidden.dispatchEvent(new Event('input'));
+      }
+    });
+  });
+
+  const module = await import('/invoice-builder/js/app.js?v=2');
   await module.init(initialView);
   if (newType) {
     const buttonId = newType === 'INVOICE' ? 'btnNewInvoice' : 'btnNewEstimate';
@@ -1177,7 +1277,7 @@ function ensureMergedInvoiceStyles() {
     style.textContent = `
       body #app { display: block; min-height: 0; }
       body #main { margin-left: 0; }
-      .invoice-tool-merged { display: block; min-height: calc(100vh - 112px); background: #f3f6fb; border: 1px solid #dbe3ef; border-radius: 14px; overflow: hidden; }
+      .invoice-tool-merged { display: block; min-height: calc(100vh - 112px); background: #f3f6fb; border: 1px solid #dbe3ef; border-radius: 14px; overflow: auto; }
       .invoice-tool-merged #main { margin-left: 0 !important; min-height: 0; }
       .invoice-tool-merged .view-header, .invoice-tool-merged .view-body, .invoice-tool-merged .active-record-bar { padding-left: 16px; padding-right: 16px; }
       .invoice-tool-merged .view-header { padding-top: 12px; padding-bottom: 0; }
@@ -2024,7 +2124,6 @@ function renderHelp(el) {
         <button class="ghost-button dark" onclick="showPage('workflowGuide')">Open Workflow Guide</button>
       </div>
     </section>
-    ${workflowDiagram()}
 
     <div class="grid two">
       <div class="card">
@@ -2066,6 +2165,7 @@ function renderHelp(el) {
       <div class="card">
         <h3>When Do I Enter More Than One Record?</h3>
         <div class="help-list">
+          <div class="help-item"><strong>Etsy order</strong><p>Usually one Sale record plus attached proof. Do not create AR because Etsy is not an unpaid direct invoice.</p></div>
           <div class="help-item"><strong>Etsy order</strong><p>Usually one Sale record plus attached proof. Do not create AR because Etsy is not an unpaid direct invoice.</p></div>
           <div class="help-item"><strong>Direct custom job</strong><p>Job first if you need to track the work. AR Invoice when you send the invoice. Sale when money is received.</p></div>
           <div class="help-item"><strong>Receipt for filament you already bought</strong><p>One Expense record plus attached receipt. No AP Bill because you do not owe anything.</p></div>

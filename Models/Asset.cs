@@ -22,6 +22,13 @@ public class Asset : AuditableEntity
 
     public DateTime? WarrantyEndDate { get; set; }
     public decimal? BusinessUsePercent { get; set; } = 100;
+    public DateTime? InServiceDate { get; set; }
+
+    [MaxLength(80)]
+    public string TaxTreatment { get; set; } = "Review"; // Section 179, De Minimis Expense, Depreciation, Review, Not Deductible
+
+    public bool CountedExpenseThisYear { get; set; }
+    public decimal? NotYetExpensed { get; set; }
 
     [MaxLength(220)]
     public string? SourceProof { get; set; }
