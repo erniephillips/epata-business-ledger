@@ -783,6 +783,7 @@ function renderQuickAdd(el) {
   el.innerHTML = `
     <div class="page-head"><div><h2>Quick Add</h2><p>This is the main place to enter new business events. Pick what happened once; only add related records when the workflow actually needs them.</p></div><div class="actions"><button class="ghost-button" onclick="showPage('workflowGuide')">Workflow Guide</button></div></div>
     <div class="quick-grid">
+      ${quickCard('Estimate Sent','You sent an estimate/quote and are waiting for approval.','customerJobs','estimateSent')}
       ${quickCard('Etsy Sale','A paid Etsy order or marketplace sale.','sales','etsy')}
       ${quickCard('Direct Paid Sale','Customer already paid you directly.','sales','directPaid')}
       ${quickCard('Open Invoice / AR','You sent a direct invoice and are waiting for payment.','receivables','invoice')}
@@ -798,6 +799,7 @@ function renderQuickAdd(el) {
 
 function renderWorkflowGuide(el) {
   const flows = [
+    ['Estimate sent, waiting for approval', 'Quick Add -> Estimate Sent', 'Creates a Customer Job with status Quoted. This is not income and not AR yet. If approved, create/send the invoice in the invoice app, then add an AR Invoice here. When paid, add/confirm the Sale.'],
     ['Etsy order came in', 'Quick Add → Etsy Sale', 'Creates the money record. Keep Needs Review on until Etsy fees, actual label cost, packaging, and COGS are entered. Add/attach proof from the sale form or Document Intake.'],
     ['Direct customer asks for work', 'Customer Jobs', 'Create the job first. When you invoice them, add an AR Invoice. When they pay, add or confirm a Sale.'],
     ['You sent an invoice', 'Quick Add → Open Invoice / AR', 'This tracks money owed to you. Do not count it as cash until paid. When paid, update the invoice and add/confirm the sale.'],
@@ -823,10 +825,12 @@ function renderWorkflowGuide(el) {
         <h3>The Main Entry Point</h3>
         <p><b>Use Quick Add first</b> for most day-to-day work. It asks what happened and opens the right tab/form with defaults.</p>
         <p>Use individual tabs when you are reviewing, editing, exporting, or doing a specific cleanup task.</p>
+        <p><b>Estimate waiting for approval:</b> use Estimate Sent. It stays as a Customer Job/quote and does not count as income.</p>
       </div>
       <div class="card">
         <h3>What Is Not Automatic Yet</h3>
         <p>Document Intake currently saves files, creates Audit Docs, and keeps extracted preview text when possible. It does <b>not</b> yet make reliable accounting decisions from PDFs automatically.</p>
+        <p>The invoice app can be read locally, but this ledger currently previews that data instead of permanently importing estimates/invoices automatically.</p>
         <p>The next smart layer would be an Intake Review screen: extracted fields on the left, suggested Sale/Invoice/Expense on the right, and you approve before anything posts.</p>
       </div>
     </div>
@@ -866,6 +870,7 @@ function quickOpen(configKey, kind) {
   const config = configs[configKey];
   const today = new Date().toISOString().substring(0,10);
   const presets = {
+    estimateSent: { platform: 'Direct', status: 'Quoted', jobDate: today, jobType: 'Estimate', needsReview: false, notes: 'Estimate sent from invoice app. Do not count as income or AR until approved/invoiced.' },
     etsy: { platform: 'Etsy', status: 'Paid', saleDate: today, quantity: 1, includeInDashboard: true, needsReview: true, notes: 'Remember to enter Etsy fees, actual label cost, packaging, and COGS.' },
     directPaid: { platform: 'Direct', status: 'Paid', saleDate: today, quantity: 1, includeInDashboard: true },
     invoice: { status: 'Sent', invoiceDate: today, includeInCashReports: false, needsReview: false, externalInvoiceAppUrl: 'http://localhost:5057/' },
@@ -1284,6 +1289,7 @@ async function tryInvoiceImport() {
 
 function renderHelp(el) {
   const scenarios = [
+    ['Estimate sent, waiting for approval', 'Quick Add -> Estimate Sent', 'Enter it as a Customer Job with status Quoted. It does not count as income, AR, or a sale. If approved, create/send the invoice in the invoice app, then add AR here. When paid, add/confirm the Sale.'],
     ['Etsy order', 'Quick Add → Etsy Sale', 'Enter once as a Sale. Attach the Etsy order PDF/receipt. Later fill in Etsy fees, label cost, packaging, and COGS on the same Sale row. You usually do not need a separate AR Invoice because Etsy already paid/processed the order.'],
     ['Direct customer wants a quote/job', 'Customer Jobs', 'Start with a Customer Job if work exists before payment. When you send a bill, add an AR Invoice. When they pay, add/confirm a Sale. The records are related by customer, job name, invoice number, and proof.'],
     ['Direct invoice sent, unpaid', 'Quick Add → Open Invoice / AR', 'Enter the invoice once as AR. Do not enter it as a Sale yet unless money was actually received. Attach the invoice PDF as proof.'],
@@ -1324,9 +1330,10 @@ function renderHelp(el) {
         <h3>Start Here: What Button Do I Click?</h3>
         <div class="help-steps">
           <div><span>1</span><p><b>If money came in:</b> use Quick Add → Etsy Sale or Direct Paid Sale.</p></div>
-          <div><span>2</span><p><b>If you sent a bill and are waiting to be paid:</b> use Quick Add → Open Invoice / AR.</p></div>
-          <div><span>3</span><p><b>If you spent money:</b> use Quick Add → Paid Expense. If you owe it but have not paid, use Bill / AP.</p></div>
-          <div><span>4</span><p><b>If you only have a receipt/PDF:</b> use Document Intake. That creates an Audit Doc only. Then click Quick Add to create the Sale, Expense, Invoice, or Bill the file proves.</p></div>
+          <div><span>2</span><p><b>If you sent an estimate and are waiting for approval:</b> use Quick Add → Estimate Sent. This is not income yet.</p></div>
+          <div><span>3</span><p><b>If you sent an invoice and are waiting to be paid:</b> use Quick Add → Open Invoice / AR.</p></div>
+          <div><span>4</span><p><b>If you spent money:</b> use Quick Add → Paid Expense. If you owe it but have not paid, use Bill / AP.</p></div>
+          <div><span>5</span><p><b>If you only have a receipt/PDF:</b> use Document Intake. That creates an Audit Doc only. Then click Quick Add to create the Sale, Expense, Invoice, or Bill the file proves.</p></div>
         </div>
       </div>
       <div class="card">
