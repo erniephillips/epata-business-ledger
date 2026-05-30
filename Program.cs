@@ -40,6 +40,9 @@ using (var scope = app.Services.CreateScope())
     await DbSeeder.SeedPatchAsync(db);
     await SeedUnifiedInvoiceDocumentsFromLedgerAsync(db);
     await NormalizeInvoiceDocumentRowsAsync(db);
+    await NormalizeLedgerMoneyRowsAsync(db);
+    await RepairInvoiceProofCustomerMismatchesAsync(db);
+    await RepairDirectPaidSalesMissingArAsync(db);
     await ArchiveOrphanedUnifiedLedgerRowsAsync(db);
 }
 
@@ -607,23 +610,23 @@ app.MapPost("/api/documents/upload", async (HttpRequest request, AppDbContext db
     return Results.Ok(new { count = created.Count, documents = created });
 });
 
-app.MapGet("/api/export/{entity}", async (string entity, AppDbContext db) =>
+app.MapGet("/api/export/{entity}", async (string entity, AppDbContext db, bool includeArchived = false) =>
 {
     var fileName = $"epata-{entity}-{DateTime.Now:yyyyMMdd-HHmmss}.csv";
     return entity.ToLowerInvariant() switch
     {
-        "parties" or "customers" => Csv(fileName, CsvExportService.ToCsv(await db.Parties.AsNoTracking().ToListAsync())),
-        "sales" => Csv(fileName, CsvExportService.ToCsv(await db.Sales.AsNoTracking().ToListAsync())),
-        "customer-jobs" or "jobs" => Csv(fileName, CsvExportService.ToCsv(await db.CustomerJobs.AsNoTracking().ToListAsync())),
-        "receivable-invoices" or "invoices" => Csv(fileName, CsvExportService.ToCsv(await db.ReceivableInvoices.AsNoTracking().ToListAsync())),
-        "bills" => Csv(fileName, CsvExportService.ToCsv(await db.Bills.AsNoTracking().ToListAsync())),
-        "expenses" => Csv(fileName, CsvExportService.ToCsv(await db.Expenses.AsNoTracking().ToListAsync())),
-        "products" => Csv(fileName, CsvExportService.ToCsv(await db.Products.AsNoTracking().ToListAsync())),
-        "assets" => Csv(fileName, CsvExportService.ToCsv(await db.Assets.AsNoTracking().ToListAsync())),
-        "makerworld-rewards" => Csv(fileName, CsvExportService.ToCsv(await db.MakerWorldRewards.AsNoTracking().ToListAsync())),
-        "audit-documents" => Csv(fileName, CsvExportService.ToCsv(await db.AuditDocuments.AsNoTracking().ToListAsync())),
-        "business-accounts" => Csv(fileName, CsvExportService.ToCsv(await db.BusinessAccounts.AsNoTracking().ToListAsync())),
-        "action-items" => Csv(fileName, CsvExportService.ToCsv(await db.ActionItems.AsNoTracking().ToListAsync())),
+        "parties" or "customers" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.Parties.AsNoTracking(), includeArchived).ToListAsync())),
+        "sales" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.Sales.AsNoTracking(), includeArchived).ToListAsync())),
+        "customer-jobs" or "jobs" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.CustomerJobs.AsNoTracking(), includeArchived).ToListAsync())),
+        "receivable-invoices" or "invoices" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.ReceivableInvoices.AsNoTracking(), includeArchived).ToListAsync())),
+        "bills" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.Bills.AsNoTracking(), includeArchived).ToListAsync())),
+        "expenses" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.Expenses.AsNoTracking(), includeArchived).ToListAsync())),
+        "products" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.Products.AsNoTracking(), includeArchived).ToListAsync())),
+        "assets" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.Assets.AsNoTracking(), includeArchived).ToListAsync())),
+        "makerworld-rewards" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.MakerWorldRewards.AsNoTracking(), includeArchived).ToListAsync())),
+        "audit-documents" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.AuditDocuments.AsNoTracking(), includeArchived).ToListAsync())),
+        "business-accounts" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.BusinessAccounts.AsNoTracking(), includeArchived).ToListAsync())),
+        "action-items" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.ActionItems.AsNoTracking(), includeArchived).ToListAsync())),
         _ => Results.NotFound(new { message = "Unknown export entity." })
     };
 });
@@ -682,6 +685,7 @@ static async Task<object> BuildTaxAuditAsync(AppDbContext db)
     var expenses = await db.Expenses.AsNoTracking().Where(x => !x.IsArchived).ToListAsync();
     var assets = await db.Assets.AsNoTracking().Where(x => !x.IsArchived).ToListAsync();
     var rewards = await db.MakerWorldRewards.AsNoTracking().Where(x => !x.IsArchived).ToListAsync();
+    var bills = await db.Bills.AsNoTracking().Where(x => !x.IsArchived).ToListAsync();
 
     if (expenses.Count == 0)
     {
@@ -713,7 +717,7 @@ static async Task<object> BuildTaxAuditAsync(AppDbContext db)
             x.Platform.Equals("Direct", StringComparison.OrdinalIgnoreCase)
             && x.InvoiceNumber == invoice.InvoiceNumber
             && x.IncludeInDashboard
-            && (x.CustomerName.Equals(invoice.CustomerName, StringComparison.OrdinalIgnoreCase)
+            && (string.Equals(x.CustomerName, invoice.CustomerName, StringComparison.OrdinalIgnoreCase)
                 || string.Equals(x.SourceProof, $"Unified invoice {invoice.InvoiceNumber}", StringComparison.OrdinalIgnoreCase)));
         var paid = invoice.AmountPaid ?? 0;
         if (paid <= 0 && sale is not null && MoneyRules.IsReportableSale(sale))
@@ -725,6 +729,35 @@ static async Task<object> BuildTaxAuditAsync(AppDbContext db)
         {
             issues.Add(new("High", "Paid invoice missing sale", invoice.InvoiceNumber,
                 "This invoice has AmountPaid, but no matching included Direct Sale was found."));
+        }
+
+        if (!string.IsNullOrWhiteSpace(invoice.SourceProof))
+        {
+            var proofSale = sales.FirstOrDefault(x =>
+                !string.IsNullOrWhiteSpace(x.SourceProof)
+                && string.Equals(x.SourceProof, invoice.SourceProof, StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(x.CustomerName, invoice.CustomerName, StringComparison.OrdinalIgnoreCase));
+            if (proofSale is not null)
+            {
+                issues.Add(new("High", "Invoice proof belongs to another customer", invoice.InvoiceNumber,
+                    $"Invoice proof matches sale customer {proofSale.CustomerName}, but this AR row is for {invoice.CustomerName}."));
+            }
+        }
+    }
+
+    foreach (var directSale in sales.Where(x =>
+        MoneyRules.IsReportableSale(x)
+        && x.Platform.Equals("Direct", StringComparison.OrdinalIgnoreCase)
+        && !string.IsNullOrWhiteSpace(x.InvoiceNumber)
+        && (x.CustomerPaid ?? 0) > 0))
+    {
+        var matchingAr = invoices.Any(x =>
+            x.InvoiceNumber == directSale.InvoiceNumber
+            && string.Equals(x.CustomerName, directSale.CustomerName, StringComparison.OrdinalIgnoreCase));
+        if (!matchingAr)
+        {
+            issues.Add(new("High", "Direct paid sale missing AR history", directSale.InvoiceNumber!,
+                "The sale counts as income, but no same-customer AR invoice row exists for invoice history/proof review."));
         }
     }
 
@@ -786,12 +819,54 @@ static async Task<object> BuildTaxAuditAsync(AppDbContext db)
             "Accepted estimates are not cash receipts. Create/save a paid invoice when money is actually received."));
     }
 
+    foreach (var job in jobs.Where(x =>
+        !string.IsNullOrWhiteSpace(x.RelatedInvoiceNumber)
+        && x.RelatedInvoiceNumber.StartsWith("EST-", StringComparison.OrdinalIgnoreCase)
+        && (x.AmountPaid ?? 0) > 0))
+    {
+        issues.Add(new("High", "Estimate job shows amount paid", job.RelatedInvoiceNumber!,
+            "Customer Jobs linked to estimates should use Quote Amount only. Amount Paid belongs on a paid invoice or Sale row."));
+    }
+
     foreach (var expense in expenses)
     {
+        var expectedExpenseTotal = (expense.Amount ?? 0) + (expense.SalesTax ?? 0);
+        if ((expense.Total ?? 0) > 0 && Math.Abs(expectedExpenseTotal - (expense.Total ?? 0)) > 0.02m)
+        {
+            issues.Add(new("High", "Expense total mismatch", expense.Description.Length > 0 ? expense.Description : $"Expense #{expense.Id}",
+                $"Total {(expense.Total ?? 0):C} does not equal amount + sales tax {expectedExpenseTotal:C}."));
+        }
+
         if (expense.NeedsReview || expense.DeductibleStatus.Equals("Review", StringComparison.OrdinalIgnoreCase) || expense.TaxBucket.Equals("Review", StringComparison.OrdinalIgnoreCase))
         {
             issues.Add(new("Medium", "Expense needs tax classification", expense.Description.Length > 0 ? expense.Description : $"Expense #{expense.Id}",
                 "This expense is not counted as a deductible expense until tax bucket and deductibility are set intentionally."));
+        }
+    }
+
+    foreach (var bill in bills)
+    {
+        var billLabel = !string.IsNullOrWhiteSpace(bill.BillNumber)
+            ? bill.BillNumber
+            : !string.IsNullOrWhiteSpace(bill.Description) ? bill.Description : $"Bill #{bill.Id}";
+        var expectedBillTotal = (bill.Amount ?? 0) + (bill.SalesTax ?? 0);
+        if ((bill.Total ?? 0) > 0 && Math.Abs(expectedBillTotal - (bill.Total ?? 0)) > 0.02m)
+        {
+            issues.Add(new("High", "AP bill total mismatch", billLabel,
+                $"Total {(bill.Total ?? 0):C} does not equal amount + sales tax {expectedBillTotal:C}."));
+        }
+
+        var paid = bill.AmountPaid ?? 0;
+        var total = bill.Total ?? bill.Amount ?? 0;
+        if (bill.Status.Equals("Paid", StringComparison.OrdinalIgnoreCase) && paid + 0.02m < total)
+        {
+            issues.Add(new("High", "Paid bill has unpaid balance", billLabel,
+                $"Status is Paid, but AmountPaid {paid:C} is less than Total {total:C}."));
+        }
+        else if ((bill.Status.Equals("Unpaid", StringComparison.OrdinalIgnoreCase) || bill.Status.Equals("Draft", StringComparison.OrdinalIgnoreCase)) && paid > 0.02m)
+        {
+            issues.Add(new("Medium", "Unpaid bill has payment amount", billLabel,
+                $"Status is {bill.Status}, but AmountPaid is {paid:C}."));
         }
     }
 
@@ -946,6 +1021,11 @@ static void MapCrud<TEntity>(WebApplication app, string route) where TEntity : A
 static IResult Csv(string fileName, string csv)
 {
     return Results.File(Encoding.UTF8.GetBytes(csv), "text/csv", fileName);
+}
+
+static IQueryable<T> ActiveRows<T>(IQueryable<T> query, bool includeArchived) where T : AuditableEntity
+{
+    return includeArchived ? query : query.Where(x => !x.IsArchived);
 }
 
 static IQueryable<InvoiceDocument> FilterInvoiceDocuments(AppDbContext db, string? q, string? type, string? status)
@@ -1199,6 +1279,18 @@ static string MakeSafeFileName(string fileName)
     return string.IsNullOrWhiteSpace(name) ? "uploaded-document" : name;
 }
 
+static string AppendNote(string? existing, string note)
+{
+    if (string.IsNullOrWhiteSpace(existing))
+    {
+        return note;
+    }
+
+    return existing.Contains(note, StringComparison.OrdinalIgnoreCase)
+        ? existing
+        : $"{existing.Trim()}\n{note}";
+}
+
 static string GuessDocumentType(string fileName)
 {
     var lower = fileName.ToLowerInvariant();
@@ -1442,6 +1534,169 @@ static async Task NormalizeInvoiceDocumentRowsAsync(AppDbContext db)
     }
 }
 
+static async Task NormalizeLedgerMoneyRowsAsync(AppDbContext db)
+{
+    var changed = false;
+    var estimateJobs = await db.CustomerJobs
+        .Where(x => !x.IsArchived
+            && x.RelatedInvoiceNumber != null
+            && x.RelatedInvoiceNumber.StartsWith("EST-")
+            && (x.AmountPaid != null || x.InvoiceAmount != null))
+        .ToListAsync();
+
+    foreach (var job in estimateJobs)
+    {
+        job.AmountPaid = null;
+        job.InvoiceAmount = null;
+        if (!job.JobType.Equals("Estimate", StringComparison.OrdinalIgnoreCase))
+        {
+            job.JobType = "Estimate";
+        }
+
+        if (job.Status.Equals("Paid", StringComparison.OrdinalIgnoreCase))
+        {
+            job.Status = "Quoted";
+        }
+
+        job.Notes = AppendNote(job.Notes, "Normalized during startup: estimate-linked jobs use Quote Amount only; Amount Paid belongs on a paid invoice or Sale.");
+        job.UpdatedAtUtc = DateTime.UtcNow;
+        changed = true;
+    }
+
+    var bills = await db.Bills
+        .Where(x => !x.IsArchived && x.Total != null)
+        .ToListAsync();
+    foreach (var bill in bills)
+    {
+        var expectedTotal = (bill.Amount ?? 0) + (bill.SalesTax ?? 0);
+        if (Math.Abs(expectedTotal - (bill.Total ?? 0)) > 0.02m)
+        {
+            bill.NeedsReview = true;
+            bill.Notes = AppendNote(bill.Notes, $"Review total: amount + sales tax equals {expectedTotal:C}, but Total is {(bill.Total ?? 0):C}.");
+            bill.UpdatedAtUtc = DateTime.UtcNow;
+            changed = true;
+        }
+    }
+
+    var expenses = await db.Expenses
+        .Where(x => !x.IsArchived && x.Total != null)
+        .ToListAsync();
+    foreach (var expense in expenses)
+    {
+        var expectedTotal = (expense.Amount ?? 0) + (expense.SalesTax ?? 0);
+        if (Math.Abs(expectedTotal - (expense.Total ?? 0)) > 0.02m)
+        {
+            expense.NeedsReview = true;
+            expense.Notes = AppendNote(expense.Notes, $"Review total: amount + sales tax equals {expectedTotal:C}, but Total is {(expense.Total ?? 0):C}.");
+            expense.UpdatedAtUtc = DateTime.UtcNow;
+            changed = true;
+        }
+    }
+
+    var voidInvoices = await db.ReceivableInvoices
+        .Where(x => !x.IsArchived && x.Status == "Void")
+        .ToListAsync();
+    foreach (var invoice in voidInvoices)
+    {
+        invoice.IsArchived = true;
+        invoice.Notes = AppendNote(invoice.Notes, "Archived from active AR during startup because void invoices are retained in Invoice Documents, not active receivables.");
+        invoice.UpdatedAtUtc = DateTime.UtcNow;
+        changed = true;
+    }
+
+    if (changed)
+    {
+        await db.SaveChangesAsync();
+    }
+}
+
+static async Task RepairDirectPaidSalesMissingArAsync(AppDbContext db)
+{
+    var changed = false;
+    var sales = await db.Sales
+        .Where(x => !x.IsArchived
+            && x.Platform == "Direct"
+            && x.IncludeInDashboard
+            && x.InvoiceNumber != null
+            && x.CustomerPaid != null
+            && x.CustomerPaid > 0)
+        .ToListAsync();
+
+    foreach (var sale in sales)
+    {
+        var exists = await db.ReceivableInvoices.AnyAsync(x =>
+            !x.IsArchived
+            && x.InvoiceNumber == sale.InvoiceNumber
+            && x.CustomerName == sale.CustomerName);
+
+        if (exists)
+        {
+            continue;
+        }
+
+        var subtotal = MoneyRules.SaleGrossReceipts(sale);
+        var tax = MoneyRules.SaleSalesTaxMemo(sale);
+        var total = MoneyRules.SaleCustomerPaid(sale) > 0 ? MoneyRules.SaleCustomerPaid(sale) : subtotal + tax;
+        db.ReceivableInvoices.Add(new ReceivableInvoice
+        {
+            InvoiceNumber = sale.InvoiceNumber!,
+            InvoiceDate = sale.SaleDate,
+            DueDate = sale.SaleDate,
+            CustomerName = sale.CustomerName,
+            ProjectName = sale.ProductName,
+            Status = "Paid",
+            Subtotal = subtotal,
+            Discount = 0,
+            RushFee = 0,
+            SalesTax = tax,
+            InvoiceTotal = total,
+            AmountPaid = total,
+            IncludeInCashReports = true,
+            SourceProof = sale.SourceProof,
+            Notes = "Repaired from a paid Direct Sale because no matching AR row existed for this customer/invoice."
+        });
+        changed = true;
+    }
+
+    if (changed)
+    {
+        await db.SaveChangesAsync();
+    }
+}
+
+static async Task RepairInvoiceProofCustomerMismatchesAsync(AppDbContext db)
+{
+    var changed = false;
+    var invoices = await db.ReceivableInvoices
+        .Where(x => !x.IsArchived && x.SourceProof != null && x.SourceProof != "")
+        .ToListAsync();
+
+    foreach (var invoice in invoices)
+    {
+        var saleForProof = await db.Sales.FirstOrDefaultAsync(x =>
+            !x.IsArchived
+            && x.SourceProof == invoice.SourceProof
+            && x.CustomerName != invoice.CustomerName);
+
+        if (saleForProof is null)
+        {
+            continue;
+        }
+
+        invoice.SourceProof = $"Unified invoice {invoice.InvoiceNumber}";
+        invoice.NeedsReview = true;
+        invoice.Notes = AppendNote(invoice.Notes,
+            $"Startup repair: old SourceProof matched {saleForProof.CustomerName}, so this AR proof was reset to the unified invoice reference. Reattach the correct PDF if needed.");
+        invoice.UpdatedAtUtc = DateTime.UtcNow;
+        changed = true;
+    }
+
+    if (changed)
+    {
+        await db.SaveChangesAsync();
+    }
+}
+
 static async Task ArchiveOrphanedUnifiedLedgerRowsAsync(AppDbContext db)
 {
     var docNumbers = await db.InvoiceDocuments
@@ -1631,13 +1886,18 @@ static async Task SyncUnifiedInvoiceDocumentToLedgerAsync(AppDbContext db, Invoi
     }
     else if (doc.DocType == "INVOICE")
     {
-        var invoice = await db.ReceivableInvoices.FirstOrDefaultAsync(x => x.InvoiceNumber == doc.DocNumber);
+        var unifiedSource = $"Unified invoice {doc.DocNumber}";
+        var invoice = await db.ReceivableInvoices.FirstOrDefaultAsync(x => x.SourceProof == unifiedSource);
+        invoice ??= await db.ReceivableInvoices.FirstOrDefaultAsync(x =>
+            x.InvoiceNumber == doc.DocNumber
+            && x.CustomerName == (doc.CustomerName ?? string.Empty));
+
         if (invoice is null)
         {
             invoice = new ReceivableInvoice
             {
                 InvoiceNumber = doc.DocNumber,
-                SourceProof = $"Unified invoice {doc.DocNumber}",
+                SourceProof = unifiedSource,
                 Notes = "Created from the unified estimate/invoice workspace."
             };
             db.ReceivableInvoices.Add(invoice);
@@ -1648,6 +1908,7 @@ static async Task SyncUnifiedInvoiceDocumentToLedgerAsync(AppDbContext db, Invoi
         invoice.CustomerName = doc.CustomerName ?? invoice.CustomerName;
         invoice.ProjectName = doc.ProjectName ?? invoice.ProjectName;
         invoice.Status = NormalizeInvoiceStatus(doc.Status, doc.Total, doc.AmountPaid);
+        invoice.IsArchived = invoice.Status.Equals("Void", StringComparison.OrdinalIgnoreCase);
         invoice.Subtotal = doc.Subtotal;
         invoice.Discount = doc.DiscountAmount;
         invoice.RushFee = doc.RushAmount;

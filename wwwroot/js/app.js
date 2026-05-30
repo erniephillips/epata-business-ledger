@@ -1002,6 +1002,7 @@ function openModal(config, row, presetOnly = false) {
   qs('#modalBackdrop').classList.remove('hidden');
   qs('#modal').classList.remove('hidden');
   initProofPickers(config);
+  initMoneyFormCalculators(config);
 }
 
 function renderField(field, row) {
@@ -1036,6 +1037,28 @@ function initProofPickers(config) {
       fileInput.value = '';
     };
   });
+}
+
+function initMoneyFormCalculators(config) {
+  const watch = names => names.map(name => qs(`#field_${name}`)).filter(Boolean);
+  const numberVal = name => Number(qs(`#field_${name}`)?.value || 0);
+  const setMoney = (name, value) => {
+    const input = qs(`#field_${name}`);
+    if (input && !input.dataset.userEdited) input.value = value ? value.toFixed(2) : '';
+  };
+
+  const formulas = {
+    bills: () => setMoney('total', numberVal('amount') + numberVal('salesTax')),
+    expenses: () => setMoney('total', numberVal('amount') + numberVal('salesTax')),
+    'receivable-invoices': () => setMoney('invoiceTotal', Math.max(0, numberVal('subtotal') - numberVal('discount') + numberVal('rushFee') + numberVal('salesTax')))
+  };
+  const update = formulas[config.route];
+  if (!update) return;
+
+  const totalField = qs('#field_total') || qs('#field_invoiceTotal');
+  if (totalField) totalField.addEventListener('input', () => { totalField.dataset.userEdited = 'true'; });
+  watch(['amount', 'salesTax', 'subtotal', 'discount', 'rushFee']).forEach(input => input.addEventListener('input', update));
+  update();
 }
 
 async function uploadProofForField(config, fieldName, file) {
