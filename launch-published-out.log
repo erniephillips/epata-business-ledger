@@ -1,0 +1,94 @@
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (28ms) [Parameters=[], CommandType='Text', CommandTimeout='30']
+      SELECT COUNT(*) FROM "sqlite_master" WHERE "type" = 'table' AND "rootpage" IS NOT NULL;
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (1ms) [Parameters=[], CommandType='Text', CommandTimeout='30']
+      CREATE TABLE IF NOT EXISTS "InvoiceDocuments" (
+    "Id" INTEGER NOT NULL CONSTRAINT "PK_InvoiceDocuments" PRIMARY KEY AUTOINCREMENT,
+    "DocNumber" TEXT NULL,
+    "DocType" TEXT NOT NULL DEFAULT 'ESTIMATE',
+    "Status" TEXT NOT NULL DEFAULT 'Draft',
+    "CustomerName" TEXT NULL,
+    "CustomerPhone" TEXT NULL,
+    "CustomerAddress" TEXT NULL,
+    "CustomerEmail" TEXT NULL,
+    "PreparedFor" TEXT NULL,
+    "ProjectName" TEXT NULL,
+    "Material" TEXT NULL,
+    "Color" TEXT NULL,
+    "Infill" TEXT NULL,
+    "ProjectDescription" TEXT NULL,
+    "ProjectNotes" TEXT NULL,
+    "PageSize" TEXT NULL,
+    "DocDate" TEXT NULL,
+    "DueDate" TEXT NULL,
+    "Subtotal" TEXT NOT NULL DEFAULT '0.0',
+    "DiscountAmount" TEXT NOT NULL DEFAULT '0.0',
+    "RushAmount" TEXT NOT NULL DEFAULT '0.0',
+    "TaxAmount" TEXT NOT NULL DEFAULT '0.0',
+    "Total" TEXT NOT NULL DEFAULT '0.0',
+    "AmountPaid" TEXT NOT NULL DEFAULT '0.0',
+    "Balance" TEXT NOT NULL DEFAULT '0.0',
+    "PricingGuide" TEXT NULL,
+    "TermsNotes" TEXT NULL,
+    "StandardTurnaround" TEXT NULL,
+    "RushTurnaround" TEXT NULL,
+    "CalcGrams" TEXT NOT NULL DEFAULT '0.0',
+    "CalcHours" TEXT NOT NULL DEFAULT '0.0',
+    "CalcDesignHours" TEXT NOT NULL DEFAULT '0.0',
+    "CalcSetupFee" TEXT NOT NULL DEFAULT '0.0',
+    "CalcPostFee" TEXT NOT NULL DEFAULT '0.0',
+    "CalcGramRate" TEXT NOT NULL DEFAULT '0.05',
+    "CalcHourRate" TEXT NOT NULL DEFAULT '3.0',
+    "CalcDesignRate" TEXT NOT NULL DEFAULT '25.0',
+    "CalcMinimum" TEXT NOT NULL DEFAULT '15.0',
+    "CalcDifficulty" TEXT NOT NULL DEFAULT '1.0',
+    "CalcRush" TEXT NOT NULL DEFAULT '0.0',
+    "CalcDiscount" TEXT NOT NULL DEFAULT '0.0',
+    "CalcTaxRate" TEXT NOT NULL DEFAULT '0.0',
+    "Json" TEXT NOT NULL DEFAULT '{}',
+    "CreatedAt" TEXT NOT NULL,
+    "UpdatedAt" TEXT NOT NULL
+);
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (0ms) [Parameters=[], CommandType='Text', CommandTimeout='30']
+      CREATE TABLE IF NOT EXISTS "InvoiceLineItems" (
+    "Id" INTEGER NOT NULL CONSTRAINT "PK_InvoiceLineItems" PRIMARY KEY AUTOINCREMENT,
+    "InvoiceDocumentId" INTEGER NOT NULL,
+    "SortOrder" INTEGER NOT NULL,
+    "Description" TEXT NULL,
+    "Details" TEXT NULL,
+    "Quantity" TEXT NOT NULL DEFAULT '1.0',
+    "Rate" TEXT NOT NULL DEFAULT '0.0',
+    "Amount" TEXT NOT NULL DEFAULT '0.0',
+    CONSTRAINT "FK_InvoiceLineItems_InvoiceDocuments_InvoiceDocumentId"
+        FOREIGN KEY ("InvoiceDocumentId") REFERENCES "InvoiceDocuments" ("Id") ON DELETE CASCADE
+);
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (0ms) [Parameters=[], CommandType='Text', CommandTimeout='30']
+      CREATE INDEX IF NOT EXISTS "IX_InvoiceDocuments_DocNumber" ON "InvoiceDocuments" ("DocNumber");
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (0ms) [Parameters=[], CommandType='Text', CommandTimeout='30']
+      CREATE INDEX IF NOT EXISTS "IX_InvoiceDocuments_UpdatedAt" ON "InvoiceDocuments" ("UpdatedAt");
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (0ms) [Parameters=[], CommandType='Text', CommandTimeout='30']
+      CREATE INDEX IF NOT EXISTS "IX_InvoiceLineItems_InvoiceDocumentId" ON "InvoiceLineItems" ("InvoiceDocumentId");
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (1ms) [Parameters=[], CommandType='Text', CommandTimeout='30']
+      SELECT EXISTS (
+          SELECT 1
+          FROM "AppSettings" AS "a"
+          WHERE "a"."Key" = 'SeedVersion')
+info: Microsoft.EntityFrameworkCore.Database.Command[20101]
+      Executed DbCommand (0ms) [Parameters=[], CommandType='Text', CommandTimeout='30']
+      SELECT EXISTS (
+          SELECT 1
+          FROM "InvoiceDocuments" AS "i")
+info: Microsoft.Hosting.Lifetime[14]
+      Now listening on: http://127.0.0.1:5062
+info: Microsoft.Hosting.Lifetime[0]
+      Application started. Press Ctrl+C to shut down.
+info: Microsoft.Hosting.Lifetime[0]
+      Hosting environment: Production
+info: Microsoft.Hosting.Lifetime[0]
+      Content root path: C:\Users\ernie\OneDrive\Documents\__EPATA 3D Print Business Folder\07_Websites and Listings\EPATA Accounts Tracker\publish-win-x64

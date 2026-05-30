@@ -18,6 +18,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<BusinessAccount> BusinessAccounts => Set<BusinessAccount>();
     public DbSet<ActionItem> ActionItems => Set<ActionItem>();
     public DbSet<AppSetting> AppSettings => Set<AppSetting>();
+    public DbSet<InvoiceDocument> InvoiceDocuments => Set<InvoiceDocument>();
+    public DbSet<InvoiceLineItem> InvoiceLineItems => Set<InvoiceLineItem>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -34,6 +36,13 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         modelBuilder.Entity<Product>().HasIndex(x => x.Sku).IsUnique(false);
         modelBuilder.Entity<AuditDocument>().HasIndex(x => x.RelatedRecordNumber);
         modelBuilder.Entity<AppSetting>().HasIndex(x => x.Key).IsUnique();
+        modelBuilder.Entity<InvoiceDocument>().HasIndex(x => x.DocNumber).IsUnique(false);
+        modelBuilder.Entity<InvoiceDocument>().HasIndex(x => x.UpdatedAt);
+        modelBuilder.Entity<InvoiceLineItem>()
+            .HasOne(x => x.InvoiceDocument)
+            .WithMany(x => x.LineItems)
+            .HasForeignKey(x => x.InvoiceDocumentId)
+            .OnDelete(DeleteBehavior.Cascade);
     }
 
     public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)

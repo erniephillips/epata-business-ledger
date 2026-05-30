@@ -12,8 +12,6 @@ public static class DbSeeder
             return;
         }
 
-        var invoiceAppUrl = configuration["App:InvoiceAppUrl"] ?? "http://localhost:5057/";
-
         db.BusinessAccounts.AddRange(
             new BusinessAccount { Name = "Etsy Payments", AccountType = "Etsy", Institution = "Etsy", CurrentBalance = 0, Notes = "Use this for Etsy payouts and fees once you start reconciling monthly statements." },
             new BusinessAccount { Name = "Cash / Direct Payments", AccountType = "Cash", CurrentBalance = 0, Notes = "Use this for local/direct jobs paid by cash, Venmo, Zelle, check, etc." },
@@ -60,8 +58,8 @@ public static class DbSeeder
         );
 
         db.ReceivableInvoices.AddRange(
-            new ReceivableInvoice { InvoiceNumber = "INV-2026-0001", OriginalInvoiceNumber = "INV-2026-0001", InvoiceDate = new DateTime(2026, 5, 9), DueDate = new DateTime(2026, 4, 28), CustomerName = "Charles Eke", ProjectName = "Console Cover", Status = "Paid", Subtotal = 80.04m, Discount = 0, RushFee = 0, TaxRatePercent = 0, SalesTax = 0, InvoiceTotal = 80.04m, AmountPaid = 80.04m, SourceProof = "INV-2026-0001 - EPATA 3D Prints(1).pdf", ExternalInvoiceAppUrl = invoiceAppUrl, IncludeInCashReports = true, Notes = "Seeded from uploaded paid PDF." },
-            new ReceivableInvoice { InvoiceNumber = "INV-2026-0002", OriginalInvoiceNumber = "INV-2026-0001", InvoiceDate = new DateTime(2026, 5, 21), DueDate = new DateTime(2026, 6, 4), CustomerName = "Ryan Lavallee", ProjectName = "Pontoon Boat Tiller Head Fitting", Status = "Sent", Subtotal = 111, Discount = 0, RushFee = 0, TaxRatePercent = 6.625m, SalesTax = 7.35m, InvoiceTotal = 118.35m, AmountPaid = 0, SourceProof = "INV-2026-0001 - EPATA 3D Prints(2).pdf", ExternalInvoiceAppUrl = invoiceAppUrl, IncludeInCashReports = false, NeedsReview = true, Notes = "PDF reused INV-2026-0001. Tracker uses INV-2026-0002 to avoid duplicate invoice numbers. Do not count as income until paid." }
+            new ReceivableInvoice { InvoiceNumber = "INV-2026-0001", OriginalInvoiceNumber = "INV-2026-0001", InvoiceDate = new DateTime(2026, 5, 9), DueDate = new DateTime(2026, 4, 28), CustomerName = "Charles Eke", ProjectName = "Console Cover", Status = "Paid", Subtotal = 80.04m, Discount = 0, RushFee = 0, TaxRatePercent = 0, SalesTax = 0, InvoiceTotal = 80.04m, AmountPaid = 80.04m, SourceProof = "INV-2026-0001 - EPATA 3D Prints(1).pdf", IncludeInCashReports = true, Notes = "Seeded from uploaded paid PDF." },
+            new ReceivableInvoice { InvoiceNumber = "INV-2026-0002", OriginalInvoiceNumber = "INV-2026-0001", InvoiceDate = new DateTime(2026, 5, 21), DueDate = new DateTime(2026, 6, 4), CustomerName = "Ryan Lavallee", ProjectName = "Pontoon Boat Tiller Head Fitting", Status = "Sent", Subtotal = 111, Discount = 0, RushFee = 0, TaxRatePercent = 6.625m, SalesTax = 7.35m, InvoiceTotal = 118.35m, AmountPaid = 0, SourceProof = "INV-2026-0001 - EPATA 3D Prints(2).pdf", IncludeInCashReports = false, NeedsReview = true, Notes = "PDF reused INV-2026-0001. Tracker uses INV-2026-0002 to avoid duplicate invoice numbers. Do not count as income until paid." }
         );
 
         db.AuditDocuments.AddRange(
@@ -84,7 +82,7 @@ public static class DbSeeder
         db.AppSettings.AddRange(
             new AppSetting { Key = "SeedVersion", Value = "2026-05-30-001", Notes = "Initial seed based on uploaded EPATA PDFs and tracker structure." },
             new AppSetting { Key = "NextInvoiceNumber", Value = "INV-2026-0003", Notes = "Charles is 0001. Ryan is tracked as 0002 because the uploaded Ryan PDF reused 0001." },
-            new AppSetting { Key = "InvoiceAppUrl", Value = invoiceAppUrl, Notes = "Existing local invoice app link." }
+            new AppSetting { Key = "LegacyInvoiceImport", Value = "Optional", Notes = "Use Invoice Center for new work. Old invoice app import is only for one-time migration." }
         );
 
         await db.SaveChangesAsync();

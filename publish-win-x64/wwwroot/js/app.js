@@ -1,7 +1,8 @@
 const appState = {
   currentPage: 'dashboard',
   modal: { config: null, row: null, mode: 'create' },
-  globalSearchTimer: null
+  globalSearchTimer: null,
+  invoicePdfModule: null
 };
 
 const moneyFields = new Set(['itemSales','shippingCharged','salesTaxCollected','customerPaid','platformFees','shippingLabelCost','refunds','estimatedCogs','subtotal','discount','rushFee','salesTax','invoiceTotal','amountPaid','amount','total','openingBalance','currentBalance','cost','giftCardAmount','quoteAmount','invoiceAmount','targetPrice','grams','materialCostPerGram','printHours','machineRatePerHour','packagingCost','designMinutes','businessUsePercent']);
@@ -131,7 +132,7 @@ const configs = {
       f('invoiceTotal','Invoice Total','number','Final invoice total.'),
       f('amountPaid','Amount Paid','number','How much has been paid so far.'),
       f('sourceProof','Source / Proof','text',help.sourceProof),
-      f('externalInvoiceAppUrl','Invoice App Link','text','Usually http://localhost:5057/. Opens your separate invoice generator.'),
+      f('externalInvoiceAppUrl','Invoice Source Link','text','Optional reference to an outside invoice source. New estimates and invoices should be created from Estimates or Invoices.'),
       f('includeInCashReports','Include in Cash Reports','checkbox','Turn on once actually paid. Keep off for sent/unpaid invoices.'),
       f('needsReview','Needs Review','checkbox',help.needsReview),
       f('notes','Notes','textarea','Internal invoice notes.', null, 'full')
@@ -325,7 +326,10 @@ const navGroups = [
     items: [
       ['dashboard','Dashboard','◆'],
       ['quickAdd','Quick Add','＋'],
-      ['workflowGuide','Workflow Guide','▶'],
+      ['estimates','Estimates','🧾'],
+      ['invoices','Invoices','📄'],
+      ['pricingCalculator','Calculator','🧮'],
+      ['invoiceRecords','Invoice Records','🗂'],
       ['documentIntake','Document Intake','⇪']
     ]
   },
@@ -354,7 +358,9 @@ const navGroups = [
     items: [
       ['auditDocs',configs.auditDocs.nav,'↗'],
       ['actions',configs.actions.nav,'!'],
+      ['taxPrep','Tax Prep','%'],
       ['importExport','Import / Export','⇄'],
+      ['workflowGuide','Workflow','▶'],
       ['help','Help / Glossary','?']
     ]
   }
@@ -410,6 +416,46 @@ function toast(message) {
   setTimeout(() => el.classList.add('hidden'), 3200);
 }
 
+function bindTooltips() {
+  const tooltip = qs('#tooltip');
+  document.addEventListener('mouseover', e => {
+    const tip = e.target.closest('.tip');
+    if (!tip || !tip.dataset.tip) return;
+    tooltip.textContent = tip.dataset.tip;
+    tooltip.classList.remove('hidden');
+    positionTooltip(tip, tooltip);
+  });
+  document.addEventListener('focusin', e => {
+    const tip = e.target.closest('.tip');
+    if (!tip || !tip.dataset.tip) return;
+    tooltip.textContent = tip.dataset.tip;
+    tooltip.classList.remove('hidden');
+    positionTooltip(tip, tooltip);
+  });
+  document.addEventListener('mouseout', e => {
+    if (e.target.closest('.tip')) tooltip.classList.add('hidden');
+  });
+  document.addEventListener('focusout', e => {
+    if (e.target.closest('.tip')) tooltip.classList.add('hidden');
+  });
+  window.addEventListener('scroll', () => tooltip.classList.add('hidden'), true);
+  window.addEventListener('resize', () => tooltip.classList.add('hidden'));
+}
+
+function positionTooltip(anchor, tooltip) {
+  const rect = anchor.getBoundingClientRect();
+  const gap = 10;
+  const tipRect = tooltip.getBoundingClientRect();
+  let left = rect.left + rect.width / 2 - tipRect.width / 2;
+  let top = rect.bottom + gap;
+  left = Math.max(12, Math.min(left, window.innerWidth - tipRect.width - 12));
+  if (top + tipRect.height > window.innerHeight - 12) {
+    top = rect.top - tipRect.height - gap;
+  }
+  tooltip.style.left = `${left}px`;
+  tooltip.style.top = `${Math.max(12, top)}px`;
+}
+
 function renderNav() {
   const nav = qs('#nav');
   nav.innerHTML = navGroups.map(group => `
@@ -425,6 +471,7 @@ function renderNav() {
 
 async function showPage(page) {
   appState.currentPage = page;
+  toggleMergedInvoiceStyles(['invoiceCenter','estimates','invoices','pricingCalculator','invoiceRecords'].includes(page));
   if (page !== 'globalSearch') qs('#globalSearch').value = '';
   qsa('.nav-button').forEach(b => b.classList.toggle('active', b.dataset.page === page));
   const el = qs('#app');
@@ -433,8 +480,14 @@ async function showPage(page) {
     if (page === 'dashboard') await renderDashboard(el);
     else if (page === 'globalSearch') await renderGlobalSearch(el);
     else if (page === 'quickAdd') renderQuickAdd(el);
+    else if (page === 'invoiceCenter') await renderMergedInvoiceTool(el, 'dashboard');
+    else if (page === 'estimates') await renderMergedInvoiceTool(el, 'builder', 'ESTIMATE');
+    else if (page === 'invoices') await renderMergedInvoiceTool(el, 'builder', 'INVOICE');
+    else if (page === 'pricingCalculator') await renderMergedInvoiceTool(el, 'calculator');
+    else if (page === 'invoiceRecords') await renderMergedInvoiceTool(el, 'records');
     else if (page === 'workflowGuide') renderWorkflowGuide(el);
     else if (page === 'documentIntake') renderDocumentIntake(el);
+    else if (page === 'taxPrep') await renderTaxPrep(el);
     else if (page === 'importExport') renderImportExport(el);
     else if (page === 'help') renderHelp(el);
     else await renderEntity(el, configs[page]);
@@ -739,8 +792,11 @@ function labelize(name) {
 
 function renderQuickAdd(el) {
   el.innerHTML = `
-    <div class="page-head"><div><h2>Quick Add</h2><p>This is the main place to enter new business events. Pick what happened once; only add related records when the workflow actually needs them.</p></div><div class="actions"><button class="ghost-button" onclick="showPage('workflowGuide')">Workflow Guide</button></div></div>
+    <div class="page-head"><div><h2>Quick Add</h2><p>Use this for simple ledger events: paid sale, unpaid invoice entered outside the builder, paid expense, vendor bill, or manual quote record.</p></div><div class="actions"><button class="ghost-button" onclick="showPage('estimates')">New Estimate</button><button class="ghost-button" onclick="showPage('invoices')">New Invoice</button><button class="ghost-button" onclick="showPage('workflowGuide')">Workflow Guide</button></div></div>
     <div class="quick-grid">
+      ${quickCard('Estimate Sent','You sent an estimate/quote and are waiting for approval.','customerJobs','estimateSent')}
+      ${quickLinkCard('New Estimate PDF','Build a real customer estimate with calculator, line items, and PDF preview.','estimates')}
+      ${quickLinkCard('New Invoice PDF','Build a real customer invoice with line items, AR sync, and PDF preview.','invoices')}
       ${quickCard('Etsy Sale','A paid Etsy order or marketplace sale.','sales','etsy')}
       ${quickCard('Direct Paid Sale','Customer already paid you directly.','sales','directPaid')}
       ${quickCard('Open Invoice / AR','You sent a direct invoice and are waiting for payment.','receivables','invoice')}
@@ -751,41 +807,56 @@ function renderQuickAdd(el) {
       <div class="card"><h3>Clean Books Rule</h3><p><b>Sales</b> are money coming in. <b>AR invoices</b> are money customers owe you. <b>AP bills</b> are money you owe. <b>Expenses</b> are things already paid. <b>Customer Jobs</b> track the work itself.</p></div>
       <div class="card"><h3>Proof Rule</h3><p>Every meaningful row should eventually point to a PDF, receipt, screenshot, order number, or uploaded document in Audit Docs.</p></div>
     </div>`;
-  qsa('.quick-card').forEach(card => card.onclick = () => quickOpen(card.dataset.config, card.dataset.kind));
+  qsa('.quick-card[data-page]').forEach(card => card.onclick = () => showPage(card.dataset.page));
+  qsa('.quick-card[data-config]').forEach(card => card.onclick = () => quickOpen(card.dataset.config, card.dataset.kind));
+}
+
+function quickLinkCard(title, desc, page) {
+  return `<button class="quick-card" data-page="${page}"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(desc)}</span></button>`;
 }
 
 function renderWorkflowGuide(el) {
   const flows = [
+    ['Estimate needed', 'Estimates -> New Estimate', 'Use the builder when you need a customer-facing quote/PDF. Saving an estimate creates or updates a quoted Customer Job. It is not income and not AR.'],
+    ['Estimate sent manually, waiting for approval', 'Quick Add -> Estimate Sent', 'Use this only when you are recording a quote made outside this app. This is not income and not AR yet.'],
     ['Etsy order came in', 'Quick Add → Etsy Sale', 'Creates the money record. Keep Needs Review on until Etsy fees, actual label cost, packaging, and COGS are entered. Add/attach proof from the sale form or Document Intake.'],
-    ['Direct customer asks for work', 'Customer Jobs', 'Create the job first. When you invoice them, add an AR Invoice. When they pay, add or confirm a Sale.'],
-    ['You sent an invoice', 'Quick Add → Open Invoice / AR', 'This tracks money owed to you. Do not count it as cash until paid. When paid, update the invoice and add/confirm the sale.'],
+    ['Direct customer asks for work', 'Estimates or Customer Jobs', 'Create an estimate if they need a customer-facing quote. Use Customer Jobs for internal tracking when no PDF is needed.'],
+    ['Invoice needed', 'Invoices -> New Invoice', 'Saving an invoice creates or updates AR. AR tracks money owed, not cash received.'],
+    ['You sent an invoice manually', 'Quick Add → Open Invoice / AR', 'Use this only when recording an invoice made outside this app. Do not count it as cash until paid.'],
     ['Customer already paid direct', 'Quick Add → Direct Paid Sale', 'Use one sale row. Add the invoice number if there is one, and attach the invoice/proof file.'],
     ['You bought something and paid already', 'Quick Add → Paid Expense', 'One expense row is enough. Attach receipt proof.'],
     ['Vendor billed you, not paid yet', 'Quick Add → Bill / AP', 'Use AP Bills until paid. If you later want cash-basis expense reporting, add/confirm an Expense when paid.'],
-    ['You only have a PDF/receipt first', 'Document Intake', 'Upload it to create an Audit Doc. Today it indexes proof; it does not reliably create all ledger records by itself yet.']
+    ['You only have a PDF/receipt first', 'Document Intake', 'Upload it to create an Audit Doc. Then use the next-step buttons or Attach File on a row; intake indexes proof but does not silently post accounting records.']
   ];
   el.innerHTML = `
     <section class="workspace-hero">
       <div>
         <span class="eyebrow">How To Use This Ledger</span>
-        <h2>Enter the event once, then link proof.</h2>
-        <p>The app is built around business events. You should not have to retype everything into every tab. Tabs are different ledgers/views, not duplicate chores.</p>
+        <h2>Pick the real-world event, enter it once, then attach proof.</h2>
+        <p>Tabs are ledgers/views, not chores to fill one by one. Use the builder for customer PDFs, Quick Add for simple events, and Document Intake for proof files.</p>
       </div>
       <div class="hero-actions">
+        <button class="ghost-button dark" onclick="showPage('estimates')">New Estimate</button>
+        <button class="ghost-button dark" onclick="showPage('invoices')">New Invoice</button>
         <button class="primary-button" onclick="showPage('quickAdd')">Start Quick Add</button>
         <button class="ghost-button dark" onclick="showPage('documentIntake')">Upload Proof</button>
       </div>
     </section>
+    ${workflowDiagram()}
     <div class="grid two">
       <div class="card">
-        <h3>The Main Entry Point</h3>
-        <p><b>Use Quick Add first</b> for most day-to-day work. It asks what happened and opens the right tab/form with defaults.</p>
+        <h3>Where To Start</h3>
+        <p><b>Use Estimates or Invoices</b> when you need a customer-facing PDF, calculator, line items, or live preview.</p>
+        <p><b>Use Quick Add</b> for simple bookkeeping events that do not need the PDF builder.</p>
+        <p><b>Use Document Intake</b> when the file comes first. It stores proof; you still approve what business record it belongs to.</p>
         <p>Use individual tabs when you are reviewing, editing, exporting, or doing a specific cleanup task.</p>
       </div>
       <div class="card">
-        <h3>What Is Not Automatic Yet</h3>
-        <p>Document Intake currently saves files, creates Audit Docs, and keeps extracted preview text when possible. It does <b>not</b> yet make reliable accounting decisions from PDFs automatically.</p>
-        <p>The next smart layer would be an Intake Review screen: extracted fields on the left, suggested Sale/Invoice/Expense on the right, and you approve before anything posts.</p>
+        <h3>What The App Updates For You</h3>
+        <p><b>Estimate saved:</b> creates/updates a quoted Customer Job. It does not count as income.</p>
+        <p><b>Invoice saved:</b> creates/updates AR so you know who owes money.</p>
+        <p><b>Invoice marked paid:</b> updates AR and creates/updates the Direct Sale for cash reporting.</p>
+        <p><b>Proof uploaded:</b> creates an Audit Doc and stores the local file path.</p>
       </div>
     </div>
     <div class="card">
@@ -807,7 +878,7 @@ function renderWorkflowGuide(el) {
       </div>
       <div class="card">
         <h3>AI Automation Path</h3>
-        <p>A local LLM can help with extraction, but it should propose records for review, not silently write books. For this app, the practical choices are:</p>
+        <p>A local LLM could help read receipts/PDFs later, but it should propose records for your review, not silently write the books.</p>
         <div class="help-list">
           <div class="help-item"><strong>Ollama</strong><p>Free/local model runner. Easy install, but it runs a local API service.</p></div>
           <div class="help-item"><strong>LLamaSharp</strong><p>Embedded .NET library for GGUF models. No cloud API, but setup is heavier and model files are large.</p></div>
@@ -824,9 +895,10 @@ function quickOpen(configKey, kind) {
   const config = configs[configKey];
   const today = new Date().toISOString().substring(0,10);
   const presets = {
+    estimateSent: { platform: 'Direct', status: 'Quoted', jobDate: today, jobType: 'Estimate', needsReview: false, notes: 'Estimate entered manually. Do not count as income or AR until approved/invoiced.' },
     etsy: { platform: 'Etsy', status: 'Paid', saleDate: today, quantity: 1, includeInDashboard: true, needsReview: true, notes: 'Remember to enter Etsy fees, actual label cost, packaging, and COGS.' },
     directPaid: { platform: 'Direct', status: 'Paid', saleDate: today, quantity: 1, includeInDashboard: true },
-    invoice: { status: 'Sent', invoiceDate: today, includeInCashReports: false, needsReview: false, externalInvoiceAppUrl: 'http://localhost:5057/' },
+    invoice: { status: 'Sent', invoiceDate: today, includeInCashReports: false, needsReview: false },
     bill: { status: 'Unpaid', billDate: today, taxDeductible: true },
     expense: { expenseDate: today, taxDeductible: true }
   };
@@ -993,15 +1065,19 @@ function renderDocumentIntake(el) {
         </div>
       </section>
       <section class="card">
-        <h3>What Parsing Does Today</h3>
-        <p>Text, CSV, JSON, and Markdown files get a clean preview. PDFs get a best-effort text preview when the PDF stores readable text. Scanned image-only PDFs still need OCR later, but the file is saved and indexed now.</p>
-        <p>This keeps the workflow useful today without overpromising: upload proof, connect it to a row, then refine details when you review.</p>
-        <p><b>Important:</b> intake does not yet automatically decide whether a PDF should become a Sale, AR Invoice, Bill, or Expense. Use Quick Add for the business event, and use intake/Attach File for proof.</p>
+        <h3>What Happens After Upload?</h3>
+        <p><b>One upload creates one Audit Doc.</b> That Audit Doc is your proof file/index card. It does not automatically fill every tab.</p>
+        <p>After upload, choose the next step: create the Sale/Expense/Invoice/Bill that the file proves, or edit the Audit Doc to add missing notes, related record number, and review status.</p>
+        <p>Text, CSV, JSON, and Markdown files get a clean preview. PDFs get best-effort text preview when the PDF stores readable text. Scanned image-only PDFs still need OCR later.</p>
       </section>
     </div>
     <div class="card">
-      <h3>Upload Result</h3>
-      <pre id="uploadResult" class="document-preview">No upload yet.</pre>
+      <h3>After Upload</h3>
+      <div id="uploadResult" class="upload-result empty-state">
+        <div class="empty-icon">⇪</div>
+        <div class="empty-title">No upload yet.</div>
+        <div class="empty-desc">Uploaded files will appear here with next-step buttons.</div>
+      </div>
     </div>`;
   qs('#uploadDocsBtn').onclick = uploadDocuments;
   const zone = qs('#uploadZone');
@@ -1047,6 +1123,768 @@ function resultCard({ key, config, row }) {
   </button>`;
 }
 
+async function renderMergedInvoiceTool(el, initialView = 'dashboard', newType = '') {
+  ensureMergedInvoiceStyles();
+  const html = await fetch('/invoice-builder/index.html').then(r => {
+    if (!r.ok) throw new Error(`Invoice builder shell failed to load: ${r.status}`);
+    return r.text();
+  });
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const main = doc.querySelector('#main');
+  if (!main) throw new Error('Invoice builder markup is missing its main workspace.');
+
+  el.innerHTML = `
+    <section id="epataInvoiceMerged" class="invoice-tool-merged">
+      <div class="merged-invoice-bar">
+        <div>
+          <span class="eyebrow">Merged Estimate & Invoice Workspace</span>
+          <h2>Estimator, calculator, records, and PDF preview</h2>
+          <p>This is the original invoice tool running inside the Business Ledger shell and saving to the unified SQLite database.</p>
+        </div>
+        <div class="merged-tabs">
+          <button class="nav-item" data-view="dashboard">Dashboard</button>
+          <button class="nav-item" data-view="calculator">Calculator</button>
+          <button class="nav-item" data-view="builder">Builder + PDF</button>
+          <button class="nav-item" data-view="records">Records</button>
+          <button class="nav-item" data-view="ratecard">Rate Card</button>
+          <button class="nav-item" data-view="settings">Settings</button>
+        </div>
+      </div>
+      <main id="main">${main.innerHTML}</main>
+    </section>`;
+
+  qsa('#epataInvoiceMerged [onclick*="window.location.href"]').forEach(button => button.remove());
+  const module = await import('/invoice-builder/js/app.js');
+  await module.init(initialView);
+  if (newType) {
+    const buttonId = newType === 'INVOICE' ? 'btnNewInvoice' : 'btnNewEstimate';
+    setTimeout(() => qs(`#${buttonId}`)?.click(), 50);
+  }
+}
+
+function ensureMergedInvoiceStyles() {
+  if (!document.getElementById('invoiceBuilderCss')) {
+    const link = document.createElement('link');
+    link.id = 'invoiceBuilderCss';
+    link.rel = 'stylesheet';
+    link.href = '/invoice-builder/css/app.css';
+    document.head.appendChild(link);
+  }
+  document.getElementById('invoiceBuilderCss').disabled = false;
+  if (!document.getElementById('invoiceBuilderRootOverrides')) {
+    const style = document.createElement('style');
+    style.id = 'invoiceBuilderRootOverrides';
+    style.textContent = `
+      body #app { display: block; min-height: 0; }
+      body #main { margin-left: 0; }
+      .invoice-tool-merged { display: block; min-height: calc(100vh - 112px); background: #f3f6fb; border: 1px solid #dbe3ef; border-radius: 14px; overflow: hidden; }
+      .invoice-tool-merged #main { margin-left: 0 !important; min-height: 0; }
+      .invoice-tool-merged .view-header, .invoice-tool-merged .view-body, .invoice-tool-merged .active-record-bar { padding-left: 16px; padding-right: 16px; }
+      .invoice-tool-merged .view-header { padding-top: 12px; padding-bottom: 0; }
+      .invoice-tool-merged .view-body { padding-top: 12px; }
+      .merged-invoice-bar { display: flex; justify-content: space-between; gap: 10px; align-items: center; padding: 6px 8px; background: #10244c; color: #fff; }
+      .merged-invoice-bar h2 { margin: 0; font-size: .82rem; line-height: 1; white-space: nowrap; }
+      .merged-invoice-bar .eyebrow { display: none; }
+      .merged-invoice-bar p { display: none; }
+      .merged-tabs { display: flex; flex-wrap: nowrap; gap: 4px; justify-content: flex-end; overflow-x: auto; }
+      .merged-tabs .nav-item { min-height: 26px; border: 1px solid rgba(255,255,255,.18); background: rgba(255,255,255,.08); color: #fff; border-radius: 6px; padding: 4px 8px; font-weight: 800; cursor: pointer; font-size: .72rem; white-space: nowrap; }
+      .merged-tabs .nav-item.active { background: #fff; color: #17468f; }
+      .invoice-tool-merged .active-record-bar { min-height: 28px; padding-top: 5px; padding-bottom: 5px; }
+      .invoice-tool-merged #view-builder .view-title p { display: none; }
+      .invoice-tool-merged .view { min-height: 0; }
+      .invoice-tool-merged .invoice-preview-frame { background: #fff; }
+      @media (max-width: 760px) { .merged-invoice-bar { align-items: stretch; flex-direction: column; } .merged-tabs { justify-content: flex-start; } }
+    `;
+    document.head.appendChild(style);
+  }
+  document.getElementById('invoiceBuilderRootOverrides').disabled = false;
+}
+
+function toggleMergedInvoiceStyles(enabled) {
+  const link = document.getElementById('invoiceBuilderCss');
+  const style = document.getElementById('invoiceBuilderRootOverrides');
+  if (link) link.disabled = !enabled;
+  if (style) style.disabled = !enabled;
+}
+
+async function renderInvoiceCenter(el) {
+  await renderInvoiceWorkspace(el, '');
+}
+
+async function renderInvoiceWorkspace(el, typeFocus = '') {
+  const [docs, stats] = await Promise.all([
+    api('/api/invoice-documents'),
+    api('/api/invoice-documents/stats')
+  ]);
+  const estimates = docs.filter(d => (d.docType || '').toUpperCase() === 'ESTIMATE');
+  const invoices = docs.filter(d => (d.docType || '').toUpperCase() === 'INVOICE');
+  const focusLabel = typeFocus === 'ESTIMATE' ? 'Estimates' : typeFocus === 'INVOICE' ? 'Invoices' : 'Invoices & Estimates';
+  const focusDocs = typeFocus ? docs.filter(d => d.docType === typeFocus) : docs;
+  el.innerHTML = `
+    <section class="workspace-hero">
+      <div>
+        <span class="eyebrow">Unified ${focusLabel}</span>
+        <h2>Create the customer document here, then the ledger updates itself.</h2>
+        <p>Estimates, invoices, calculator math, records, and PDF output all save into the same local SQLite database. No separate invoice app and no duplicate entry.</p>
+      </div>
+      <div class="hero-actions">
+        <button class="ghost-button dark" onclick="showPage('pricingCalculator')">Open Calculator</button>
+        <button class="ghost-button dark" id="legacyImportBtn">Import Old App Once</button>
+        <button class="ghost-button dark" id="newEstimateBtn">New Estimate</button>
+        <button class="primary-button" id="newInvoiceBtn">New Invoice</button>
+      </div>
+    </section>
+    <section class="entity-strip">
+      <div><span>Estimates</span><strong>${stats.totalEstimates ?? estimates.length}</strong></div>
+      <div><span>Invoices</span><strong>${stats.totalInvoices ?? invoices.length}</strong></div>
+      <div><span>Unpaid Balance</span><strong>${formatMoney(stats.unpaidBalance ?? invoices.reduce((s, d) => s + Number(d.balance || 0), 0))}</strong></div>
+      <div><span>Paid Revenue</span><strong>${formatMoney(stats.paidRevenue || 0)}</strong></div>
+    </section>
+    <div class="grid three">
+      <button class="action-tile" onclick="openInvoiceEditor(null, 'ESTIMATE')">
+        <span>1</span><strong>New Estimate</strong><small>Quote work before approval. Creates a quoted Customer Job.</small>
+      </button>
+      <button class="action-tile" onclick="showPage('pricingCalculator')">
+        <span>2</span><strong>Calculator</strong><small>Use grams, print hours, design time, fees, discount, and tax to build a line item.</small>
+      </button>
+      <button class="action-tile" onclick="openInvoiceEditor(null, 'INVOICE')">
+        <span>3</span><strong>New Invoice</strong><small>Bill approved work. Creates AR and becomes a Sale when paid.</small>
+      </button>
+    </div>
+    <div class="grid two">
+      <div class="card">
+        <div class="card-header-lite"><h3>What happens when you save</h3><span class="badge">One database</span></div>
+        <div class="workflow-list">
+          <div class="workflow-row"><div><span>Estimate</span><strong>Customer Job</strong></div><p>Saving an estimate creates/updates the quoted job. It is not income.</p></div>
+          <div class="workflow-row"><div><span>Invoice</span><strong>AR Invoice</strong></div><p>Saving an invoice creates/updates AR. It is money owed until paid.</p></div>
+          <div class="workflow-row"><div><span>Paid invoice</span><strong>Sale</strong></div><p>Enter Amount Paid and save. The app creates/updates the matching Direct Sale automatically.</p></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header-lite"><h3>What To Do First</h3><span class="badge">Process</span></div>
+        <div class="help-list">
+          <div class="help-item"><strong>Quote first</strong><p>Create an estimate. Send/print it. The job appears in Customer Jobs as Quoted.</p></div>
+          <div class="help-item"><strong>Approved</strong><p>Duplicate the estimate or switch it to Invoice, then save. The invoice appears in AR.</p></div>
+          <div class="help-item"><strong>Paid</strong><p>Set Amount Paid and status Paid. The matching Direct Sale is created or updated automatically for cash reporting.</p></div>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="table-tools">
+        <input class="search" id="invoiceSearch" placeholder="Search estimates, invoices, customers, projects...">
+        <select id="invoiceTypeFilter" class="search compact">
+          <option value="">All documents</option>
+          <option value="ESTIMATE" ${typeFocus === 'ESTIMATE' ? 'selected' : ''}>Estimates</option>
+          <option value="INVOICE" ${typeFocus === 'INVOICE' ? 'selected' : ''}>Invoices</option>
+        </select>
+        <span class="badge">${focusDocs.length} shown</span>
+      </div>
+      <div id="invoiceDocsArea">${invoiceDocsTable(focusDocs)}</div>
+    </div>`;
+  qs('#newEstimateBtn').onclick = () => openInvoiceEditor(null, 'ESTIMATE');
+  qs('#newInvoiceBtn').onclick = () => openInvoiceEditor(null, 'INVOICE');
+  qs('#legacyImportBtn').onclick = importLegacyInvoicesOnce;
+  qs('#invoiceSearch').oninput = () => filterInvoiceDocs(docs);
+  qs('#invoiceTypeFilter').onchange = () => filterInvoiceDocs(docs);
+  bindInvoiceDocButtons();
+}
+
+function invoiceDocsTable(docs) {
+  if (!docs.length) return emptyState('No estimates or invoices yet.', 'Create one here, or use Import Old App Once to pull existing documents into this unified database.');
+  return `<div class="table-wrap"><table><thead><tr><th>Number</th><th>Type</th><th>Status</th><th>Customer</th><th>Project</th><th>Total</th><th>Balance</th><th>Date</th><th></th></tr></thead><tbody>${docs.map(d => `
+    <tr>
+      <td><strong>${escapeHtml(d.docNumber)}</strong></td>
+      <td>${badgeFor(d.docType)}</td>
+      <td>${badgeFor(d.status)}</td>
+      <td>${escapeHtml(d.customerName || '')}</td>
+      <td>${escapeHtml(d.projectName || '')}</td>
+      <td>${formatMoney(d.total)}</td>
+      <td>${formatMoney(d.balance)}</td>
+      <td>${escapeHtml(d.docDate || '')}</td>
+      <td><button class="ghost-button compact-action" data-invoice-edit="${d.id}">Open</button></td>
+    </tr>`).join('')}</tbody></table></div>`;
+}
+
+function filterInvoiceDocs(docs) {
+  const term = (qs('#invoiceSearch')?.value || '').toLowerCase();
+  const type = qs('#invoiceTypeFilter')?.value || '';
+  const filtered = docs.filter(d => {
+    const blob = JSON.stringify(d).toLowerCase();
+    return (!type || d.docType === type) && (!term || blob.includes(term));
+  });
+  qs('#invoiceDocsArea').innerHTML = invoiceDocsTable(filtered);
+  bindInvoiceDocButtons();
+}
+
+function bindInvoiceDocButtons() {
+  qsa('[data-invoice-edit]').forEach(btn => btn.onclick = () => openInvoiceEditor(Number(btn.dataset.invoiceEdit)));
+}
+
+function renderPricingCalculator(el) {
+  el.innerHTML = `
+    <div class="page-head">
+      <div>
+        <h2>Estimate Calculator</h2>
+        <p>Use this before or during an estimate. Push the result into a new estimate or an open invoice/estimate editor.</p>
+      </div>
+      <div class="actions">
+        <button class="ghost-button" onclick="showPage('estimates')">Estimates</button>
+        <button class="primary-button" id="calcNewEstimateBtn">New Estimate From Calculator</button>
+      </div>
+    </div>
+    <div class="grid two">
+      <form id="pricingCalcForm" class="card invoice-form">
+        ${invoiceInput('calcDescription','Line Description','Custom 3D print service')}
+        ${invoiceInput('calcDetails','Details','Material, color, size, or customer request')}
+        ${invoiceInput('calcGrams','Filament Grams',0,'number')}
+        ${invoiceInput('calcHours','Print Hours',0,'number')}
+        ${invoiceInput('calcDesignHours','Design Hours',0,'number')}
+        ${invoiceInput('calcSetupFee','Setup Fee',0,'number')}
+        ${invoiceInput('calcPostFee','Post Processing',0,'number')}
+        ${invoiceInput('calcGramRate','Rate / Gram',0.05,'number')}
+        ${invoiceInput('calcHourRate','Machine Rate / Hr',3,'number')}
+        ${invoiceInput('calcDesignRate','Design Rate / Hr',25,'number')}
+        ${invoiceInput('calcDifficulty','Difficulty Multiplier',1,'number')}
+        ${invoiceInput('calcRush','Rush %',0,'number')}
+        ${invoiceInput('calcDiscount','Discount',0,'number')}
+        ${invoiceInput('calcTaxRate','Tax %',0,'number')}
+        ${invoiceInput('calcMinimum','Minimum Charge',15,'number')}
+      </form>
+      <div class="card calc-result-card">
+        <div class="card-header-lite"><h3>Calculated Quote</h3><span class="badge">Ready for estimate</span></div>
+        <div class="calc-total" id="pricingCalcTotal">$0.00</div>
+        <div id="pricingCalcBreakdown" class="workflow-list"></div>
+        <div class="actions">
+          <button class="ghost-button" id="calcCopyLineBtn">Copy Line Text</button>
+          <button class="primary-button" id="calcPushEstimateBtn">Create Estimate</button>
+        </div>
+      </div>
+    </div>`;
+
+  qs('#pricingCalcForm').oninput = updatePricingCalculator;
+  qs('#calcNewEstimateBtn').onclick = () => createEstimateFromCalculator();
+  qs('#calcPushEstimateBtn').onclick = () => createEstimateFromCalculator();
+  qs('#calcCopyLineBtn').onclick = async () => {
+    const calc = collectPricingCalculator();
+    await navigator.clipboard?.writeText(`${calc.description} - ${formatMoney(calc.total)}`);
+    toast('Calculator line copied.');
+  };
+  updatePricingCalculator();
+}
+
+function collectPricingCalculator() {
+  const form = qs('#pricingCalcForm');
+  const data = Object.fromEntries(new FormData(form).entries());
+  const grams = Number(data.calcGrams || 0);
+  const hours = Number(data.calcHours || 0);
+  const designHours = Number(data.calcDesignHours || 0);
+  const setupFee = Number(data.calcSetupFee || 0);
+  const postFee = Number(data.calcPostFee || 0);
+  const gramRate = Number(data.calcGramRate || 0.05);
+  const hourRate = Number(data.calcHourRate || 3);
+  const designRate = Number(data.calcDesignRate || 25);
+  const minimum = Number(data.calcMinimum || 15);
+  const difficulty = Number(data.calcDifficulty || 1);
+  const rush = Number(data.calcRush || 0);
+  const discount = Number(data.calcDiscount || 0);
+  const taxRate = Number(data.calcTaxRate || 0);
+  const material = grams * gramRate;
+  const machine = hours * hourRate;
+  const design = designHours * designRate;
+  const base = Math.max(minimum, (material + machine + design + setupFee + postFee) * Math.max(0, difficulty));
+  const rushAmount = base * rush / 100;
+  const subtotal = Math.max(0, base + rushAmount - discount);
+  const taxAmount = subtotal * taxRate / 100;
+  return {
+    ...data,
+    grams, hours, designHours, setupFee, postFee, gramRate, hourRate, designRate, minimum, difficulty, rush, discount, taxRate,
+    material, machine, design, base, rushAmount, subtotal, taxAmount, total: subtotal + taxAmount,
+    description: data.calcDescription || 'Custom 3D print service',
+    details: data.calcDetails || ''
+  };
+}
+
+function updatePricingCalculator() {
+  const calc = collectPricingCalculator();
+  qs('#pricingCalcTotal').textContent = formatMoney(calc.total);
+  qs('#pricingCalcBreakdown').innerHTML = [
+    ['Material', `${calc.grams}g x ${formatMoney(calc.gramRate)}`, calc.material],
+    ['Machine time', `${calc.hours} hr x ${formatMoney(calc.hourRate)}`, calc.machine],
+    ['Design time', `${calc.designHours} hr x ${formatMoney(calc.designRate)}`, calc.design],
+    ['Base after minimum/difficulty', `Minimum ${formatMoney(calc.minimum)} · difficulty ${calc.difficulty}`, calc.base],
+    ['Rush / discount / tax', `${calc.rush}% rush, ${formatMoney(calc.discount)} discount, ${calc.taxRate}% tax`, calc.rushAmount - calc.discount + calc.taxAmount]
+  ].map(([label, note, value]) => `<div class="workflow-row"><div><span>${escapeHtml(label)}</span><strong>${formatMoney(value)}</strong></div><p>${escapeHtml(note)}</p></div>`).join('');
+}
+
+async function createEstimateFromCalculator() {
+  const calc = collectPricingCalculator();
+  const doc = await newInvoiceDocument('ESTIMATE');
+  doc.calcGrams = calc.grams;
+  doc.calcHours = calc.hours;
+  doc.calcDesignHours = calc.designHours;
+  doc.calcSetupFee = calc.setupFee;
+  doc.calcPostFee = calc.postFee;
+  doc.calcGramRate = calc.gramRate;
+  doc.calcHourRate = calc.hourRate;
+  doc.calcDesignRate = calc.designRate;
+  doc.calcMinimum = calc.minimum;
+  doc.calcDifficulty = calc.difficulty;
+  doc.calcRush = calc.rush;
+  doc.calcDiscount = calc.discount;
+  doc.calcTaxRate = calc.taxRate;
+  doc.discountAmount = calc.discount;
+  doc.rushAmount = calc.rushAmount;
+  doc.taxAmount = calc.taxAmount;
+  doc.subtotal = calc.base;
+  doc.total = calc.total;
+  doc.balance = calc.total;
+  doc.lineItems = [{
+    sortOrder: 1,
+    description: calc.description,
+    details: calc.details,
+    quantity: 1,
+    rate: calc.base,
+    amount: calc.base
+  }];
+  renderInvoiceEditor(doc);
+}
+
+async function importLegacyInvoicesOnce() {
+  try {
+    const result = await api('/api/invoice-documents/import-from-legacy', { method: 'POST', body: '{}' });
+    toast(`Imported ${result.imported} old document(s).`);
+    await showPage('invoiceCenter');
+  } catch (err) {
+    toast(`Import failed: ${err.message}`);
+  }
+}
+
+async function openInvoiceEditor(id = null, requestedType = 'ESTIMATE') {
+  const doc = id ? await api(`/api/invoice-documents/${id}`) : await newInvoiceDocument(requestedType);
+  renderInvoiceEditor(doc);
+}
+
+async function newInvoiceDocument(type) {
+  const next = await api(`/api/invoice-documents/next-number?type=${encodeURIComponent(type)}`);
+  const today = new Date().toISOString().substring(0, 10);
+  const due = new Date(Date.now() + (type === 'INVOICE' ? 7 : 14) * 86400000).toISOString().substring(0, 10);
+  return {
+    id: null, docNumber: next.number, docType: type, status: 'Draft',
+    docDate: today, dueDate: due, pageSize: 'Letter',
+    customerName: '', customerPhone: '', customerEmail: '', customerAddress: '',
+    projectName: '', material: '', color: '', infill: '', projectDescription: '', projectNotes: '',
+    subtotal: 0, discountAmount: 0, rushAmount: 0, taxAmount: 0, total: 0, amountPaid: 0, balance: 0,
+    calcTaxRate: 0, termsNotes: type === 'INVOICE' ? 'Payment due by the due date shown above.' : 'Estimate is valid for 14 days unless otherwise noted.',
+    pricingGuide: '', standardTurnaround: '', rushTurnaround: '',
+    lineItems: [{ sortOrder: 1, description: '', details: '', quantity: 1, rate: 0, amount: 0 }]
+  };
+}
+
+function renderInvoiceEditor(doc) {
+  const el = qs('#app');
+  el.innerHTML = `
+    <div class="page-head">
+      <div>
+        <h2>${doc.id ? 'Edit' : 'New'} ${doc.docType === 'INVOICE' ? 'Invoice' : 'Estimate'}</h2>
+        <p>Save here once. The ledger updates Jobs or AR automatically from this same database.</p>
+      </div>
+      <div class="actions">
+        <button class="ghost-button" onclick="showPage('invoiceCenter')">Back</button>
+        ${doc.id ? `<button class="ghost-button" id="duplicateInvoiceDocBtn">Duplicate</button>${doc.docType === 'ESTIMATE' ? `<button class="ghost-button" id="convertInvoiceDocBtn">Convert to Invoice</button>` : ''}<button class="ghost-button" id="deleteInvoiceDocBtn">Delete</button>` : ''}
+        <button class="ghost-button" id="previewInvoiceDocBtn">Open PDF Preview</button>
+        <button class="ghost-button" id="printInvoiceDocBtn">Print / Save PDF</button>
+        <button class="primary-button" id="saveInvoiceDocBtn">Save</button>
+      </div>
+    </div>
+    <div class="invoice-builder">
+      <form id="invoiceDocForm" class="invoice-form card">
+        ${invoiceInput('docNumber','Number',doc.docNumber)}
+        ${invoiceSelect('docType','Type',doc.docType,['ESTIMATE','INVOICE'])}
+        ${invoiceSelect('status','Status',doc.status,['Draft','Sent','Partial','Paid','Void'])}
+        ${invoiceInput('docDate','Date',doc.docDate,'date')}
+        ${invoiceInput('dueDate','Due Date',doc.dueDate,'date')}
+        ${invoiceInput('customerName','Customer',doc.customerName)}
+        ${invoiceInput('customerEmail','Email',doc.customerEmail,'email')}
+        ${invoiceInput('customerPhone','Phone',doc.customerPhone)}
+        ${invoiceTextarea('customerAddress','Address',doc.customerAddress)}
+        ${invoiceInput('projectName','Project',doc.projectName)}
+        ${invoiceInput('material','Material',doc.material)}
+        ${invoiceInput('color','Color',doc.color)}
+        ${invoiceInput('infill','Infill',doc.infill)}
+        ${invoiceTextarea('projectDescription','Description',doc.projectDescription)}
+        ${invoiceTextarea('projectNotes','Internal Notes',doc.projectNotes)}
+      </form>
+      <div class="card">
+        <div class="card-header-lite"><h3>Line Items</h3><button class="ghost-button compact-action" id="addInvoiceLineBtn">Add Line</button></div>
+        <div id="invoiceLineItems"></div>
+        <div class="invoice-totals">
+          ${invoiceInput('discountAmount','Discount',doc.discountAmount,'number')}
+          ${invoiceInput('rushAmount','Rush Fee',doc.rushAmount,'number')}
+          ${invoiceInput('calcTaxRate','Tax %',doc.calcTaxRate,'number')}
+          ${invoiceInput('amountPaid','Amount Paid',doc.amountPaid,'number')}
+        </div>
+        <section class="entity-strip invoice-total-strip">
+          <div><span>Subtotal</span><strong id="invoiceSubtotal">$0.00</strong></div>
+          <div><span>Tax</span><strong id="invoiceTax">$0.00</strong></div>
+          <div><span>Total</span><strong id="invoiceTotal">$0.00</strong></div>
+          <div><span>Balance</span><strong id="invoiceBalance">$0.00</strong></div>
+        </section>
+      </div>
+      <div class="card">
+        <div class="card-header-lite"><h3>Pricing Calculator</h3><span class="badge">Built in</span></div>
+        <div class="invoice-form compact-calc">
+          ${invoiceInput('calcGrams','Grams',doc.calcGrams,'number')}
+          ${invoiceInput('calcHours','Print Hours',doc.calcHours,'number')}
+          ${invoiceInput('calcDesignHours','Design Hours',doc.calcDesignHours,'number')}
+          ${invoiceInput('calcSetupFee','Setup Fee',doc.calcSetupFee,'number')}
+          ${invoiceInput('calcPostFee','Post Processing',doc.calcPostFee,'number')}
+          ${invoiceInput('calcGramRate','Rate / Gram',doc.calcGramRate ?? 0.05,'number')}
+          ${invoiceInput('calcHourRate','Machine Rate / Hr',doc.calcHourRate ?? 3,'number')}
+          ${invoiceInput('calcDesignRate','Design Rate / Hr',doc.calcDesignRate ?? 25,'number')}
+          ${invoiceInput('calcMinimum','Minimum',doc.calcMinimum ?? 15,'number')}
+          ${invoiceInput('calcDifficulty','Difficulty',doc.calcDifficulty ?? 1,'number')}
+        </div>
+        <div class="actions">
+          <strong id="inlineCalcTotal">$0.00</strong>
+          <button class="primary-button" id="pushInlineCalcBtn">Push Calculator To Line</button>
+        </div>
+      </div>
+      <div class="card invoice-preview-card">
+        <div class="card-header-lite"><h3>PDF Preview</h3><span class="badge">${escapeHtml(doc.docNumber || '')}</span></div>
+        <iframe id="invoicePreviewFrame" class="invoice-preview-frame" title="PDF preview"></iframe>
+      </div>
+    </div>`;
+
+  qs('#invoiceDocForm').dataset.id = doc.id || '';
+  qs('#invoiceDocForm')._lineItems = (doc.lineItems || []).map((line, i) => ({ ...line, sortOrder: line.sortOrder || i + 1 }));
+  renderInvoiceLines();
+  bindInvoiceEditor();
+  updateInvoicePreview();
+}
+
+function invoiceInput(name, label, value = '', type = 'text') {
+  return `<label><span>${label}</span><input name="${name}" type="${type}" value="${escapeHtml(value ?? '')}"></label>`;
+}
+function invoiceTextarea(name, label, value = '') {
+  return `<label class="full"><span>${label}</span><textarea name="${name}" rows="3">${escapeHtml(value ?? '')}</textarea></label>`;
+}
+function invoiceSelect(name, label, value, options) {
+  return `<label><span>${label}</span><select name="${name}">${options.map(o => `<option value="${o}" ${o === value ? 'selected' : ''}>${o}</option>`).join('')}</select></label>`;
+}
+
+function renderInvoiceLines() {
+  const form = qs('#invoiceDocForm');
+  const lines = form._lineItems?.length ? form._lineItems : [{ sortOrder: 1, quantity: 1, rate: 0, amount: 0 }];
+  form._lineItems = lines;
+  qs('#invoiceLineItems').innerHTML = lines.map((line, index) => `
+    <div class="invoice-line" data-line="${index}">
+      <input data-line-field="description" placeholder="Description" value="${escapeHtml(line.description || '')}">
+      <input data-line-field="details" placeholder="Details" value="${escapeHtml(line.details || '')}">
+      <input data-line-field="quantity" type="number" step="0.01" value="${Number(line.quantity || 1)}">
+      <input data-line-field="rate" type="number" step="0.01" value="${Number(line.rate || 0)}">
+      <strong>${formatMoney(line.amount)}</strong>
+      <button class="icon-button" type="button" data-remove-line="${index}" title="Remove line">×</button>
+    </div>`).join('');
+  qsa('[data-line-field]').forEach(input => input.oninput = handleInvoiceLineChange);
+  qsa('[data-remove-line]').forEach(btn => btn.onclick = () => {
+    form._lineItems.splice(Number(btn.dataset.removeLine), 1);
+    renderInvoiceLines();
+    updateInvoicePreview();
+  });
+}
+
+function handleInvoiceLineChange(event) {
+  const row = event.target.closest('.invoice-line');
+  const index = Number(row.dataset.line);
+  const field = event.target.dataset.lineField;
+  const form = qs('#invoiceDocForm');
+  const line = form._lineItems[index];
+  line[field] = ['quantity','rate'].includes(field) ? Number(event.target.value || 0) : event.target.value;
+  line.amount = Number(line.quantity || 0) * Number(line.rate || 0);
+  renderInvoiceLines();
+  updateInvoicePreview();
+}
+
+function bindInvoiceEditor() {
+  qs('#invoiceDocForm').oninput = updateInvoicePreview;
+  qsa('.invoice-totals input').forEach(input => input.oninput = updateInvoicePreview);
+  qs('#addInvoiceLineBtn').onclick = () => {
+    const form = qs('#invoiceDocForm');
+    form._lineItems.push({ sortOrder: form._lineItems.length + 1, description: '', details: '', quantity: 1, rate: 0, amount: 0 });
+    renderInvoiceLines();
+  };
+  qs('#saveInvoiceDocBtn').onclick = saveInvoiceDocument;
+  qs('#previewInvoiceDocBtn').onclick = () => printInvoiceDocument(true);
+  qs('#printInvoiceDocBtn').onclick = () => printInvoiceDocument(false);
+  qsa('.compact-calc input').forEach(input => input.oninput = updateInvoicePreview);
+  qs('#pushInlineCalcBtn').onclick = pushInlineCalculatorToLine;
+  const duplicate = qs('#duplicateInvoiceDocBtn');
+  if (duplicate) duplicate.onclick = duplicateInvoiceDocument;
+  const convert = qs('#convertInvoiceDocBtn');
+  if (convert) convert.onclick = convertEstimateToInvoice;
+  const del = qs('#deleteInvoiceDocBtn');
+  if (del) del.onclick = deleteInvoiceDocument;
+}
+
+function collectInvoiceDocument() {
+  const form = qs('#invoiceDocForm');
+  const data = Object.fromEntries(new FormData(form).entries());
+  qsa('.invoice-totals input').forEach(input => data[input.name] = input.value);
+  qsa('.compact-calc input').forEach(input => data[input.name] = input.value);
+  const lines = (form._lineItems || []).map((line, index) => ({
+    id: line.id || null,
+    sortOrder: index + 1,
+    description: line.description || '',
+    details: line.details || '',
+    quantity: Number(line.quantity || 0),
+    rate: Number(line.rate || 0),
+    amount: Number(line.quantity || 0) * Number(line.rate || 0)
+  }));
+  const subtotal = lines.reduce((sum, line) => sum + line.amount, 0);
+  const discountAmount = Number(data.discountAmount || 0);
+  const rushAmount = Number(data.rushAmount || 0);
+  const calcTaxRate = Number(data.calcTaxRate || 0);
+  const taxable = Math.max(0, subtotal - discountAmount + rushAmount);
+  const taxAmount = taxable * calcTaxRate / 100;
+  const total = taxable + taxAmount;
+  const amountPaid = Number(data.amountPaid || 0);
+  return {
+    ...data,
+    subtotal, discountAmount, rushAmount, calcTaxRate, taxAmount, total, amountPaid,
+    balance: Math.max(0, total - amountPaid),
+    calcGrams: Number(data.calcGrams || 0), calcHours: Number(data.calcHours || 0),
+    calcDesignHours: Number(data.calcDesignHours || 0), calcSetupFee: Number(data.calcSetupFee || 0),
+    calcPostFee: Number(data.calcPostFee || 0), calcGramRate: Number(data.calcGramRate || 0.05),
+    calcHourRate: Number(data.calcHourRate || 3), calcDesignRate: Number(data.calcDesignRate || 25),
+    calcMinimum: Number(data.calcMinimum || 15), calcDifficulty: Number(data.calcDifficulty || 1),
+    calcRush: Number(data.calcRush || 0), calcDiscount: Number(data.calcDiscount || 0),
+    pricingGuide: '', termsNotes: data.docType === 'INVOICE' ? 'Payment due by the due date shown above.' : 'Estimate is valid for 14 days unless otherwise noted.',
+    standardTurnaround: '', rushTurnaround: '', pageSize: 'Letter',
+    lineItems: lines,
+    json: '{}'
+  };
+}
+
+function updateInvoicePreview() {
+  const doc = collectInvoiceDocument();
+  qs('#invoiceSubtotal').textContent = formatMoney(doc.subtotal);
+  qs('#invoiceTax').textContent = formatMoney(doc.taxAmount);
+  qs('#invoiceTotal').textContent = formatMoney(doc.total);
+  qs('#invoiceBalance').textContent = formatMoney(doc.balance);
+  const inlineCalcTotal = qs('#inlineCalcTotal');
+  if (inlineCalcTotal) inlineCalcTotal.textContent = `Calculator: ${formatMoney(calculateInlineInvoicePrice(doc).lineAmount)}`;
+  refreshPdfPreview(doc);
+}
+
+async function loadInvoicePdfModule() {
+  appState.invoicePdfModule ||= import('/invoice-builder/js/pdf.js');
+  return appState.invoicePdfModule;
+}
+
+async function refreshPdfPreview(doc) {
+  const frame = qs('#invoicePreviewFrame');
+  if (!frame) return;
+  try {
+    const { renderInvoiceHtml } = await loadInvoicePdfModule();
+    frame.srcdoc = renderInvoiceHtml(doc);
+  } catch {
+    frame.srcdoc = `<!doctype html><html><body>${invoicePreviewHtml(doc)}</body></html>`;
+  }
+}
+
+function calculateInlineInvoicePrice(doc) {
+  const material = Number(doc.calcGrams || 0) * Number(doc.calcGramRate || 0.05);
+  const machine = Number(doc.calcHours || 0) * Number(doc.calcHourRate || 3);
+  const design = Number(doc.calcDesignHours || 0) * Number(doc.calcDesignRate || 25);
+  const fees = Number(doc.calcSetupFee || 0) + Number(doc.calcPostFee || 0);
+  const difficulty = Math.max(0, Number(doc.calcDifficulty || 1));
+  const minimum = Number(doc.calcMinimum || 15);
+  const lineAmount = Math.max(minimum, (material + machine + design + fees) * difficulty);
+  return { material, machine, design, fees, lineAmount };
+}
+
+function pushInlineCalculatorToLine() {
+  const doc = collectInvoiceDocument();
+  const calc = calculateInlineInvoicePrice(doc);
+  const form = qs('#invoiceDocForm');
+  const line = {
+    sortOrder: (form._lineItems?.length || 0) + 1,
+    description: doc.projectName || 'Custom 3D print service',
+    details: `${doc.calcGrams || 0}g filament, ${doc.calcHours || 0} print hr, ${doc.calcDesignHours || 0} design hr`,
+    quantity: 1,
+    rate: calc.lineAmount,
+    amount: calc.lineAmount
+  };
+  if (!form._lineItems?.length || !form._lineItems[0].description) form._lineItems = [line];
+  else form._lineItems.push(line);
+  renderInvoiceLines();
+  updateInvoicePreview();
+  toast('Calculator line added to this document.');
+}
+
+function invoicePreviewHtml(doc) {
+  return `<article class="invoice-paper">
+    <header><div><strong>EPATA 3D Prints</strong><span>Custom 3D printing, design, and small batch work</span></div><h2>${doc.docType === 'INVOICE' ? 'Invoice' : 'Estimate'}</h2></header>
+    <div class="invoice-meta">
+      <div><span>Number</span><strong>${escapeHtml(doc.docNumber)}</strong></div>
+      <div><span>Date</span><strong>${escapeHtml(doc.docDate || '')}</strong></div>
+      <div><span>Due</span><strong>${escapeHtml(doc.dueDate || '')}</strong></div>
+      <div><span>Status</span><strong>${escapeHtml(doc.status || '')}</strong></div>
+    </div>
+    <section class="invoice-address"><div><span>Bill To</span><strong>${escapeHtml(doc.customerName || '')}</strong><p>${escapeHtml(doc.customerEmail || '')}<br>${escapeHtml(doc.customerPhone || '')}<br>${escapeHtml(doc.customerAddress || '')}</p></div><div><span>Project</span><strong>${escapeHtml(doc.projectName || '')}</strong><p>${escapeHtml(doc.projectDescription || '')}</p></div></section>
+    <table><thead><tr><th>Description</th><th>Details</th><th>Qty</th><th>Rate</th><th>Amount</th></tr></thead><tbody>${doc.lineItems.map(line => `<tr><td>${escapeHtml(line.description)}</td><td>${escapeHtml(line.details)}</td><td>${line.quantity}</td><td>${formatMoney(line.rate)}</td><td>${formatMoney(line.amount)}</td></tr>`).join('')}</tbody></table>
+    <section class="invoice-summary"><div></div><div><p><span>Subtotal</span><strong>${formatMoney(doc.subtotal)}</strong></p><p><span>Discount</span><strong>${formatMoney(doc.discountAmount)}</strong></p><p><span>Rush</span><strong>${formatMoney(doc.rushAmount)}</strong></p><p><span>Tax</span><strong>${formatMoney(doc.taxAmount)}</strong></p><p class="grand"><span>Total</span><strong>${formatMoney(doc.total)}</strong></p><p><span>Paid</span><strong>${formatMoney(doc.amountPaid)}</strong></p><p><span>Balance</span><strong>${formatMoney(doc.balance)}</strong></p></div></section>
+    <footer>${escapeHtml(doc.termsNotes || '')}</footer>
+  </article>`;
+}
+
+async function saveInvoiceDocument() {
+  const form = qs('#invoiceDocForm');
+  const id = form.dataset.id;
+  const doc = collectInvoiceDocument();
+  const saved = await api(id ? `/api/invoice-documents/${id}` : '/api/invoice-documents', {
+    method: id ? 'PUT' : 'POST',
+    body: JSON.stringify(doc)
+  });
+  toast(`${saved.docType === 'INVOICE' ? 'Invoice' : 'Estimate'} saved.`);
+  renderInvoiceEditor(saved);
+}
+
+async function duplicateInvoiceDocument() {
+  const id = qs('#invoiceDocForm').dataset.id;
+  if (!id) return;
+  const copy = await api(`/api/invoice-documents/${id}/duplicate`, { method: 'POST', body: '{}' });
+  toast('Document duplicated.');
+  renderInvoiceEditor(copy);
+}
+
+async function convertEstimateToInvoice() {
+  const id = qs('#invoiceDocForm').dataset.id;
+  if (!id) return;
+  const invoice = await api(`/api/invoice-documents/${id}/convert-to-invoice`, { method: 'POST', body: '{}' });
+  toast('Estimate converted to invoice.');
+  renderInvoiceEditor(invoice);
+}
+
+async function deleteInvoiceDocument() {
+  const id = qs('#invoiceDocForm').dataset.id;
+  if (!id || !confirm('Delete this estimate/invoice?')) return;
+  await api(`/api/invoice-documents/${id}`, { method: 'DELETE' });
+  toast('Document deleted.');
+  await showPage('invoiceCenter');
+}
+
+async function printInvoiceDocument(preview = false) {
+  const doc = collectInvoiceDocument();
+  try {
+    const { generatePdf } = await loadInvoicePdfModule();
+    await generatePdf(doc, preview);
+  } catch {
+    const win = window.open('', '_blank');
+    win.document.write(`<!doctype html><html><head><title>${escapeHtml(doc.docNumber)}</title><style>${invoicePrintCss()}</style></head><body>${invoicePreviewHtml(doc)}${preview ? '' : '<script>window.onload=()=>window.print();</script>'}</body></html>`);
+    win.document.close();
+  }
+}
+
+function invoicePrintCss() {
+  return `body{font-family:Segoe UI,Arial,sans-serif;background:#f4f6f8;margin:0;padding:28px;color:#111827}.invoice-paper{max-width:850px;margin:auto;background:#fff;padding:34px;border:1px solid #d1d5db}.invoice-paper header{display:flex;justify-content:space-between;border-bottom:3px solid #2563eb;padding-bottom:16px}.invoice-paper header strong{font-size:24px}.invoice-paper header span,.invoice-paper span{display:block;color:#64748b;font-size:12px;text-transform:uppercase;font-weight:700}.invoice-paper h2{text-transform:uppercase}.invoice-meta,.invoice-address{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:20px 0}.invoice-address{grid-template-columns:1fr 1fr}.invoice-paper table{width:100%;border-collapse:collapse;margin:20px 0}.invoice-paper th{background:#eff6ff;text-align:left}.invoice-paper th,.invoice-paper td{border-bottom:1px solid #e5e7eb;padding:9px}.invoice-summary{display:grid;grid-template-columns:1fr 300px}.invoice-summary p{display:flex;justify-content:space-between;margin:0;padding:7px 0;border-bottom:1px solid #e5e7eb}.grand{font-size:20px}.invoice-paper footer{margin-top:28px;color:#64748b}@media print{body{background:#fff;padding:0}.invoice-paper{border:0;max-width:none}}`;
+}
+
+async function renderTaxPrep(el) {
+  const [dashboard, sales, expenses, bills, docs] = await Promise.all([
+    api('/api/dashboard'),
+    api('/api/sales'),
+    api('/api/expenses'),
+    api('/api/bills'),
+    api('/api/audit-documents')
+  ]);
+  const k = dashboard.kpis;
+  const deductibleExpenses = expenses.filter(x => x.taxDeductible !== false);
+  const nonDeductibleExpenses = expenses.filter(x => x.taxDeductible === false);
+  const deductibleTotal = sum(deductibleExpenses, x => x.total ?? x.amount);
+  const openProofGaps = [
+    ...sales.filter(x => x.needsReview || !x.sourceProof),
+    ...expenses.filter(x => x.needsReview || !x.receiptProof),
+    ...bills.filter(x => x.needsReview || !x.sourceProof)
+  ];
+  const expenseGroups = groupMoney(deductibleExpenses, 'category', x => x.total ?? x.amount);
+  const billGroups = groupMoney(bills.filter(x => x.taxDeductible !== false), 'category', x => x.total ?? x.amount);
+  el.innerHTML = `
+    <section class="workspace-hero">
+      <div>
+        <span class="eyebrow">Tax Prep</span>
+        <h2>Export clean records before filing.</h2>
+        <p>This page is a filing-prep checklist and export hub. It is not tax advice, but it helps you collect the numbers and proof your accountant or tax software will ask for.</p>
+      </div>
+      <div class="hero-actions">
+        <a class="primary-button" href="/api/export/sales">Export Sales</a>
+        <a class="ghost-button dark" href="/api/export/expenses">Export Expenses</a>
+      </div>
+    </section>
+    <section class="kpi-grid">
+      ${kpi('Gross Receipts', k.grossReceipts, 'Gross receipts from included sales.', 'good')}
+      ${kpi('Deductible Expenses', deductibleTotal, 'Expenses marked tax deductible.', deductibleTotal > 0 ? 'warn' : '')}
+      ${kpi('Sales Tax Memo', k.salesTaxMemo, 'Sales tax shown on orders/invoices. Marketplace tax may be handled by the marketplace.', 'warn')}
+      ${kpi('Proof Gaps', openProofGaps.length, 'Rows missing proof or marked Needs Review.', openProofGaps.length ? 'bad' : 'good', false)}
+    </section>
+    <div class="grid two">
+      <div class="card">
+        <div class="card-header-lite"><h3>Filing Checklist</h3><span class="badge">Do before filing</span></div>
+        <div class="tax-checklist">
+          ${taxCheck('Export Sales CSV', 'Use for gross receipts, platform, tax memo, fees, shipping charged, COGS, and proof references.', '/api/export/sales')}
+          ${taxCheck('Export Expenses CSV', 'Use for deductible business purchases: filament, shipping labels, packaging, software, tools, ads.', '/api/export/expenses')}
+          ${taxCheck('Export Bills/AP CSV', 'Use if you track unpaid vendor obligations or accrual-style records.', '/api/export/bills')}
+          ${taxCheck('Export Audit Docs CSV', 'Use as proof index: receipt PDFs, invoice PDFs, screenshots, and file paths.', '/api/export/audit-documents')}
+          ${taxCheck('Download DB Backup', 'Keep a full SQLite backup before filing and after filing.', null, 'backupDb()')}
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header-lite"><h3>Review Before Filing</h3><span class="badge warn">${openProofGaps.length} gaps</span></div>
+        <div class="help-list">
+          <div class="help-item"><strong>Needs Review</strong><p>${dashboard.kpis.needsReviewCount} rows are marked Needs Review. Clear these or document why they are estimates.</p></div>
+          <div class="help-item"><strong>Missing Proof</strong><p>${openProofGaps.length} sales/expenses/bills are missing proof or need review.</p></div>
+          <div class="help-item"><strong>Non-Deductible</strong><p>${nonDeductibleExpenses.length} expenses are marked non-deductible. Keep them separate.</p></div>
+          <div class="help-item"><strong>Uploaded Proof</strong><p>${docs.length} audit documents are indexed.</p></div>
+        </div>
+      </div>
+    </div>
+    <div class="grid two">
+      <div class="card">
+        <div class="card-header-lite"><h3>Deductible Expenses By Category</h3><span class="badge">${deductibleExpenses.length} rows</span></div>
+        ${moneyGroupTable(expenseGroups)}
+      </div>
+      <div class="card">
+        <div class="card-header-lite"><h3>AP/Bills By Category</h3><span class="badge">${bills.length} rows</span></div>
+        ${moneyGroupTable(billGroups)}
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header-lite"><h3>Sales Tax Memo</h3><span class="badge warn">${formatMoney(k.salesTaxMemo)}</span></div>
+      <p>Use this as a memo/checking number, not as automatic tax filing advice. Etsy and other marketplaces may collect/remit marketplace sales tax. Direct invoices may be different. Verify with your accountant or tax software.</p>
+      ${smallTable(dashboard.monthly, ['month','grossReceipts','salesTaxMemo','estimatedCosts','estimatedNet','orders'])}
+    </div>`;
+}
+
+function sum(rows, pick) {
+  return rows.reduce((total, row) => total + Number(pick(row) || 0), 0);
+}
+function groupMoney(rows, key, pick) {
+  const map = new Map();
+  rows.forEach(row => {
+    const label = row[key] || 'Uncategorized';
+    map.set(label, (map.get(label) || 0) + Number(pick(row) || 0));
+  });
+  return [...map.entries()].map(([label, total]) => ({ label, total })).sort((a, b) => b.total - a.total);
+}
+function moneyGroupTable(groups) {
+  if (!groups.length) return emptyState('No category totals yet.', 'Add expenses or bills to build this summary.');
+  return `<div class="table-wrap"><table><thead><tr><th>Category</th><th>Total</th></tr></thead><tbody>${groups.map(g => `<tr><td>${escapeHtml(g.label)}</td><td>${formatMoney(g.total)}</td></tr>`).join('')}</tbody></table></div>`;
+}
+function taxCheck(title, detail, href, onclick) {
+  const action = href ? `<a class="ghost-button" href="${href}">Export</a>` : `<button class="ghost-button" onclick="${onclick}">Backup</button>`;
+  return `<div class="tax-check"><div><strong>${escapeHtml(title)}</strong><p>${escapeHtml(detail)}</p></div>${action}</div>`;
+}
+
 async function uploadDocuments() {
   const files = qs('#docFiles').files;
   const out = qs('#uploadResult');
@@ -1059,30 +1897,61 @@ async function uploadDocuments() {
   [...files].forEach(file => form.append('files', file));
   form.append('relatedType', qs('#relatedType').value || '');
   form.append('relatedNumber', qs('#relatedNumber').value || '');
-  out.textContent = 'Uploading and indexing...';
+  out.className = 'upload-result';
+  out.innerHTML = `<div class="empty-state"><div class="empty-icon">⇪</div><div class="empty-title">Uploading and indexing...</div><div class="empty-desc">Saving the file locally and creating an Audit Doc.</div></div>`;
 
   try {
     const response = await fetch('/api/documents/upload', { method: 'POST', body: form });
     if (!response.ok) throw new Error(await response.text());
     const result = await response.json();
-    out.textContent = JSON.stringify(result, null, 2);
+    out.innerHTML = renderUploadResult(result);
     toast(`Indexed ${result.count} document${result.count === 1 ? '' : 's'}.`);
   } catch (err) {
-    out.textContent = err.message;
+    out.innerHTML = `<div class="help-item"><strong>Upload failed</strong><p>${escapeHtml(err.message)}</p></div>`;
     toast(`Upload failed: ${err.message}`);
   }
 }
 
+function renderUploadResult(result) {
+  const docs = result.documents || [];
+  return `
+    <div class="help-item">
+      <strong>Uploaded and indexed ${result.count} document${result.count === 1 ? '' : 's'}.</strong>
+      <p>These are now Audit Docs. Next, either create the business record they prove, or edit the Audit Doc and add missing details.</p>
+    </div>
+    <div class="upload-next-grid">
+      ${docs.map(doc => `
+        <div class="upload-next-card">
+          <span class="badge">${escapeHtml(doc.documentType || 'Proof')}</span>
+          <strong>${escapeHtml(doc.fileName || 'Uploaded file')}</strong>
+          <p>${escapeHtml(doc.filePathOrUrl || '')}</p>
+          <div class="actions">
+            <button class="ghost-button" onclick='openModal(configs.auditDocs, ${JSON.stringify(doc).replaceAll("'", "&#39;")})'>Edit Audit Doc</button>
+            <button class="primary-button" onclick="showPage('quickAdd')">Create Related Record</button>
+          </div>
+        </div>`).join('')}
+    </div>
+    <div class="card">
+      <h3>Which Related Record?</h3>
+      <div class="workflow-list">
+        <div class="workflow-row"><div><span>Customer paid you</span><strong>Quick Add → Sale</strong></div><p>Use Etsy Sale or Direct Paid Sale.</p></div>
+        <div class="workflow-row"><div><span>You paid money</span><strong>Quick Add → Paid Expense</strong></div><p>Use this for receipts, supplies, shipping labels, software, tools, and paid purchases.</p></div>
+        <div class="workflow-row"><div><span>Customer owes you</span><strong>Quick Add → Open Invoice / AR</strong></div><p>Use this for invoices sent but not paid yet.</p></div>
+        <div class="workflow-row"><div><span>You owe vendor</span><strong>Quick Add → Bill / AP</strong></div><p>Use this for bills you have not paid yet.</p></div>
+      </div>
+    </div>`;
+}
+
 function renderImportExport(el) {
   el.innerHTML = `
-    <div class="page-head"><div><h2>Import / Export / Backup</h2><p>Export CSVs, back up the SQLite database, or try to read from your separate local invoice app.</p></div></div>
+    <div class="page-head"><div><h2>Import / Export / Backup</h2><p>Export CSVs, back up the SQLite database, and optionally migrate old invoice-app records into this unified app.</p></div></div>
     <div class="grid two">
       <div class="card">
-        <h3>Invoice App Link</h3>
-        <p>This opens the existing EPATA invoice app at <b>http://localhost:5057/</b>. Keep using that app to generate customer-facing PDFs. Use this ledger to track the money and proof.</p>
+        <h3>Old Invoice App Migration</h3>
+        <p>The unified app now has its own estimate/invoice builder and database tables. Use this only if the old invoice app is running and you want to pull its saved documents into this database.</p>
         <div class="actions">
-          <a class="primary-button" href="http://localhost:5057/" target="_blank">Open Invoice App</a>
-          <button class="ghost-button" id="tryImportBtn">Try Read Invoice App API</button>
+          <button class="primary-button" onclick="showPage('invoiceRecords')">Open Invoice Records</button>
+          <button class="ghost-button" id="tryImportBtn">Check Old App API</button>
         </div>
         <pre id="importResult" class="card" style="white-space:pre-wrap; overflow:auto; max-height:360px; display:none;"></pre>
       </div>
@@ -1101,7 +1970,7 @@ function renderImportExport(el) {
 async function tryInvoiceImport() {
   const out = qs('#importResult');
   out.style.display = 'block';
-  out.textContent = 'Trying invoice app endpoints...';
+  out.textContent = 'Checking the old invoice app endpoints...';
   try {
     const result = await api('/api/import/invoice-app', { method: 'POST', body: JSON.stringify({ baseUrl: 'http://localhost:5057/' }) });
     out.textContent = JSON.stringify(result, null, 2);
@@ -1112,19 +1981,26 @@ async function tryInvoiceImport() {
 
 function renderHelp(el) {
   const scenarios = [
+    ['Estimate needed', 'Estimates -> New Estimate', 'Create and save the estimate here. The ledger creates or updates a Customer Job with status Quoted. It does not count as income, AR, or a sale.'],
+    ['Estimate sent outside this app', 'Quick Add -> Estimate Sent', 'Enter it as a Customer Job with status Quoted. It does not count as income, AR, or a sale.'],
     ['Etsy order', 'Quick Add → Etsy Sale', 'Enter once as a Sale. Attach the Etsy order PDF/receipt. Later fill in Etsy fees, label cost, packaging, and COGS on the same Sale row. You usually do not need a separate AR Invoice because Etsy already paid/processed the order.'],
-    ['Direct customer wants a quote/job', 'Customer Jobs', 'Start with a Customer Job if work exists before payment. When you send a bill, add an AR Invoice. When they pay, add/confirm a Sale. The records are related by customer, job name, invoice number, and proof.'],
-    ['Direct invoice sent, unpaid', 'Quick Add → Open Invoice / AR', 'Enter the invoice once as AR. Do not enter it as a Sale yet unless money was actually received. Attach the invoice PDF as proof.'],
-    ['Direct invoice paid', 'AR Invoice + Sale', 'Update the AR Invoice to Paid and add/confirm a Sale so cash income is counted. This is one real-world event changing state, not random duplicate entry.'],
+    ['Direct customer wants a quote/job', 'Estimates or Customer Jobs', 'Use Estimates for customer-facing PDFs. Use Customer Jobs for internal tracking. When you save an invoice, AR is updated. When they pay, enter Amount Paid and the Sale is updated automatically.'],
+    ['Direct invoice needed', 'Invoices -> New Invoice', 'Create and save the invoice here. The ledger creates or updates AR. Do not enter it as a Sale yet unless money was actually received.'],
+    ['Direct invoice sent outside this app', 'Quick Add → Open Invoice / AR', 'Enter the invoice once as AR. Do not enter it as a Sale yet unless money was actually received. Attach the invoice PDF as proof.'],
+    ['Direct invoice paid', 'Invoices or AR Invoice', 'In Invoices, enter Amount Paid and status Paid. The app updates AR and creates/updates the matching Direct Sale so cash income is counted.'],
     ['Customer already paid without open AR', 'Quick Add → Direct Paid Sale', 'Enter one Sale row. Add invoice/order number if available. Attach the proof file.'],
     ['Bought supplies and already paid', 'Quick Add → Paid Expense', 'Enter one Expense row. Attach receipt proof. No AP Bill is needed because you do not owe anything.'],
     ['Vendor invoice not paid yet', 'Quick Add → Bill / AP', 'Enter one AP Bill. When paid, mark paid and optionally create/confirm an Expense if you want paid-expense reporting.'],
-    ['Only have a PDF/receipt right now', 'Document Intake first, then Quick Add if needed', 'Upload proof to create an Audit Doc. Then use Quick Add for the actual business event. Intake does not yet auto-post accounting records.']
+    ['Only have a PDF/receipt right now', 'Document Intake first, then Quick Add if needed', 'Upload proof to create an Audit Doc. Then use Quick Add or Attach File on an existing row for the actual business event. Intake does not silently auto-post accounting records.']
   ];
   const tabs = [
     ['Dashboard', 'Shows totals, charts, open AR/AP, review count, and action items. It is a view, not where you usually enter data.'],
     ['Quick Add', 'Best starting point for new business events. Pick what happened and the app opens the right form.'],
-    ['Workflow Guide', 'Step-by-step “where do I enter this?” page. Use it whenever you feel unsure.'],
+    ['Estimates', 'Customer-facing quote builder with calculator, line items, live PDF preview, and Customer Job sync.'],
+    ['Invoices', 'Customer-facing invoice builder with PDF preview. Saving updates AR; paid invoices update Direct Sales.'],
+    ['Calculator', 'Pricing calculator from the invoice tool. Use it to build a quote before pushing to an estimate.'],
+    ['Invoice Records', 'Saved estimates and invoices from the unified database.'],
+    ['Workflow', 'Visual map plus step-by-step “where do I enter this?” page. Use it whenever you feel unsure.'],
     ['Document Intake', 'Upload proof files. It creates Audit Docs and stores files locally. It does not yet automatically decide accounting entries.'],
     ['Sales', 'Money that came in or sales/orders that should count toward revenue when included in dashboard.'],
     ['AR Invoices', 'Money customers owe you from direct invoices. This is not cash until paid.'],
@@ -1138,30 +2014,36 @@ function renderHelp(el) {
     <section class="workspace-hero">
       <div>
         <span class="eyebrow">Start Here</span>
-        <h2>Use Quick Add for the event. Use proof files to back it up.</h2>
-        <p>You are not supposed to type the same sale into every tab. Enter the business event in the right place, attach proof, then use other tabs as views or related ledgers only when they mean something different.</p>
+        <h2>Enter the business event once. Attach proof once. Review it from many places.</h2>
+        <p>Use Estimates/Invoices for customer PDFs. Use Quick Add for simple sales, bills, expenses, and manually-created documents. Use Document Intake when the file comes first.</p>
       </div>
       <div class="hero-actions">
+        <button class="ghost-button dark" onclick="showPage('estimates')">New Estimate</button>
+        <button class="ghost-button dark" onclick="showPage('invoices')">New Invoice</button>
         <button class="primary-button" onclick="showPage('quickAdd')">Start Quick Add</button>
         <button class="ghost-button dark" onclick="showPage('workflowGuide')">Open Workflow Guide</button>
       </div>
     </section>
+    ${workflowDiagram()}
 
     <div class="grid two">
       <div class="card">
-        <h3>The Simple Rule</h3>
+        <h3>Start Here: What Button Do I Click?</h3>
         <div class="help-steps">
-          <div><span>1</span><p><b>What happened?</b> Sale, invoice sent, bill received, expense paid, customer job, or proof file.</p></div>
-          <div><span>2</span><p><b>Use Quick Add</b> unless you are only uploading proof or editing an old record.</p></div>
-          <div><span>3</span><p><b>Attach proof</b> from the form or Document Intake.</p></div>
-          <div><span>4</span><p><b>Only add related records</b> when the business meaning is different: job, owed money, paid money, or proof.</p></div>
+          <div><span>1</span><p><b>If money came in:</b> use Quick Add → Etsy Sale or Direct Paid Sale.</p></div>
+          <div><span>2</span><p><b>If you need an estimate PDF:</b> use Estimates. It creates a quoted Customer Job and does not count as income.</p></div>
+          <div><span>3</span><p><b>If you need an invoice PDF:</b> use Invoices. It creates AR until paid, then updates Sales.</p></div>
+          <div><span>4</span><p><b>If you sent an estimate manually and are waiting for approval:</b> use Quick Add → Estimate Sent.</p></div>
+          <div><span>5</span><p><b>If you sent an invoice manually and are waiting to be paid:</b> use Quick Add → Open Invoice / AR.</p></div>
+          <div><span>6</span><p><b>If you spent money:</b> use Quick Add → Paid Expense. If you owe it but have not paid, use Bill / AP.</p></div>
+          <div><span>7</span><p><b>If you only have a receipt/PDF:</b> use Document Intake. That creates an Audit Doc only. Then create or attach the business record it proves.</p></div>
         </div>
       </div>
       <div class="card">
-        <h3>Enter Once, Show Many</h3>
-        <p>A row can show up in totals, charts, search, exports, review queues, and proof tracking without being retyped into every tab.</p>
-        <p>Some real-world workflows still need more than one record because they are different accounting facts. Example: a custom job can have a Job record, an AR Invoice while unpaid, and a Sale when paid.</p>
-        <p><b>That is not duplicate entry:</b> it is the job, the money owed, and the money received.</p>
+        <h3>What “Enter Once, Show Many” Means</h3>
+        <p>If you enter an Etsy order as a Sale, that one Sale can appear on the Dashboard, charts, exports, search results, tax prep, and review queues. You do not retype that Etsy order into every tab.</p>
+        <p>You only add another record when it is a different real-world thing. A proof PDF is different from the sale. An unpaid invoice is different from a paid sale. A customer job is different from the money.</p>
+        <p><b>Think of tabs as views/ledgers, not chores to fill out one by one.</b></p>
       </div>
     </div>
 
@@ -1176,17 +2058,19 @@ function renderHelp(el) {
       <div class="card">
         <h3>What Document Intake Does</h3>
         <div class="help-list">
-          <div class="help-item"><strong>Does now</strong><p>Saves uploaded files locally, creates Audit Docs, stores file paths, and keeps best-effort extracted text previews for readable files/PDFs.</p></div>
+          <div class="help-item"><strong>Does now</strong><p>Saves uploaded files locally, creates Audit Docs, stores file paths, and keeps best-effort extracted text previews for readable files/PDFs. You can edit the Audit Doc after upload.</p></div>
           <div class="help-item"><strong>Does not do yet</strong><p>It does not reliably turn a PDF into a Sale, AR Invoice, Expense, or Bill by itself.</p></div>
-          <div class="help-item"><strong>Best process</strong><p>Upload proof, then use Quick Add for the business event. Or open a record and use Attach File on the proof field.</p></div>
+          <div class="help-item"><strong>Best process</strong><p>Upload proof, then use Quick Add for the business event. Or open an existing Sale/Expense/Invoice/Bill and use Attach File on the proof field. The saved file path is filled into Source/Proof, Receipt/Proof, or File Path/URL.</p></div>
         </div>
       </div>
       <div class="card">
-        <h3>When You Enter More Than Once</h3>
+        <h3>When Do I Enter More Than One Record?</h3>
         <div class="help-list">
-          <div class="help-item"><strong>Custom job → invoice → payment</strong><p>Job tracks the work. AR tracks what is owed. Sale tracks payment received.</p></div>
-          <div class="help-item"><strong>Bill received → later paid</strong><p>AP tracks what you owe. Expense tracks paid money if you want cash-basis expense reporting.</p></div>
-          <div class="help-item"><strong>Proof file</strong><p>Audit Doc is the proof index. The transaction row still holds the business numbers.</p></div>
+          <div class="help-item"><strong>Etsy order</strong><p>Usually one Sale record plus attached proof. Do not create AR because Etsy is not an unpaid direct invoice.</p></div>
+          <div class="help-item"><strong>Direct custom job</strong><p>Job first if you need to track the work. AR Invoice when you send the invoice. Sale when money is received.</p></div>
+          <div class="help-item"><strong>Receipt for filament you already bought</strong><p>One Expense record plus attached receipt. No AP Bill because you do not owe anything.</p></div>
+          <div class="help-item"><strong>Vendor bill you have not paid</strong><p>AP Bill now. Mark it paid later, and add/confirm an Expense only if you want the paid cash outflow tracked separately.</p></div>
+          <div class="help-item"><strong>Proof file</strong><p>Audit Doc stores the file/path. The Sale, Expense, Bill, or Invoice stores the business numbers.</p></div>
         </div>
       </div>
     </div>
@@ -1197,6 +2081,59 @@ function renderHelp(el) {
         ${tabs.map(([tab, detail]) => `<div class="help-item"><strong>${escapeHtml(tab)}</strong><p>${escapeHtml(detail)}</p></div>`).join('')}
       </div>
     </div>`;
+}
+
+function workflowDiagram() {
+  const nodes = [
+    ['quote', 'Customer asks price', 'Estimate builder'],
+    ['approve', 'Customer approves', 'Convert / create invoice'],
+    ['paid', 'Money received', 'Sale + cash reporting'],
+    ['etsy', 'Etsy order', 'Quick Add sale'],
+    ['expense', 'Paid purchase', 'Quick Add expense'],
+    ['bill', 'Vendor bill unpaid', 'AP bill'],
+    ['proof', 'Receipt / PDF / screenshot', 'Document Intake']
+  ];
+  return `
+    <section class="card workflow-diagram-card">
+      <div class="card-header-lite"><h3>Workflow Map</h3><span class="badge">Possible paths</span></div>
+      <div class="workflow-diagram" aria-label="Business ledger workflow diagram">
+        <div class="flow-lane">
+          ${flowNode(nodes[0])}
+          ${flowArrow('approved')}
+          ${flowNode(nodes[1])}
+          ${flowArrow('invoice sent')}
+          <div class="flow-node"><span>AR</span><strong>Customer owes you</strong><small>Open invoice / receivable</small></div>
+          ${flowArrow('paid')}
+          ${flowNode(nodes[2])}
+        </div>
+        <div class="flow-lane">
+          ${flowNode(nodes[3])}
+          ${flowArrow('already paid')}
+          <div class="flow-node"><span>SALE</span><strong>Revenue record</strong><small>Dashboard, charts, exports, tax prep</small></div>
+        </div>
+        <div class="flow-lane">
+          ${flowNode(nodes[4])}
+          ${flowArrow('paid now')}
+          <div class="flow-node"><span>EXP</span><strong>Expense record</strong><small>Deduction/proof/tax prep</small></div>
+          ${flowNode(nodes[5])}
+          ${flowArrow('pay later')}
+          <div class="flow-node"><span>AP</span><strong>Bill record</strong><small>What you owe vendors</small></div>
+        </div>
+        <div class="flow-lane proof-lane">
+          ${flowNode(nodes[6])}
+          ${flowArrow('attach to')}
+          <div class="flow-node wide"><span>PROOF</span><strong>Audit Docs</strong><small>Links back to Sale, Expense, Invoice, Bill, Job, or Asset</small></div>
+        </div>
+      </div>
+    </section>`;
+}
+
+function flowNode([key, title, detail]) {
+  return `<div class="flow-node ${key}"><span>${escapeHtml(key)}</span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(detail)}</small></div>`;
+}
+
+function flowArrow(label) {
+  return `<div class="flow-arrow"><span>${escapeHtml(label)}</span></div>`;
 }
 
 async function backupDb() {
@@ -1220,6 +2157,7 @@ async function backupDb() {
 }
 
 qs('#backupBtn').onclick = backupDb;
+bindTooltips();
 qs('#globalSearch').oninput = () => {
   clearTimeout(appState.globalSearchTimer);
   appState.globalSearchTimer = setTimeout(() => showPage('globalSearch'), 220);

@@ -4,4 +4,5 @@ Data/*.db
 Data/*.db-*
 Backups/
 .vs/
+.appdata/
 *.user

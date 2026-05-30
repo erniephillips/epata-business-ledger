@@ -17,10 +17,10 @@ A local-first .NET 10 + SQLite web app for EPATA 3D Prints. It is meant to repla
 - Audit Docs / Proof Index CRUD
 - Business Accounts CRUD
 - Action Items CRUD
+- Built-in Invoice Center and full estimate/invoice builder with calculator, records, live preview, and PDF print/save flow
 - CSV export for each area
 - SQLite database backup button
-- Link to existing invoice app at `http://localhost:5057/`
-- Safe invoice-app API test that tries common local endpoints without changing data
+- One-time old invoice-app import helper for migrating existing estimate/invoice records
 - Info hover bubbles throughout the app
 
 ## Seeded starting data
@@ -73,11 +73,7 @@ The app runs at:
 http://127.0.0.1:5062
 ```
 
-Your existing invoice app can keep running at:
-
-```text
-http://localhost:5057/
-```
+The old invoice app is no longer part of the daily workflow. Invoice Center is built into this app now. If the old app is running, the Import / Export page and Invoice Center can use it only as a one-time migration source.
 
 ## Where the data is stored
 
@@ -97,13 +93,19 @@ Backups/
 
 Use this app like this:
 
-- Customer asks for something: create a **Customer Job**.
-- You send a direct invoice: create an **AR Invoice**.
+- Create estimates and invoices in **Invoice Center**.
+- Use **Open Full Screen** or the embedded builder for the original calculator, estimate page, invoice page, records page, and customer-facing PDF preview/generator.
+- Saved estimates automatically update **Customer Jobs** with status Quoted.
+- Saved invoices automatically update **AR Invoices**.
+- Use **Convert to Invoice** when an estimate is approved.
+- When a unified invoice is marked paid with an Amount Paid, the matching **Direct Sale** is created or updated automatically.
+- Customer asks for something manually: create a **Customer Job**.
+- You send a direct invoice manually: create an **AR Invoice**.
 - Customer pays: update the AR Invoice to Paid and create/confirm a **Sale** row.
 - Etsy order comes in: create a **Sale** and **Customer Job**.
 - You buy filament/supplies: create an **Expense** if already paid.
 - You owe a vendor but have not paid: create an **AP Bill**.
-- You save PDFs/receipts/screenshots: create an **Audit Doc** entry.
+- You save PDFs/receipts/screenshots: use **Document Intake** or **Attach File** on a proof field. That creates an **Audit Doc** and stores the local file path.
 
 ## Developer notes
 
