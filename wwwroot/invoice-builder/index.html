@@ -547,6 +547,29 @@
               </div>
             </div>
 
+            <div class="summary-box">
+              <div class="summary-header">💵 Price Summary</div>
+              <div class="summary-body">
+                <div class="summary-lines">
+                  <div class="summary-line"><span>Subtotal</span><span id="bSubtotal">$0.00</span></div>
+                  <div class="summary-line discount-line"><span>Discount</span><span id="bDiscount">-$0.00</span></div>
+                  <div class="summary-line rush-line"><span>Rush fee</span><span id="bRush">+$0.00</span></div>
+                  <div class="summary-line"><span>Tax</span><span id="bTax">$0.00</span></div>
+                  <div class="summary-line total-line"><span>Total</span><span id="bTotal">$0.00</span></div>
+                  <div class="summary-line"><span>Amount paid</span><span id="bPaid">$0.00</span></div>
+                  <div class="summary-line balance-line"><span>Balance due</span><span id="bBalance">$0.00</span></div>
+                </div>
+                <div class="summary-footer">
+                  <div class="summary-input-grid">
+                    <div class="field"><label>Discount ($)</label><input id="docDiscount" type="number" min="0" step="0.5" value="0" /></div>
+                    <div class="field"><label>Rush (%)</label><input id="docRushPercent" type="number" min="0" max="200" step="5" value="0" /></div>
+                    <div class="field"><label>Tax rate (%)</label><input id="docTaxRate" type="number" min="0" max="30" step="0.001" value="0" /></div>
+                    <div class="field"><label>Amount paid ($)</label><input id="amountPaid" type="number" min="0" step="0.01" value="0" /></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <!-- PDF Notes -->
             <div class="card">
               <div class="card-header">
@@ -578,29 +601,8 @@
 
           </div><!-- /builder-main -->
 
-          <!-- Right: summary panel -->
+          <!-- Right: live PDF preview -->
           <div class="builder-side">
-            <div class="summary-box">
-              <div class="summary-header">💵 Price Summary</div>
-              <div class="summary-lines">
-                <div class="summary-line"><span>Subtotal</span><span id="bSubtotal">$0.00</span></div>
-                <div class="summary-line discount-line"><span>Discount</span><span id="bDiscount">-$0.00</span></div>
-                <div class="summary-line rush-line"><span>Rush fee</span><span id="bRush">+$0.00</span></div>
-                <div class="summary-line"><span>Tax</span><span id="bTax">$0.00</span></div>
-                <div class="summary-line total-line"><span>Total</span><span id="bTotal">$0.00</span></div>
-                <div class="summary-line"><span>Amount paid</span><span id="bPaid">$0.00</span></div>
-                <div class="summary-line balance-line"><span>Balance due</span><span id="bBalance">$0.00</span></div>
-              </div>
-              <div class="summary-footer">
-                <div class="form-col" style="gap:10px">
-                  <div class="field"><label>Discount ($)</label><input id="docDiscount" type="number" min="0" step="0.5" value="0" /></div>
-                  <div class="field"><label>Rush (%)</label><input id="docRushPercent" type="number" min="0" max="200" step="5" value="0" /></div>
-                  <div class="field"><label>Tax rate (%)</label><input id="docTaxRate" type="number" min="0" max="30" step="0.001" value="0" /></div>
-                  <div class="field"><label>Amount paid ($)</label><input id="amountPaid" type="number" min="0" step="0.01" value="0" /></div>
-                </div>
-              </div>
-            </div>
-
             <div class="quick-actions-card">
               <div class="quick-actions-title">Quick Actions</div>
               <div class="quick-actions-grid">

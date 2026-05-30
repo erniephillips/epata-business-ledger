@@ -93,7 +93,7 @@ function filter(rows) {
 function updateFooterStats() {
   const invoices = _records.filter(r => r.docType === 'INVOICE');
   const total    = invoices.reduce((s, r) => s + (r.total || 0), 0);
-  const unpaid   = invoices.filter(r => r.status !== 'Paid' && r.status !== 'Void').reduce((s, r) => s + (r.balance || 0), 0);
+  const unpaid   = invoices.filter(r => !['Draft', 'Paid', 'Void'].includes(r.status)).reduce((s, r) => s + Math.max(0, r.balance || 0), 0);
   const setText = (id, v) => { const e = el(id); if (e) e.textContent = v; };
   setText('recTotalCount',    _records.length);
   setText('recInvoiceTotal',  money(total));

@@ -1605,7 +1605,7 @@ function renderInvoiceEditor(doc) {
       <form id="invoiceDocForm" class="invoice-form card">
         ${invoiceInput('docNumber','Number',doc.docNumber)}
         ${invoiceSelect('docType','Type',doc.docType,['ESTIMATE','INVOICE'])}
-        ${invoiceSelect('status','Status',doc.status,['Draft','Sent','Partial','Paid','Void'])}
+        ${invoiceSelect('status','Status',doc.status, doc.docType === 'INVOICE' ? ['Draft','Sent','Partial','Paid','Void'] : ['Draft','Sent','Accepted','Void'])}
         ${invoiceInput('docDate','Date',doc.docDate,'date')}
         ${invoiceInput('dueDate','Due Date',doc.dueDate,'date')}
         ${invoiceInput('customerName','Customer',doc.customerName)}
@@ -1752,11 +1752,12 @@ function collectInvoiceDocument() {
   const taxable = Math.max(0, subtotal - discountAmount + rushAmount);
   const taxAmount = taxable * calcTaxRate / 100;
   const total = taxable + taxAmount;
-  const amountPaid = Number(data.amountPaid || 0);
+  const isInvoice = data.docType === 'INVOICE';
+  const amountPaid = isInvoice ? Number(data.amountPaid || 0) : 0;
   return {
     ...data,
     subtotal, discountAmount, rushAmount, calcTaxRate, taxAmount, total, amountPaid,
-    balance: Math.max(0, total - amountPaid),
+    balance: isInvoice ? Math.max(0, total - amountPaid) : 0,
     calcGrams: Number(data.calcGrams || 0), calcHours: Number(data.calcHours || 0),
     calcDesignHours: Number(data.calcDesignHours || 0), calcSetupFee: Number(data.calcSetupFee || 0),
     calcPostFee: Number(data.calcPostFee || 0), calcGramRate: Number(data.calcGramRate || 0.05),

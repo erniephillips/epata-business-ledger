@@ -801,9 +801,12 @@ function normalizeData(input) {
   d.total = num(d.total);
   d.amountPaid = num(d.amountPaid);
   d.balance = Number.isFinite(Number(d.balance)) ? num(d.balance) : Math.max(0, d.total - d.amountPaid);
-  // Both "Paid" (invoice) and "Accepted" (estimate) are closed-out states.
-  if (d.status === 'Paid' || d.status === 'Accepted') {
+  if (d.docType === 'INVOICE' && d.status === 'Paid') {
     d.amountPaid = d.total;
+    d.balance = 0;
+  }
+  if (d.docType === 'ESTIMATE') {
+    d.amountPaid = 0;
     d.balance = 0;
   }
   d.docRushPercent = num(d.docRushPercent);

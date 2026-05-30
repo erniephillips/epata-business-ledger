@@ -39,6 +39,8 @@ using (var scope = app.Services.CreateScope())
     await DbSeeder.SeedAsync(db, app.Configuration);
     await DbSeeder.SeedPatchAsync(db);
     await SeedUnifiedInvoiceDocumentsFromLedgerAsync(db);
+    await NormalizeInvoiceDocumentRowsAsync(db);
+    await ArchiveOrphanedUnifiedLedgerRowsAsync(db);
 }
 
 app.UseDefaultFiles();
@@ -209,15 +211,7 @@ app.MapPut("/api/documents/{id:int}", async (AppDbContext db, int id, SaveInvoic
 
 app.MapDelete("/api/documents/{id:int}", async (AppDbContext db, int id) =>
 {
-    var doc = await db.InvoiceDocuments.FindAsync(id);
-    if (doc is null)
-    {
-        return Results.NotFound(new { message = $"Document {id} was not found." });
-    }
-
-    db.InvoiceDocuments.Remove(doc);
-    await db.SaveChangesAsync();
-    return Results.Ok(new { deleted = id });
+    return await DeleteInvoiceDocumentAndSyncAsync(db, id);
 });
 
 app.MapPost("/api/documents/{id:int}/duplicate", async (AppDbContext db, int id) =>
@@ -322,15 +316,7 @@ app.MapPut("/api/invoice-documents/{id:int}", async (AppDbContext db, int id, Sa
 
 app.MapDelete("/api/invoice-documents/{id:int}", async (AppDbContext db, int id) =>
 {
-    var doc = await db.InvoiceDocuments.FindAsync(id);
-    if (doc is null)
-    {
-        return Results.NotFound(new { message = $"Document {id} was not found." });
-    }
-
-    db.InvoiceDocuments.Remove(doc);
-    await db.SaveChangesAsync();
-    return Results.Ok(new { deleted = id });
+    return await DeleteInvoiceDocumentAndSyncAsync(db, id);
 });
 
 app.MapPost("/api/invoice-documents/{id:int}/duplicate", async (AppDbContext db, int id) =>
@@ -369,7 +355,7 @@ app.MapPost("/api/invoice-documents/{id:int}/duplicate", async (AppDbContext db,
         TaxAmount = source.TaxAmount,
         Total = source.Total,
         AmountPaid = 0,
-        Balance = source.Total,
+        Balance = source.DocType == "INVOICE" ? source.Total : 0,
         PricingGuide = source.PricingGuide,
         TermsNotes = source.TermsNotes,
         StandardTurnaround = source.StandardTurnaround,
@@ -691,6 +677,7 @@ static async Task<object> BuildTaxAuditAsync(AppDbContext db)
     var issues = new List<TaxAuditIssue>();
     var sales = await db.Sales.AsNoTracking().Where(x => !x.IsArchived).ToListAsync();
     var invoices = await db.ReceivableInvoices.AsNoTracking().Where(x => !x.IsArchived).ToListAsync();
+    var jobs = await db.CustomerJobs.AsNoTracking().Where(x => !x.IsArchived).ToListAsync();
     var docs = await db.InvoiceDocuments.AsNoTracking().ToListAsync();
     var expenses = await db.Expenses.AsNoTracking().Where(x => !x.IsArchived).ToListAsync();
     var assets = await db.Assets.AsNoTracking().Where(x => !x.IsArchived).ToListAsync();
@@ -755,6 +742,25 @@ static async Task<object> BuildTaxAuditAsync(AppDbContext db)
     {
         issues.Add(new("High", "Duplicate AR invoice number across customers", group.Key,
             "AR invoice numbers should be unique. Use Original PDF Invoice # for duplicate/wrong source PDFs."));
+    }
+
+    var docNumbers = docs.Select(x => x.DocNumber).Where(x => !string.IsNullOrWhiteSpace(x)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+    foreach (var invoice in invoices.Where(x => (x.SourceProof ?? string.Empty).StartsWith("Unified invoice ", StringComparison.OrdinalIgnoreCase) && !docNumbers.Contains(x.InvoiceNumber)))
+    {
+        issues.Add(new("High", "Orphaned AR invoice", invoice.InvoiceNumber,
+            "This AR row says it came from the unified invoice builder, but the source document no longer exists."));
+    }
+
+    foreach (var sale in sales.Where(x => (x.SourceProof ?? string.Empty).StartsWith("Unified invoice ", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(x.InvoiceNumber) && !docNumbers.Contains(x.InvoiceNumber)))
+    {
+        issues.Add(new("High", "Orphaned direct sale", sale.InvoiceNumber!,
+            "This Sale row says it came from the unified invoice builder, but the source document no longer exists."));
+    }
+
+    foreach (var job in jobs.Where(x => (x.SourceProof ?? string.Empty).StartsWith("Unified estimate ", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(x.RelatedInvoiceNumber) && !docNumbers.Contains(x.RelatedInvoiceNumber)))
+    {
+        issues.Add(new("High", "Orphaned customer job", job.RelatedInvoiceNumber!,
+            "This Customer Job says it came from the unified estimate builder, but the source document no longer exists."));
     }
 
     foreach (var doc in docs.Where(x => x.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase)))
@@ -1060,7 +1066,7 @@ static async Task<InvoiceDocument?> DuplicateInvoiceDocumentAsync(AppDbContext d
         TaxAmount = source.TaxAmount,
         Total = source.Total,
         AmountPaid = 0,
-        Balance = source.Total,
+        Balance = docType == "INVOICE" ? source.Total : 0,
         PricingGuide = source.PricingGuide,
         TermsNotes = docType == "INVOICE" ? "Payment due by the due date shown above." : source.TermsNotes,
         StandardTurnaround = source.StandardTurnaround,
@@ -1096,6 +1102,56 @@ static async Task<InvoiceDocument?> DuplicateInvoiceDocumentAsync(AppDbContext d
     await db.SaveChangesAsync();
     await SyncUnifiedInvoiceDocumentToLedgerAsync(db, copy);
     return copy;
+}
+
+static async Task<IResult> DeleteInvoiceDocumentAndSyncAsync(AppDbContext db, int id)
+{
+    var doc = await db.InvoiceDocuments.FindAsync(id);
+    if (doc is null)
+    {
+        return Results.NotFound(new { message = $"Document {id} was not found." });
+    }
+
+    var docNumber = doc.DocNumber ?? string.Empty;
+    if (!string.IsNullOrWhiteSpace(docNumber))
+    {
+        if (doc.DocType.Equals("ESTIMATE", StringComparison.OrdinalIgnoreCase))
+        {
+            var sourceProof = $"Unified estimate {docNumber}";
+            var jobs = await db.CustomerJobs
+                .Where(x => !x.IsArchived && x.RelatedInvoiceNumber == docNumber && x.SourceProof == sourceProof)
+                .ToListAsync();
+            foreach (var job in jobs)
+            {
+                job.IsArchived = true;
+                job.UpdatedAtUtc = DateTime.UtcNow;
+            }
+        }
+        else if (doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase))
+        {
+            var sourceProof = $"Unified invoice {docNumber}";
+            var invoice = await db.ReceivableInvoices.FirstOrDefaultAsync(x => !x.IsArchived && x.InvoiceNumber == docNumber && x.SourceProof == sourceProof);
+            if (invoice is not null)
+            {
+                invoice.IsArchived = true;
+                invoice.UpdatedAtUtc = DateTime.UtcNow;
+            }
+
+            var sales = await db.Sales
+                .Where(x => !x.IsArchived && x.Platform == "Direct" && x.InvoiceNumber == docNumber && x.SourceProof == sourceProof)
+                .ToListAsync();
+            foreach (var sale in sales)
+            {
+                sale.IncludeInDashboard = false;
+                sale.IsArchived = true;
+                sale.UpdatedAtUtc = DateTime.UtcNow;
+            }
+        }
+    }
+
+    db.InvoiceDocuments.Remove(doc);
+    await db.SaveChangesAsync();
+    return Results.Ok(new { deleted = id, docNumber });
 }
 
 static async Task UpsertSettingAsync(AppDbContext db, string key, string? value)
@@ -1360,6 +1416,78 @@ static async Task SeedUnifiedInvoiceDocumentsFromLedgerAsync(AppDbContext db)
     await db.SaveChangesAsync();
 }
 
+static async Task NormalizeInvoiceDocumentRowsAsync(AppDbContext db)
+{
+    var changed = false;
+    var estimatesWithPayment = await db.InvoiceDocuments
+        .Where(d => d.DocType == "ESTIMATE" && (d.AmountPaid != 0 || d.Balance != 0 || d.Status == "Paid"))
+        .ToListAsync();
+
+    foreach (var estimate in estimatesWithPayment)
+    {
+        estimate.AmountPaid = 0;
+        estimate.Balance = 0;
+        if (estimate.Status.Equals("Paid", StringComparison.OrdinalIgnoreCase))
+        {
+            estimate.Status = "Accepted";
+        }
+
+        estimate.UpdatedAt = DateTimeOffset.UtcNow.ToString("O");
+        changed = true;
+    }
+
+    if (changed)
+    {
+        await db.SaveChangesAsync();
+    }
+}
+
+static async Task ArchiveOrphanedUnifiedLedgerRowsAsync(AppDbContext db)
+{
+    var docNumbers = await db.InvoiceDocuments
+        .Where(d => d.DocNumber != null && d.DocNumber != "")
+        .Select(d => d.DocNumber!)
+        .ToListAsync();
+    var existingDocs = docNumbers.ToHashSet(StringComparer.OrdinalIgnoreCase);
+    var changed = false;
+
+    var orphanInvoices = await db.ReceivableInvoices
+        .Where(x => !x.IsArchived && x.SourceProof != null && x.SourceProof.StartsWith("Unified invoice "))
+        .ToListAsync();
+    foreach (var invoice in orphanInvoices.Where(x => !existingDocs.Contains(x.InvoiceNumber)))
+    {
+        invoice.IsArchived = true;
+        invoice.UpdatedAtUtc = DateTime.UtcNow;
+        changed = true;
+    }
+
+    var orphanSales = await db.Sales
+        .Where(x => !x.IsArchived && x.SourceProof != null && x.SourceProof.StartsWith("Unified invoice ") && x.InvoiceNumber != null)
+        .ToListAsync();
+    foreach (var sale in orphanSales.Where(x => !existingDocs.Contains(x.InvoiceNumber!)))
+    {
+        sale.IncludeInDashboard = false;
+        sale.IsArchived = true;
+        sale.UpdatedAtUtc = DateTime.UtcNow;
+        changed = true;
+    }
+
+    var orphanJobs = await db.CustomerJobs
+        .Where(x => !x.IsArchived && x.SourceProof != null && x.SourceProof.StartsWith("Unified estimate ") && x.RelatedInvoiceNumber != null)
+        .ToListAsync();
+    foreach (var job in orphanJobs.Where(x => !existingDocs.Contains(x.RelatedInvoiceNumber!)))
+    {
+        job.IsArchived = true;
+        job.UpdatedAtUtc = DateTime.UtcNow;
+        changed = true;
+    }
+
+    if (changed)
+    {
+        await db.SaveChangesAsync();
+    }
+}
+
 static async Task<string> NextInvoiceDocumentNumberAsync(AppDbContext db, string? type)
 {
     var prefix = string.Equals(type, "INVOICE", StringComparison.OrdinalIgnoreCase) ? "INV" : "EST";
@@ -1422,6 +1550,15 @@ static void ApplyInvoiceDocumentRequest(InvoiceDocument doc, SaveInvoiceDocument
     doc.Total = request.Total;
     doc.AmountPaid = request.AmountPaid;
     doc.Balance = request.Balance;
+    if (doc.DocType.Equals("ESTIMATE", StringComparison.OrdinalIgnoreCase))
+    {
+        doc.AmountPaid = 0;
+        doc.Balance = 0;
+        if (doc.Status.Equals("Paid", StringComparison.OrdinalIgnoreCase))
+        {
+            doc.Status = "Accepted";
+        }
+    }
     doc.PricingGuide = request.PricingGuide;
     doc.TermsNotes = request.TermsNotes;
     doc.StandardTurnaround = request.StandardTurnaround;
@@ -1488,7 +1625,7 @@ static async Task SyncUnifiedInvoiceDocumentToLedgerAsync(AppDbContext db, Invoi
         job.Description = doc.ProjectDescription ?? job.Description;
         job.Status = doc.Status.Equals("Void", StringComparison.OrdinalIgnoreCase) ? "Cancelled" : "Quoted";
         job.QuoteAmount = doc.Total;
-        job.AmountPaid = doc.AmountPaid;
+        job.AmountPaid = null;
         job.InvoiceAmount = null;
         job.NeedsReview = false;
     }
