@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EPATA Business Ledger</title>
+  <link rel="stylesheet" href="/css/site.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo-mark">E</div>
+      <div>
+        <h1>EPATA Business Ledger</h1>
+        <p>Operations cockpit for money, jobs, proof, invoices, costs, and cleanup.</p>
+      </div>
+    </div>
+    <div class="command-center">
+      <span class="command-icon">⌕</span>
+      <input id="globalSearch" type="search" placeholder="Search every ledger area...">
+    </div>
+    <div class="header-actions">
+      <a class="ghost-button" href="http://localhost:5057/" target="_blank" title="Open your existing EPATA invoice/estimate generator in another tab.">Open Invoice App</a>
+      <button id="backupBtn" class="primary-button" title="Downloads a copy of the local SQLite database file into your browser downloads.">Backup DB</button>
+    </div>
+  </header>
+
+  <main class="shell">
+    <aside class="sidebar">
+      <nav id="nav"></nav>
+      <div class="sidebar-card">
+        <strong>Local SQLite</strong>
+        <p>Proof-first books for EPATA. Keep invoices in the invoice tool, keep business truth here.</p>
+      </div>
+    </aside>
+
+    <section class="content">
+      <div id="app"></div>
+    </section>
+  </main>
+
+  <div id="modalBackdrop" class="modal-backdrop hidden" role="presentation"></div>
+  <section id="modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-header">
+      <div>
+        <h2 id="modalTitle"></h2>
+        <p id="modalHelp"></p>
+      </div>
+      <button class="icon-button" id="modalClose" aria-label="Close">×</button>
+    </div>
+    <form id="modalForm" class="form-grid"></form>
+    <div class="modal-footer">
+      <button id="modalCancel" class="ghost-button">Cancel</button>
+      <button id="modalSave" class="primary-button">Save</button>
+    </div>
+  </section>
+
+  <div id="toast" class="toast hidden"></div>
+  <div id="tooltip" class="floating-tooltip hidden" role="tooltip"></div>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>
