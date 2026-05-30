@@ -523,7 +523,6 @@ async function renderDashboard(el) {
   const k = data.kpis;
   const monthlyMax = Math.max(...(data.monthly || []).map(x => Number(x.grossReceipts || 0)), 1);
   el.innerHTML = `
-    ${appInfo?.isTest ? `<div style="background:#d97706;color:#fff;padding:.5rem 1rem;border-radius:8px;margin-bottom:.75rem;font-weight:700;font-size:.9rem;">⚠ TEST MODE — using separate test database. Production data is untouched.</div>` : ''}
     <section class="workspace-hero">
       <div>
         <span class="eyebrow">EPATA Ledger Command</span>
@@ -2270,4 +2269,7 @@ qs('#modalSave').onclick = e => { e.preventDefault(); saveModal(); };
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 
 renderNav();
+api('/api/app-info').then(info => {
+  if (info?.isTest) qs('#testModeBanner')?.classList.remove('hidden');
+}).catch(() => {});
 showPage('dashboard');

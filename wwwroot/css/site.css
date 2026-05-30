@@ -1033,6 +1033,20 @@ button, .primary-button, .ghost-button, .danger-button {
 .quick-card strong { display: block; margin-bottom: .35rem; color: var(--ink); }
 .quick-card span { color: var(--muted); font-size: .86rem; font-weight: 600; line-height: 1.4; }
 
+.test-mode-banner {
+  background: #b45309;
+  color: #fff;
+  text-align: center;
+  font-weight: 700;
+  font-size: .95rem;
+  letter-spacing: .02em;
+  padding: .55rem 1rem;
+  position: sticky;
+  top: 0;
+  z-index: 9999;
+}
+.test-mode-banner.hidden { display: none; }
+
 .milestone-pulse {
   background: rgba(255,255,255,.94);
   border: 1px solid var(--line);
