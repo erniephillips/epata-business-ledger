@@ -29,7 +29,9 @@ export const api = {
   create:      (body)          => request('/api/documents',      { method: 'POST', ...json(body) }),
   update:      (id, body)      => request(`/api/documents/${id}`, { method: 'PUT',  ...json(body) }),
   delete:      (id)            => request(`/api/documents/${id}`, { method: 'DELETE' }),
+  restore:     (id)            => request(`/api/documents/${id}/restore`, { method: 'POST' }),
   duplicate:   (id)            => request(`/api/documents/${id}/duplicate`, { method: 'POST' }),
+  convertToInvoice: (id)       => request(`/api/documents/${id}/convert-to-invoice`, { method: 'POST' }),
 
   // Settings
   getConfig:   ()              => request('/api/config'),

@@ -168,24 +168,45 @@ export function applyConfigDefaults(cfg) {
   calculate();
 }
 
-export function pushToBuilder(calc, lineItemsFn, addLineItemFn) {
+export function pushToBuilder(calc, lineItemsFn, addLineItemFn, context = {}) {
   const tbody = el('lineItemsBody');
   if (!tbody) return;
-  tbody.innerHTML = '';
 
   // Round computed money values to cents to avoid JS float artifacts
   // like 30.499999999999993 showing up in rate fields.
   const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
+  const calcDescriptions = new Set([
+    'Print setup / file preparation',
+    'Material usage',
+    'Machine print time',
+    'Design / modeling time',
+    'Post-processing / handling',
+    'Material / difficulty surcharge',
+    'Minimum charge adjustment',
+  ]);
+  const productName = String(context.productName || '').trim();
+  const productDetails = String(context.productDetails || '').trim();
+
+  Array.from(tbody.querySelectorAll('tr')).forEach(row => {
+    const desc = row.querySelector('.item-desc')?.value?.trim() || '';
+    const isSelectedProductRow = productName && desc.toLowerCase() === productName.toLowerCase();
+    if (row.dataset.source === 'calculator' || calcDescriptions.has(desc) || isSelectedProductRow) {
+      row.remove();
+    }
+  });
 
   const addIf = (cond, desc, details, qty, rate) => {
-    if (cond) addLineItemFn({ desc, details, qty, rate });
+    if (cond) addLineItemFn({ desc, details, qty, rate, source: 'calculator' });
   };
 
   addLineItemFn({
-    desc: 'Print setup / file preparation',
-    details: 'Slicing, orientation, supports, settings review, and project setup.',
+    desc: productName || 'Print setup / file preparation',
+    details: productName
+      ? [productDetails, 'Calculated quote: slicing, orientation, supports, settings review, and project setup.'].filter(Boolean).join('\n')
+      : 'Slicing, orientation, supports, settings review, and project setup.',
     qty: 1,
     rate: r2(calc.setup),
+    source: 'calculator',
   });
 
   addIf(val('grams') > 0, 'Material usage',
@@ -207,6 +228,13 @@ export function pushToBuilder(calc, lineItemsFn, addLineItemFn) {
   addIf(calc.difficultyFee > 0, 'Material / difficulty surcharge',
     `ABS/ASA or higher-risk print. Multiplier: ${calc.difficultyFactor.toFixed(2)}×`,
     1, r2(calc.difficultyFee));
+
+  const preMinimumSubtotal = calc.baseSubtotal + calc.difficultyFee;
+  const rushMultiplier = 1 + Math.max(0, val('rush') / 100);
+  const minimumAdjustment = Math.max(0, ((calc.minimum + calc.discount) / rushMultiplier) - preMinimumSubtotal);
+  addIf(minimumAdjustment > 0, 'Minimum charge adjustment',
+    `Minimum quote floor: ${money(calc.minimum)}.`,
+    1, r2(minimumAdjustment));
 
   if (!tbody.children.length) addLineItemFn({});
 

@@ -547,6 +547,23 @@ table.data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   border-bottom: 1px solid var(--line);
   white-space: nowrap;
 }
+.sort-header {
+  width: 100%;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  display: inline-flex;
+  justify-content: flex-start;
+  gap: 4px;
+  font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+.sort-header.active { color: var(--ink); }
+.sort-header:hover { color: var(--brand); }
 .data-table td {
   padding: 11px 14px;
   border-bottom: 1px solid #f1f5f9;
@@ -1083,6 +1100,61 @@ table.li-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 }
 .filters-bar input[type="search"] { flex: 1; min-width: 200px; }
 .filter-count { font-size: 12px; color: var(--muted); margin-left: auto; font-weight: 600; }
+.records-guide {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.records-guide > div {
+  padding: 12px 14px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-xs);
+}
+.records-guide span {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--blue);
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.records-guide strong {
+  display: block;
+  color: var(--ink);
+  margin-bottom: 4px;
+}
+.records-guide p {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.check-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1.5px solid var(--line-2);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  color: var(--ink);
+  font-size: 12.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.check-inline input {
+  width: 14px;
+  height: 14px;
+  padding: 0;
+}
+.archived-record {
+  opacity: 0.72;
+  background: #f8fafc;
+}
 
 /* ══════════════════════════════════════════════════════════════
    RATE CARD
@@ -1296,6 +1368,7 @@ select.status-select { font-weight: 600; }
 @media (max-width: 1280px) {
   .quote-primer,
   .formula-library,
+  .records-guide,
   .price-tier-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1342,6 +1415,7 @@ select.status-select { font-weight: 600; }
   .quote-primer,
   .formula-library,
   .rule-grid,
+  .records-guide,
   .price-tier-grid,
   #view-settings .view-body > div {
     grid-template-columns: 1fr !important;

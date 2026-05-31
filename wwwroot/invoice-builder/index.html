@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>EPATA Estimate & Invoice Builder</title>
   <link rel="stylesheet" href="./css/app.css" />
-  <script type="module" src="./js/app.js?v=3"></script>
+  <script type="module" src="./js/app.js?v=4"></script>
 </head>
 <body>
 <div id="app">
@@ -639,7 +639,7 @@
       <div class="view-header">
         <div class="view-title">
           <h1>Records</h1>
-          <p>All saved estimates and invoices</p>
+          <p>Saved estimate/invoice PDFs plus AR-only invoice ledger rows that do not have a builder PDF record.</p>
         </div>
         <div class="view-actions">
           <button class="btn-ghost btn-sm" id="btnExportCsv">⬇ CSV</button>
@@ -651,6 +651,23 @@
         </div>
       </div>
       <div class="view-body">
+        <section class="records-guide">
+          <div>
+            <span>PDF invoice / estimate</span>
+            <strong>The customer-facing document.</strong>
+            <p>Use Open here when you want the builder, line items, preview, and downloadable PDF.</p>
+          </div>
+          <div>
+            <span>AR Ledger</span>
+            <strong>The money tracker.</strong>
+            <p>Use Open AR Ledger when you only need to track owed/paid money. It does not have a PDF unless one was created separately.</p>
+          </div>
+          <div>
+            <span>Best default</span>
+            <strong>Make invoices in the builder.</strong>
+            <p>New Invoice creates the PDF and updates the ledger. Use AR-only mostly for old/imported/outside invoices.</p>
+          </div>
+        </section>
         <div class="filters-bar">
           <input type="search" id="recSearch" placeholder="Search by number, customer, project…" />
           <select id="recType">
@@ -673,6 +690,10 @@
             <option value="total">Sort: Total</option>
             <option value="customer">Sort: Customer</option>
           </select>
+          <label class="check-inline" title="Shows records you archived with the red X. Archived rows are kept for audit history but do not count in normal invoice totals.">
+            <input type="checkbox" id="recIncludeArchived" />
+            Show Archived
+          </label>
           <span class="filter-count" id="recCount"></span>
         </div>
 
@@ -681,10 +702,15 @@
             <table class="data-table">
               <thead>
                 <tr>
-                  <th>Number</th><th>Type</th><th>Status</th>
-                  <th>Customer</th><th>Project</th>
-                  <th class="num">Total</th><th class="num">Paid</th>
-                  <th>Updated</th><th></th>
+                  <th><button class="sort-header" type="button" data-record-sort="number">Number ↕</button></th>
+                  <th><button class="sort-header" type="button" data-record-sort="type">Type ↕</button></th>
+                  <th><button class="sort-header" type="button" data-record-sort="status">Status ↕</button></th>
+                  <th><button class="sort-header" type="button" data-record-sort="customer">Customer ↕</button></th>
+                  <th><button class="sort-header" type="button" data-record-sort="project">Project ↕</button></th>
+                  <th class="num"><button class="sort-header" type="button" data-record-sort="total">Total ↕</button></th>
+                  <th class="num"><button class="sort-header" type="button" data-record-sort="paid">Paid ↕</button></th>
+                  <th><button class="sort-header active" type="button" data-record-sort="updated">Updated ↓</button></th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody id="recordsBody">

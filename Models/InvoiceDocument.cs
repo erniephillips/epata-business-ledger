@@ -81,6 +81,9 @@ public class InvoiceDocument
     public decimal CalcTaxRate { get; set; }
 
     public string Json { get; set; } = "{}";
+    public bool IsArchived { get; set; }
+    public string? ArchivedAt { get; set; }
+    public string? ArchiveReason { get; set; }
     public string CreatedAt { get; set; } = DateTimeOffset.UtcNow.ToString("O");
     public string UpdatedAt { get; set; } = DateTimeOffset.UtcNow.ToString("O");
 

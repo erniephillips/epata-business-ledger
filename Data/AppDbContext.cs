@@ -20,6 +20,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<AppSetting> AppSettings => Set<AppSetting>();
     public DbSet<InvoiceDocument> InvoiceDocuments => Set<InvoiceDocument>();
     public DbSet<InvoiceLineItem> InvoiceLineItems => Set<InvoiceLineItem>();
+    public DbSet<InvoiceDocumentEvent> InvoiceDocumentEvents => Set<InvoiceDocumentEvent>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -38,6 +39,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         modelBuilder.Entity<AppSetting>().HasIndex(x => x.Key).IsUnique();
         modelBuilder.Entity<InvoiceDocument>().HasIndex(x => x.DocNumber).IsUnique(false);
         modelBuilder.Entity<InvoiceDocument>().HasIndex(x => x.UpdatedAt);
+        modelBuilder.Entity<InvoiceDocumentEvent>().HasIndex(x => x.InvoiceDocumentId);
+        modelBuilder.Entity<InvoiceDocumentEvent>().HasIndex(x => x.CreatedAt);
         modelBuilder.Entity<InvoiceLineItem>()
             .HasOne(x => x.InvoiceDocument)
             .WithMany(x => x.LineItems)

@@ -3,11 +3,19 @@ const appState = {
   modal: { config: null, row: null, mode: 'create' },
   globalSearchTimer: null,
   invoicePdfModule: null,
-  invoiceToolSnapshot: null
+  invoiceToolSnapshot: null,
+  invoiceToolPrefill: null,
+  documentIntakePrefill: null,
+  timelineQuery: '',
+  timelineCustomer: '',
+  timelineSort: 'lastActivityDesc',
+  timelineTimer: null,
+  pageHistory: [],
+  suppressPopState: false
 };
 
 const moneyFields = new Set(['itemSales','shippingCharged','salesTaxCollected','customerPaid','platformFees','shippingLabelCost','refunds','estimatedCogs','subtotal','discount','rushFee','salesTax','invoiceTotal','amountPaid','balanceDue','amount','total','openingBalance','currentBalance','cost','giftCardAmount','quoteAmount','invoiceAmount','targetPrice','grams','materialCostPerGram','printHours','machineRatePerHour','packagingCost','designMinutes','rewardValue','pointsValue','notYetExpensed','netBeforeCogs','estNetAfterCogs']);
-const dateFields = new Set(['saleDate','shipByDate','invoiceDate','dueDate','billDate','paymentDate','expenseDate','purchaseDate','warrantyEndDate','rewardDate','documentDate','jobDate']);
+const dateFields = new Set(['saleDate','shipByDate','invoiceDate','dueDate','billDate','paymentDate','expenseDate','purchaseDate','warrantyEndDate','rewardDate','documentDate','jobDate','createdAtUtc','updatedAtUtc','createdAt','updatedAt','lastActivity']);
 
 const commonOptions = {
   platform: ['Direct','Etsy','MakerWorld','Local','Other'],
@@ -113,13 +121,13 @@ const configs = {
   },
   receivables: {
     route: 'receivable-invoices',
-    title: 'Accounts Receivable / Invoice Register',
-    nav: 'AR Invoices',
-    purpose: 'Use this for direct invoices and money customers owe you. Paid invoices can also be mirrored into Sales once paid.',
+    title: 'AR Ledger Entry / Money Owed Tracker',
+    nav: 'AR Ledger',
+    purpose: 'Use this to track money a customer owes or paid when there is no builder/PDF invoice document. If you need the printable invoice, use New Invoice instead.',
     columns: ['invoiceNumber','invoiceDate','dueDate','customerName','projectName','status','invoiceTotal','amountPaid','balanceDue','needsReview'],
     fields: [
-      f('invoiceNumber','Invoice #','text','Your invoice number. Keep this unique and sequential.'),
-      f('originalInvoiceNumber','Original PDF Invoice #','text','Use this only if a PDF had the wrong/duplicate number.'),
+      f('invoiceNumber','AR / Invoice #','text','The number you are tracking payment against. This does not create a PDF by itself.'),
+      f('originalInvoiceNumber','PDF Invoice #, if different','text','Only use this when this AR tracker points to an invoice PDF made somewhere else or with a different number.'),
       f('invoiceDate','Invoice Date','date','Date shown on invoice.'),
       f('dueDate','Due Date','date','Date payment is due.'),
       f('customerName','Customer Name','text','Customer being invoiced.'),
@@ -316,7 +324,7 @@ const configs = {
     route: 'action-items',
     title: 'Action Items',
     nav: 'Actions',
-    purpose: 'Your to-do list for missing costs, open invoices, receipt cleanup, and bookkeeping fixes.',
+    purpose: 'Cleanup and follow-up list. Open means review it, Waiting means parked until you have the missing info, and Done means it is resolved.',
     columns: ['priority','dueDate','area','title','status','relatedRecord'],
     fields: [
       f('title','Title','text','What needs to be done.'),
@@ -334,45 +342,48 @@ const navGroups = [
   {
     label: 'Command',
     items: [
-      ['dashboard','Dashboard','◆'],
-      ['quickAdd','Quick Add','＋'],
-      ['estimates','Estimates','🧾'],
-      ['invoices','Invoices','📄'],
-      ['pricingCalculator','Calculator','🧮'],
-      ['invoiceRecords','Invoice Records','🗂'],
-      ['documentIntake','Document Intake','⇪']
+      ['dashboard','Dashboard','layout-dashboard'],
+      ['quickAdd','Quick Add','plus-square'],
+      ['estimates','Estimates','clipboard-list'],
+      ['invoices','Invoices','file-text'],
+      ['pricingCalculator','Calculator','calculator'],
+      ['invoiceRecords','Invoice Records','folder'],
+      ['jobTimeline','Job Timeline','clock'],
+      ['documentIntake','Document Intake','upload']
     ]
   },
   {
     label: 'Books',
     items: [
-      ['sales',configs.sales.nav,'$'],
-      ['receivables',configs.receivables.nav,'AR'],
-      ['bills',configs.bills.nav,'AP'],
-      ['expenses',configs.expenses.nav,'−'],
-      ['accounts',configs.accounts.nav,'▣']
+      ['sales',configs.sales.nav,'dollar-sign'],
+      ['receivables',configs.receivables.nav,'arrow-down-circle'],
+      ['bills',configs.bills.nav,'arrow-up-circle'],
+      ['expenses',configs.expenses.nav,'receipt'],
+      ['accounts',configs.accounts.nav,'wallet']
     ]
   },
   {
     label: 'Operations',
     items: [
-      ['customerJobs',configs.customerJobs.nav,'◱'],
-      ['parties',configs.parties.nav,'◎'],
-      ['products',configs.products.nav,'▦'],
-      ['assets',configs.assets.nav,'▤'],
-      ['makerworld',configs.makerworld.nav,'MW']
+      ['customerJobs',configs.customerJobs.nav,'briefcase'],
+      ['customers','Customers','user'],
+      ['vendors','Vendors','truck'],
+      ['products',configs.products.nav,'boxes'],
+      ['assets',configs.assets.nav,'printer'],
+      ['makerworld',configs.makerworld.nav,'gift']
     ]
   },
   {
     label: 'Control',
     items: [
-      ['auditDocs',configs.auditDocs.nav,'↗'],
-      ['actions',configs.actions.nav,'!'],
-      ['taxPrep','Tax Prep','%'],
-      ['importExport','Import / Export','⇄'],
-      ['admin','Admin / Data','⚙'],
-      ['workflowGuide','Workflow','▶'],
-      ['help','Help / Glossary','?']
+      ['auditDocs',configs.auditDocs.nav,'file-search'],
+      ['actions',configs.actions.nav,'alert-circle'],
+      ['taxPrep','Tax Prep','percent'],
+      ['importExport','Import / Export','refresh-cw'],
+      ['admin','Admin / Data','settings'],
+      ['ledgerMap','Ledger Map','map'],
+      ['workflowGuide','Workflow','workflow'],
+      ['help','Help / Glossary','help-circle']
     ]
   }
 ];
@@ -383,6 +394,16 @@ function f(name, label, type, tip, options = null, span = null) {
 
 function qs(sel) { return document.querySelector(sel); }
 function qsa(sel) { return [...document.querySelectorAll(sel)]; }
+window.openLedgerEntityRecord = openLedgerEntityRecord;
+
+async function openLedgerEntityRecord(page, id) {
+  const config = configs[page];
+  if (!config) return;
+  await showPage(page);
+  const rows = await api(`/api/${config.route}`);
+  const row = rows.find(r => Number(r.id) === Number(id));
+  if (row) openModal(config, row);
+}
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -472,7 +493,7 @@ function renderNav() {
   nav.innerHTML = navGroups.map(group => `
     <div class="nav-group">
       <div class="nav-label">${group.label}</div>
-      ${group.items.map(([id,label,icon]) => `<button class="nav-button" data-page="${id}"><span class="nav-icon">${icon}</span><span>${label}</span></button>`).join('')}
+      ${group.items.map(([id,label,icon]) => `<button class="nav-button" data-page="${id}"><span class="nav-icon" aria-hidden="true">${navIcon(icon)}</span><span>${label}</span></button>`).join('')}
     </div>`).join('');
   nav.addEventListener('click', e => {
     const btn = e.target.closest('button[data-page]');
@@ -480,7 +501,14 @@ function renderNav() {
   });
 }
 
-async function showPage(page) {
+async function showPage(page, options = {}) {
+  const previousPage = appState.currentPage;
+  const pageChanged = previousPage !== page;
+  if (pageChanged && !options.skipHistory && previousPage) {
+    const last = appState.pageHistory[appState.pageHistory.length - 1];
+    if (last !== previousPage) appState.pageHistory.push(previousPage);
+    if (appState.pageHistory.length > 60) appState.pageHistory.shift();
+  }
   const invoicePages = ['invoiceCenter','estimates','invoices','pricingCalculator','invoiceRecords'];
   const movingWithinInvoiceTool = invoicePages.includes(appState.currentPage) && invoicePages.includes(page);
   if (movingWithinInvoiceTool && window._invoiceToolSnapshot) {
@@ -490,6 +518,8 @@ async function showPage(page) {
   }
 
   appState.currentPage = page;
+  syncBrowserHistory(page, options);
+  updateBackButton();
   toggleMergedInvoiceStyles(invoicePages.includes(page));
   if (page !== 'globalSearch') qs('#globalSearch').value = '';
   qsa('.nav-button').forEach(b => b.classList.toggle('active', b.dataset.page === page));
@@ -504,8 +534,14 @@ async function showPage(page) {
     else if (page === 'invoices') await renderMergedInvoiceTool(el, 'builder', 'INVOICE', appState.invoiceToolSnapshot);
     else if (page === 'pricingCalculator') await renderMergedInvoiceTool(el, 'calculator', '', appState.invoiceToolSnapshot);
     else if (page === 'invoiceRecords') await renderMergedInvoiceTool(el, 'records', '', appState.invoiceToolSnapshot);
+    else if (page === 'jobTimeline') await renderJobTimeline(el);
+    else if (page === 'customers') await renderRelationshipDirectory(el, 'customer');
+    else if (page === 'vendors') await renderRelationshipDirectory(el, 'vendor');
+    else if (page === 'ledgerMap') renderLedgerMap(el);
     else if (page === 'workflowGuide') renderWorkflowGuide(el);
     else if (page === 'documentIntake') renderDocumentIntake(el);
+    else if (page.startsWith('customerDetail:')) await renderPersonDetail(el, 'customer', decodeURIComponent(page.split(':').slice(1).join(':')));
+    else if (page.startsWith('vendorDetail:')) await renderPersonDetail(el, 'vendor', decodeURIComponent(page.split(':').slice(1).join(':')));
     else if (page === 'taxPrep') await renderTaxPrep(el);
     else if (page === 'importExport') renderImportExport(el);
     else if (page === 'admin') await renderAdmin(el);
@@ -731,6 +767,283 @@ function smallTable(rows, cols) {
   return `<div class="table-wrap"><table><thead><tr>${cols.map(c=>`<th>${labelize(c)}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${cols.map(c=>`<td>${c.toLowerCase().includes('status') || c === 'priority' ? badgeFor(r[c], r.needsReview) : formatValue(r[c], c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
 }
 
+function navIcon(name) {
+  const icons = {
+    'layout-dashboard': '<rect x="3" y="3" width="7" height="8" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="15" width="7" height="6" rx="1.5"/>',
+    'plus-square': '<rect x="4" y="4" width="16" height="16" rx="3"/><path d="M12 8v8M8 12h8"/>',
+    'clipboard-list': '<path d="M9 5h6"/><path d="M9 3h6v4H9z"/><path d="M7 5H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-1"/><path d="M8 12h8M8 16h8"/>',
+    'file-text': '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h6"/>',
+    'calculator': '<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 7h8M8 11h2M12 11h2M16 11h0M8 15h2M12 15h2M16 15h0M8 18h6"/>',
+    'folder': '<path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+    'clock': '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    'upload': '<path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M5 20h14"/>',
+    'dollar-sign': '<path d="M12 2v20M17 6.5C15.5 5.4 13.4 5 11.7 5 9.2 5 7.5 6.2 7.5 8s1.5 2.8 4.5 3.5 4.5 1.6 4.5 3.7S14.8 19 12 19c-2 0-4-.6-5.5-1.7"/>',
+    'arrow-down-circle': '<circle cx="12" cy="12" r="9"/><path d="M12 7v10M8 13l4 4 4-4"/>',
+    'arrow-up-circle': '<circle cx="12" cy="12" r="9"/><path d="M12 17V7M8 11l4-4 4 4"/>',
+    'receipt': '<path d="M6 3h12v18l-2-1-2 1-2-1-2 1-2-1-2 1z"/><path d="M9 8h6M9 12h6M9 16h4"/>',
+    'wallet': '<path d="M4 7h15a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h12"/><path d="M16 13h5"/>',
+    'briefcase': '<rect x="3" y="7" width="18" height="13" rx="2"/><path d="M9 7V5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2M3 12h18"/>',
+    'users': '<path d="M16 21v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2"/><circle cx="9.5" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>',
+    'user': '<path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/>',
+    'truck': '<path d="M3 7h11v10H3z"/><path d="M14 10h4l3 3v4h-7z"/><circle cx="7" cy="17" r="2"/><circle cx="17" cy="17" r="2"/>',
+    'store': '<path d="M4 10h16l-1-5H5z"/><path d="M5 10v10h14V10M9 20v-6h6v6M3 10c0 1.5 1.2 3 3 3s3-1.5 3-3M9 10c0 1.5 1.2 3 3 3s3-1.5 3-3M15 10c0 1.5 1.2 3 3 3s3-1.5 3-3"/>',
+    'boxes': '<path d="M3 7l6-3 6 3-6 3zM9 10v7l-6-3V7M9 17l6-3V7"/><path d="M15 7l6 3-6 3M15 20l6-3v-7"/>',
+    'printer': '<path d="M6 9V3h12v6"/><rect x="6" y="15" width="12" height="6"/><rect x="3" y="9" width="18" height="8" rx="2"/><path d="M7 13h0"/>',
+    'gift': '<rect x="3" y="8" width="18" height="4"/><path d="M12 8v13M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/><path d="M12 8c-2.5 0-5-1-5-3a2 2 0 0 1 4 0c0 3-4 3-4 3M12 8c2.5 0 5-1 5-3a2 2 0 0 0-4 0c0 3 4 3 4 3"/>',
+    'file-search': '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h7"/><path d="M14 3v6h6"/><circle cx="16" cy="16" r="3"/><path d="M18.2 18.2L21 21"/>',
+    'alert-circle': '<circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 17h0"/>',
+    'percent': '<path d="M19 5L5 19"/><circle cx="7" cy="7" r="2"/><circle cx="17" cy="17" r="2"/>',
+    'refresh-cw': '<path d="M21 12a9 9 0 0 1-15 6.7L3 16M3 12A9 9 0 0 1 18 5.3L21 8"/><path d="M3 16h5M16 8h5"/>',
+    'settings': '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2 3-.2-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21h-3.4v-.2a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.2.1-2-3 .1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3v-3.4h.2a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9l-.1-.2 3-2 .1.2a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.5V3h3.4v.2a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.2-.1 3 2-.1.2a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.5 1h.2v3.4h-.2a1.7 1.7 0 0 0-1.5 1z"/>',
+    'map': '<path d="M9 18l-6 3V6l6-3 6 3 6-3v15l-6 3z"/><path d="M9 3v15M15 6v15"/>',
+    'workflow': '<path d="M6 4v6a4 4 0 0 0 4 4h4"/><path d="M18 10v10"/><path d="M15 17l3 3 3-3"/><circle cx="6" cy="4" r="2"/><circle cx="18" cy="10" r="2"/>',
+    'help-circle': '<circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.7 2.7 0 0 1 5 1.4c0 2-2.5 2.2-2.5 4.1M12 18h0"/>'
+  };
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">${icons[name] || icons['help-circle']}</svg>`;
+}
+
+async function renderJobTimeline(el) {
+  const params = new URLSearchParams();
+  if (appState.timelineQuery) params.set('q', appState.timelineQuery);
+  if (appState.timelineCustomer) params.set('customer', appState.timelineCustomer);
+  const data = await api(`/api/job-timeline${params.toString() ? `?${params}` : ''}`);
+  if (!data || !Array.isArray(data.timelines)) {
+    throw new Error('The Timeline API is not ready yet. Close the old app window and reopen the rebuilt EPATA.BusinessLedger.exe.');
+  }
+  const timelines = data.timelines || [];
+  const sortedTimelines = sortTimelines(timelines);
+  const customers = data.customers || [];
+  const s = data.summary || {};
+  el.innerHTML = `
+    <div class="page-head">
+      <div>
+        <h2>Job Timeline</h2>
+        <p>One place to see the full path of an estimate, invoice, sale, proof file, customer job, and open action.</p>
+      </div>
+      <div class="actions">
+        <button class="primary-button" onclick="showPage('estimates')">New Estimate</button>
+        <button class="ghost-button" onclick="showPage('documentIntake')">Upload Proof</button>
+      </div>
+    </div>
+    <section class="timeline-command">
+      <div class="timeline-search">
+        <label class="timeline-filter wide">
+          <span>Search</span>
+          <input id="timelineSearch" type="search" placeholder="Customer, order, invoice, proof, product..." value="${escapeHtml(appState.timelineQuery || '')}">
+        </label>
+        <label class="timeline-filter">
+          <span>Customer</span>
+          <select id="timelineCustomer">
+            <option value="">All customers</option>
+            ${customers.map(c => `<option value="${escapeHtml(c)}"${c === appState.timelineCustomer ? ' selected' : ''}>${escapeHtml(c)}</option>`).join('')}
+          </select>
+        </label>
+        <label class="timeline-filter sort">
+          <span>Sort</span>
+          <select id="timelineSort" title="Sort timelines">
+            ${[
+              ['lastActivityDesc', 'Newest activity'],
+              ['lastActivityAsc', 'Oldest activity'],
+              ['customerAsc', 'Customer A-Z'],
+              ['profitDesc', 'Profit high-low'],
+              ['issuesDesc', 'Open checks high-low']
+            ].map(([value, label]) => `<option value="${value}"${value === appState.timelineSort ? ' selected' : ''}>${label}</option>`).join('')}
+          </select>
+        </label>
+        <div class="timeline-filter-actions">
+          <button class="ghost-button timeline-clear" id="timelineExpandAll" type="button">Expand</button>
+          <button class="ghost-button timeline-clear" id="timelineCollapseAll" type="button">Collapse</button>
+          <button class="ghost-button timeline-clear" id="timelineClear" type="button">Clear</button>
+        </div>
+      </div>
+      <div class="entity-strip timeline-strip">
+        <div><span>Timelines</span><strong>${s.count || sortedTimelines.length}</strong></div>
+        <div><span>Open Checks</span><strong>${s.openIssues || 0}</strong></div>
+        <div><span>Est. Profit</span><strong>${formatMoney(s.estimatedProfit || 0)}</strong></div>
+        <div><span>Open Actions</span><strong>${s.openActions || 0}</strong></div>
+      </div>
+    </section>
+    <div class="timeline-list">
+      ${sortedTimelines.length ? sortedTimelines.map((group, index) => renderTimelineCard(group, index)).join('') : emptyState('No matching timelines.', 'Try a different customer, order number, invoice number, or proof file.')}
+    </div>`;
+
+  qs('#timelineSearch').oninput = e => {
+    clearTimeout(appState.timelineTimer);
+    appState.timelineQuery = e.target.value.trim();
+    appState.timelineTimer = setTimeout(() => renderJobTimeline(el), 250);
+  };
+  qs('#timelineCustomer').onchange = e => {
+    appState.timelineCustomer = e.target.value;
+    renderJobTimeline(el);
+  };
+  qs('#timelineSort').onchange = e => {
+    appState.timelineSort = e.target.value;
+    renderJobTimeline(el);
+  };
+  qs('#timelineClear').onclick = () => {
+    appState.timelineQuery = '';
+    appState.timelineCustomer = '';
+    renderJobTimeline(el);
+  };
+  qs('#timelineExpandAll').onclick = () => qsa('.timeline-card').forEach(card => card.open = true);
+  qs('#timelineCollapseAll').onclick = () => qsa('.timeline-card').forEach(card => card.open = false);
+}
+
+function sortTimelines(timelines) {
+  const value = appState.timelineSort || 'lastActivityDesc';
+  const rows = [...(timelines || [])];
+  const when = g => new Date(g.lastActivity || g.events?.[g.events.length - 1]?.date || 0).getTime() || 0;
+  const issueCount = g => (g.missing || []).length;
+  const customer = g => `${g.customerName || ''} ${g.title || ''}`.trim();
+  const sorts = {
+    lastActivityDesc: (a, b) => when(b) - when(a),
+    lastActivityAsc: (a, b) => when(a) - when(b),
+    customerAsc: (a, b) => customer(a).localeCompare(customer(b)) || when(b) - when(a),
+    profitDesc: (a, b) => Number(b.estimatedProfit || 0) - Number(a.estimatedProfit || 0) || when(b) - when(a),
+    issuesDesc: (a, b) => issueCount(b) - issueCount(a) || when(b) - when(a)
+  };
+  return rows.sort(sorts[value] || sorts.lastActivityDesc);
+}
+
+function renderTimelineCard(group, index = 0) {
+  const missing = group.missing || [];
+  const events = group.events || [];
+  const opened = index < 3 ? ' open' : '';
+  return `<details class="timeline-card"${opened}>
+    <summary class="timeline-card-head">
+      <div>
+        <span class="eyebrow">${escapeHtml(group.workflowType || 'Timeline')} · ${escapeHtml(group.customerName || 'Unassigned customer')}</span>
+        <h3>${escapeHtml(group.title || 'Untitled timeline')}</h3>
+        <p>${escapeHtml(group.subtitle || 'No linked order or invoice number yet.')} · ${timelineStatusSummary(events, group)} · ${events.length} event${events.length === 1 ? '' : 's'}${missing.length ? ` · ${missing.length} check${missing.length === 1 ? '' : 's'}` : ''}</p>
+      </div>
+      <div class="timeline-money">
+        ${badgeFor(group.status || 'Open', missing.length > 0)}
+        <strong>${formatMoney(group.estimatedProfit || 0)}</strong>
+        <span>est. profit</span>
+      </div>
+    </summary>
+    <div class="timeline-card-body">
+      <div class="timeline-profit">
+        <div><span>Gross</span><strong>${formatMoney(group.grossReceipts || 0)}</strong></div>
+        <div><span>Invoiced</span><strong>${formatMoney(group.invoiced || 0)}</strong></div>
+        <div><span>Paid</span><strong>${formatMoney(group.paid || 0)}</strong></div>
+        <div><span>Tax Memo</span><strong>${formatMoney(group.taxMemo || 0)}</strong></div>
+        <div><span>Fees/Ship</span><strong>${formatMoney(group.sellingCosts || 0)}</strong></div>
+        <div><span>COGS</span><strong>${formatMoney(group.estimatedCogs || 0)}</strong></div>
+      </div>
+      <div class="timeline-flow">
+        ${timelineStage('Estimate', events.some(e => e.kind === 'ESTIMATE' || e.kind === 'Job' && (e.status || '').includes('Quoted')), 'Quote/approve')}
+        ${timelineStage('Job', events.some(e => e.kind === 'Job'), 'Make/design')}
+        ${timelineStage('Invoice', events.some(e => e.kind === 'INVOICE' || e.kind === 'AR Invoice'), 'Bill customer')}
+        ${timelineStage('Paid', events.some(e => e.kind === 'Sale' || Number(group.paid || 0) > 0), 'Money in')}
+        ${timelineStage('Proof', events.some(e => e.kind === 'Proof'), 'Files attached')}
+      </div>
+      ${missing.length ? `<div class="timeline-missing">${missing.slice(0, 6).map(m => `<span>${escapeHtml(m)}</span>`).join('')}</div>` : ''}
+      <div class="timeline-events">
+        ${events.map(renderTimelineEvent).join('')}
+      </div>
+    </div>
+  </details>`;
+}
+
+function timelineStage(label, done, hint) {
+  return `<div class="timeline-stage ${done ? 'done' : ''}">
+    <span>${done ? '✓' : '·'}</span>
+    <strong>${escapeHtml(label)}</strong>
+    <small>${escapeHtml(hint)}</small>
+  </div>`;
+}
+
+function timelineStatusSummary(events, group) {
+  const part = (label, kinds) => {
+    const found = events.find(e => kinds.includes(e.kind));
+    return found ? `${label}: ${found.status || 'Open'}` : `${label}: none`;
+  };
+  return escapeHtml([
+    part('Estimate', ['ESTIMATE']),
+    part('Invoice', ['INVOICE', 'AR Invoice']),
+    `Paid: ${Number(group.paid || 0) > 0 ? formatMoney(group.paid || 0) : 'none'}`
+  ].join(' · '));
+}
+
+function renderTimelineEvent(event) {
+  const when = formatTimelineDateTime(event.date);
+  const relativeLabel = event.timeLabel || when.relative;
+  const exactLabel = event.exactTimeLabel || when.exact;
+  const fullLabel = event.exactTimeLabel ? `${event.kind}: ${event.exactTimeLabel}` : when.full;
+  const status = event.status || 'Open';
+  return `<button class="timeline-event ${event.needsReview ? 'needs-review' : ''}" onclick="showPage('${escapeHtml(event.routePage)}')">
+    <span class="timeline-dot"></span>
+    <time title="${escapeHtml(fullLabel)}"><b>${escapeHtml(relativeLabel)}</b><span>${escapeHtml(exactLabel)}</span></time>
+    <strong><span>${escapeHtml(event.kind)} · ${escapeHtml(event.title)}</span>${badgeFor(status, event.needsReview)}</strong>
+    <small>${escapeHtml(event.detail || '')}${event.reference ? `<span>Ref: ${escapeHtml(event.reference)}</span>` : ''}</small>
+    <em>${event.amount !== null && event.amount !== undefined ? formatMoney(event.amount) : escapeHtml(event.status || '')}</em>
+  </button>`;
+}
+
+function formatTimelineDateTime(value) {
+  if (!value) return { relative: '', exact: '', full: '' };
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) {
+    const fallback = String(value).substring(0, 10);
+    return { relative: fallback, exact: '', full: fallback };
+  }
+  const relative = formatRelativeDays(d);
+  const exact = `${d.toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' })} - ${d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`;
+  return {
+    relative: relative || d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+    exact,
+    full: d.toLocaleString(undefined, { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' })
+  };
+}
+
+function formatRelativeDays(d) {
+  const today = new Date();
+  const startToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const startDate = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const days = Math.round((startDate - startToday) / 86400000);
+  if (days === 0) return 'today';
+  if (days === -1) return 'yesterday';
+  if (days === 1) return 'tomorrow';
+  if (days < 0 && days > -31) return `${Math.abs(days)}d ago`;
+  if (days > 0 && days < 31) return `in ${days}d`;
+  return '';
+}
+
+function formatTimelineWhen(value) {
+  if (!value) return { relative: '', short: '', full: '' };
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) {
+    const fallback = String(value).substring(0, 10);
+    return { relative: fallback, short: '', full: fallback };
+  }
+
+  const today = new Date();
+  const startToday = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const startDate = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const days = Math.round((startDate - startToday) / 86400000);
+  let relative;
+  if (days === 0) relative = 'Today';
+  else if (days === -1) relative = 'Yesterday';
+  else if (days === 1) relative = 'Tomorrow';
+  else if (days < 0 && days > -31) relative = `${Math.abs(days)}d ago`;
+  else if (days > 0 && days < 31) relative = `in ${days}d`;
+  else relative = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+
+  return {
+    relative,
+    short: d.toLocaleDateString(undefined, { month: 'numeric', day: 'numeric' }),
+    full: d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+  };
+}
+
+function formatShortDate(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value).substring(0, 10);
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
 async function renderEntity(el, config) {
   const rows = await api(`/api/${config.route}`);
   const reviewCount = rows.filter(x => x.needsReview === true).length;
@@ -776,7 +1089,299 @@ async function renderEntity(el, config) {
   renderEntityTable(config, rows, '');
 }
 
+async function renderPersonDetail(el, mode, name) {
+  const isCustomer = mode === 'customer';
+  const [sales, invoices, docs, jobs, expenses, bills, assets, auditDocs] = await Promise.all([
+    api('/api/sales'),
+    api('/api/receivable-invoices'),
+    api('/api/documents?includeArchived=true'),
+    api('/api/customer-jobs'),
+    api('/api/expenses'),
+    api('/api/bills'),
+    api('/api/assets'),
+    api('/api/audit-documents')
+  ]);
+  const sections = isCustomer
+    ? [
+        ['Sales', 'sales', configs.sales, sales.filter(r => sameName(r.customerName, name))],
+        ['AR Invoices', 'receivables', configs.receivables, invoices.filter(r => sameName(r.customerName, name))],
+        ['Estimate / Invoice PDFs', null, null, docs.filter(r => sameName(r.customerName, name))],
+        ['Jobs', 'customerJobs', configs.customerJobs, jobs.filter(r => sameName(r.customerName, name))]
+      ]
+    : [
+        ['Expenses', 'expenses', configs.expenses, expenses.filter(r => sameName(r.vendorName, name))],
+        ['Bills / AP', 'bills', configs.bills, bills.filter(r => sameName(r.vendorName, name))],
+        ['Assets', 'assets', configs.assets, assets.filter(r => sameName(r.vendorName, name))]
+      ];
+  const proofRows = auditDocs.filter(r => JSON.stringify(r).toLowerCase().includes(name.toLowerCase()));
+  el.innerHTML = `
+    <div class="page-head"><div><h2>${escapeHtml(name)}</h2><p>${isCustomer ? 'Customer activity across sales, AR, estimates/invoices, jobs, and proof.' : 'Vendor activity across expenses, bills, assets, and proof.'}</p></div>
+      <div class="actions">
+        <button class="ghost-button" onclick="showPage('${isCustomer ? 'customers' : 'vendors'}')">Back</button>
+        ${isCustomer
+          ? `<button class="ghost-button" onclick="quickOpen('customerJobs','estimateSent',{customerName:'${escapeAttr(name)}'})">Add Job</button><button class="ghost-button" onclick="quickOpen('receivables','invoice',{customerName:'${escapeAttr(name)}'})">Add AR</button><button class="ghost-button" onclick="startCustomerDocument('${escapeAttr(name)}','ESTIMATE')">New Estimate</button><button class="ghost-button" onclick="startCustomerDocument('${escapeAttr(name)}','INVOICE')">New Invoice</button><button class="primary-button" onclick="quickOpen('sales','directPaid',{customerName:'${escapeAttr(name)}'})">Add Sale</button>`
+          : `<button class="ghost-button" onclick="quickOpen('assets','assetPurchase',{vendorName:'${escapeAttr(name)}'})">Add Asset</button><button class="ghost-button" onclick="quickOpen('bills','bill',{vendorName:'${escapeAttr(name)}'})">Add Bill</button><button class="primary-button" onclick="quickOpen('expenses','expense',{vendorName:'${escapeAttr(name)}'})">Add Expense</button>`}
+        <button class="ghost-button" onclick="openDocumentIntakeWithPrefill('${isCustomer ? 'Customer' : 'Vendor'}','${escapeAttr(name)}')">Upload Proof</button>
+      </div></div>
+    <section class="entity-strip">
+      <div><span>Linked Rows</span><strong>${sections.reduce((n, [, , , rows]) => n + rows.length, 0)}</strong></div>
+      <div><span>${isCustomer ? 'Paid/Sold' : 'Spent'}</span><strong>${formatMoney(isCustomer ? sum(sections[0][3], r => r.customerPaid) : sum(sections[0][3], r => r.total))}</strong></div>
+      <div><span>${isCustomer ? 'Open AR' : 'Open AP'}</span><strong>${formatMoney(isCustomer ? sum(sections[1][3].filter(r => !['Paid','Void'].includes(r.status)), r => r.balanceDue) : sum(sections[1][3].filter(r => !['Paid','Void'].includes(r.status)), r => r.balanceDue))}</strong></div>
+      <div><span>Proof Matches</span><strong>${proofRows.length}</strong></div>
+    </section>
+    ${isCustomer ? customerLedgerExplainer() : vendorLedgerExplainer()}
+    <div class="relationship-sections">
+      ${sections.map(([title, key, config, rows]) => relationshipSection(title, key, config, rows, mode, name)).join('')}
+      ${relationshipSection('Proof / Audit Docs', 'auditDocs', configs.auditDocs, proofRows, mode, name)}
+    </div>`;
+}
+
+async function renderRelationshipDirectory(el, mode) {
+  const isCustomer = mode === 'customer';
+  const [parties, sales, invoices, docs, jobs, expenses, bills, assets] = await Promise.all([
+    api('/api/parties'),
+    api('/api/sales'),
+    api('/api/receivable-invoices'),
+    api('/api/documents?includeArchived=true'),
+    api('/api/customer-jobs'),
+    api('/api/expenses'),
+    api('/api/bills'),
+    api('/api/assets')
+  ]);
+  const rows = isCustomer
+    ? buildCustomerRows(parties, sales, invoices, docs, jobs)
+    : buildVendorRows(parties, expenses, bills, assets);
+  const key = isCustomer ? 'customers-directory' : 'vendors-directory';
+  if (!tablePageState[key]) tablePageState[key] = { sortColumn: 'lastActivity', sortDir: 'desc' };
+  const state = tablePageState[key];
+  const cols = isCustomer
+    ? ['name','linkedRows','sources','salesTotal','invoiceTotal','openAr','lastActivity']
+    : ['name','linkedRows','sources','expenseTotal','openAp','assetTotal','lastActivity'];
+
+  el.innerHTML = `
+    <div class="page-head">
+      <div>
+        <h2>${isCustomer ? 'Customers' : 'Vendors'}</h2>
+        <p>${isCustomer ? 'Customer history across sales, invoices, estimates, jobs, and proof.' : 'Vendor history across expenses, bills, assets, and proof.'}</p>
+      </div>
+      <div class="actions">
+        <button class="primary-button" id="addRelationshipBtn">Add ${isCustomer ? 'Customer' : 'Vendor'}</button>
+        <button class="ghost-button" onclick="showPage('${isCustomer ? 'sales' : 'expenses'}')">${isCustomer ? 'Open Sales' : 'Open Expenses'}</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="table-tools">
+        <input class="search" id="relationshipSearch" placeholder="Search ${isCustomer ? 'customers' : 'vendors'}...">
+        <span class="badge">${rows.length} ${isCustomer ? 'customers' : 'vendors'}</span>
+      </div>
+      <div id="relationshipTable"></div>
+    </div>`;
+  qs('#addRelationshipBtn').onclick = () => openModal(configs.parties, { partyType: isCustomer ? 'Customer' : 'Vendor' });
+  qs('#relationshipSearch').oninput = e => renderRelationshipTable(rows, cols, mode, state, e.target.value);
+  renderRelationshipTable(rows, cols, mode, state, '');
+}
+
+function buildCustomerRows(parties, sales, invoices, docs, jobs) {
+  const map = new Map();
+  const add = (name, source, row, amount = 0, open = 0) => {
+    const clean = String(name || '').trim();
+    if (!clean) return;
+    const key = clean.toLowerCase();
+    const item = map.get(key) || { name: clean, sources: new Set(), linkedRows: 0, salesTotal: 0, invoiceTotal: 0, openAr: 0, lastActivity: '' };
+    item.sources.add(source);
+    item.linkedRows += 1;
+    if (source === 'Sales') item.salesTotal += Number(amount || 0);
+    if (source === 'AR' || source === 'PDF Docs') item.invoiceTotal += Number(amount || 0);
+    item.openAr += Number(open || 0);
+    item.lastActivity = latestDate(item.lastActivity, row.updatedAtUtc || row.updatedAt || row.invoiceDate || row.saleDate || row.jobDate || row.documentDate || row.date);
+    map.set(key, item);
+  };
+  parties.filter(p => ['customer','both'].includes(String(p.partyType || '').toLowerCase())).forEach(p => add(p.name, 'People', p));
+  sales.forEach(r => add(r.customerName, 'Sales', r, r.customerPaid));
+  invoices.forEach(r => add(r.customerName, 'AR', r, r.invoiceTotal, ['Paid','Void'].includes(r.status) ? 0 : r.balanceDue));
+  docs.forEach(r => add(r.customerName, 'PDF Docs', r, r.total));
+  jobs.forEach(r => add(r.customerName, 'Jobs', r, r.invoiceAmount));
+  return [...map.values()].map(row => ({ ...row, sources: [...row.sources].join(', ') }));
+}
+
+function buildVendorRows(parties, expenses, bills, assets) {
+  const map = new Map();
+  const add = (name, source, row, amount = 0, open = 0, asset = 0) => {
+    const clean = String(name || '').trim();
+    if (!clean) return;
+    const key = clean.toLowerCase();
+    const item = map.get(key) || { name: clean, sources: new Set(), linkedRows: 0, expenseTotal: 0, openAp: 0, assetTotal: 0, lastActivity: '' };
+    item.sources.add(source);
+    item.linkedRows += 1;
+    item.expenseTotal += Number(amount || 0);
+    item.openAp += Number(open || 0);
+    item.assetTotal += Number(asset || 0);
+    item.lastActivity = latestDate(item.lastActivity, row.updatedAtUtc || row.updatedAt || row.expenseDate || row.dueDate || row.purchaseDate || row.date);
+    map.set(key, item);
+  };
+  parties.filter(p => ['vendor','both'].includes(String(p.partyType || '').toLowerCase())).forEach(p => add(p.name, 'People', p));
+  expenses.forEach(r => add(r.vendorName, 'Expenses', r, r.total));
+  bills.forEach(r => add(r.vendorName, 'AP', r, 0, ['Paid','Void'].includes(r.status) ? 0 : r.balanceDue));
+  assets.forEach(r => add(r.vendorName, 'Assets', r, 0, 0, r.cost));
+  return [...map.values()].map(row => ({ ...row, sources: [...row.sources].join(', ') }));
+}
+
+function latestDate(a, b) {
+  if (!b) return a || '';
+  if (!a) return b;
+  return new Date(b).getTime() > new Date(a).getTime() ? b : a;
+}
+
+function renderRelationshipTable(rows, cols, mode, state, filter) {
+  const f = String(filter || '').toLowerCase();
+  const filtered = rows.filter(row => JSON.stringify(row).toLowerCase().includes(f));
+  const config = { route: mode === 'customer' ? 'customers-directory' : 'vendors-directory', columns: cols, fields: [] };
+  const sorted = sortRows(filtered, config, state);
+  const target = qs('#relationshipTable');
+  if (!sorted.length) {
+    target.innerHTML = emptyState('No matching rows.', 'Clear the search or add a linked row.');
+    return;
+  }
+  target.innerHTML = `<div class="table-wrap"><table><thead><tr>${cols.map(c => sortableHeader(config, state, c)).join('')}</tr></thead><tbody>
+    ${sorted.map(row => `<tr>${cols.map(c => `<td>${relationshipCell(row, c, mode)}</td>`).join('')}</tr>`).join('')}
+  </tbody></table></div>`;
+  qsa('[data-sort-col]').forEach(btn => btn.onclick = () => {
+    const col = btn.dataset.sortCol;
+    state.sortDir = state.sortColumn === col && state.sortDir === 'asc' ? 'desc' : 'asc';
+    state.sortColumn = col;
+    renderRelationshipTable(rows, cols, mode, state, filter);
+  });
+}
+
+function relationshipCell(row, key, mode) {
+  if (key === 'name') return `<button class="table-link" onclick="showPage('${mode}Detail:${encodeURIComponent(row.name)}')">${escapeHtml(row.name)}</button>`;
+  if (moneyFields.has(key) || ['salesTotal','invoiceTotal','openAr','expenseTotal','openAp','assetTotal'].includes(key)) return escapeHtml(formatMoney(row[key]));
+  if (key === 'lastActivity') return escapeHtml(formatShortDate(row[key]));
+  return escapeHtml(formatValue(row[key], key));
+}
+
+function relationshipSection(title, configKey, config, rows, mode = '', name = '') {
+  const cols = rows[0] ? Object.keys(rows[0]).filter(k => ['saleDate','invoiceNumber','docNumber','docType','status','customerName','vendorName','projectName','productName','description','total','customerPaid','invoiceTotal','balanceDue','expenseDate','dueDate','fileName','documentDate'].includes(k)).slice(0, 7) : [];
+  return `<section class="card relationship-section"><div class="card-header-lite"><h3>${escapeHtml(title)}</h3><div class="relationship-actions">${relationshipSectionActions(title, mode, name)}<span class="badge">${rows.length}</span></div></div>
+    ${rows.length ? `<div class="table-wrap"><table><thead><tr>${cols.map(c => `<th>${labelize(c)}</th>`).join('')}<th></th></tr></thead><tbody>${rows.map(row => `<tr>${cols.map(c => `<td>${cell(row, c)}</td>`).join('')}<td>${config && configKey ? `<button class="ghost-button" onclick="openModal(configs.${configKey}, ${escapeAttr(JSON.stringify(row))})">Open</button>` : recordOpenButton(row)}</td></tr>`).join('')}</tbody></table></div>` : emptyState('No linked rows.', 'Nothing has been tied to this name yet.')}</section>`;
+}
+
+function relationshipSectionActions(title, mode, name) {
+  const n = escapeAttr(name);
+  if (mode === 'customer') {
+    if (title === 'Sales') return `<button class="ghost-button compact-action" onclick="quickOpen('sales','directPaid',{customerName:'${n}'})">Add Sale</button>`;
+    if (title === 'AR Invoices') return `<button class="ghost-button compact-action" onclick="quickOpen('receivables','invoice',{customerName:'${n}'})">Add AR</button>`;
+    if (title === 'Estimate / Invoice PDFs') return `<button class="ghost-button compact-action" onclick="startCustomerDocument('${n}','ESTIMATE')">New Estimate</button><button class="ghost-button compact-action" onclick="startCustomerDocument('${n}','INVOICE')">New Invoice</button>`;
+    if (title === 'Jobs') return `<button class="ghost-button compact-action" onclick="quickOpen('customerJobs','estimateSent',{customerName:'${n}'})">Add Job</button>`;
+  }
+  if (mode === 'vendor') {
+    if (title === 'Expenses') return `<button class="ghost-button compact-action" onclick="quickOpen('expenses','expense',{vendorName:'${n}'})">Add Expense</button>`;
+    if (title === 'Bills / AP') return `<button class="ghost-button compact-action" onclick="quickOpen('bills','bill',{vendorName:'${n}'})">Add Bill</button>`;
+    if (title === 'Assets') return `<button class="ghost-button compact-action" onclick="quickOpen('assets','assetPurchase',{vendorName:'${n}'})">Add Asset</button>`;
+  }
+  if (title === 'Proof / Audit Docs') return `<button class="ghost-button compact-action" onclick="openDocumentIntakeWithPrefill('${mode === 'vendor' ? 'Vendor' : 'Customer'}','${n}')">Upload Proof</button>`;
+  return '';
+}
+
+function customerLedgerExplainer() {
+  return `<section class="ledger-mini-map">
+    <button class="ledger-mini-card" onclick="showPage('ledgerMap')"><span>PDF docs</span><strong>Estimate / invoice paper</strong><small>What the customer sees.</small></button>
+    <button class="ledger-mini-card" onclick="showPage('ledgerMap')"><span>AR</span><strong>Who owes money</strong><small>Payment status, not the PDF.</small></button>
+    <button class="ledger-mini-card" onclick="showPage('ledgerMap')"><span>Sale</span><strong>Money came in</strong><small>Revenue and tax prep.</small></button>
+    <button class="ledger-mini-card" onclick="showPage('ledgerMap')"><span>Job</span><strong>The work itself</strong><small>Request, status, due date.</small></button>
+    <button class="ledger-mini-card" onclick="showPage('ledgerMap')"><span>Proof</span><strong>Files behind it</strong><small>Receipts, PDFs, screenshots.</small></button>
+  </section>`;
+}
+
+function vendorLedgerExplainer() {
+  return `<section class="ledger-mini-map">
+    <button class="ledger-mini-card" onclick="showPage('ledgerMap')"><span>Expense</span><strong>Money paid out</strong><small>Deduction/cost record.</small></button>
+    <button class="ledger-mini-card" onclick="showPage('ledgerMap')"><span>AP</span><strong>Money you owe</strong><small>Vendor bill not paid yet.</small></button>
+    <button class="ledger-mini-card" onclick="showPage('ledgerMap')"><span>Asset</span><strong>Bigger equipment</strong><small>Printer/tools tax handling.</small></button>
+    <button class="ledger-mini-card" onclick="showPage('ledgerMap')"><span>Proof</span><strong>Files behind it</strong><small>Receipts, PDFs, screenshots.</small></button>
+  </section>`;
+}
+
+function recordOpenButton(row) {
+  if (row?.sourceKind === 'receivable') {
+    return `<button class="ghost-button" onclick="openLedgerEntityRecord('receivables', ${Number(row.sourceId || row.id)})">Open AR</button>`;
+  }
+  if (row?.id) {
+    return `<button class="ghost-button" onclick="showPage('invoiceRecords')">Open Records</button>`;
+  }
+  return '';
+}
+
+function sameName(a, b) {
+  return String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+}
+
+function escapeAttr(value) {
+  return String(value ?? '').replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll("'", '&#39;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
 const tablePageState = {};
+const defaultSortByRoute = {
+  sales: { column: 'saleDate', dir: 'desc' },
+  'receivable-invoices': { column: 'invoiceDate', dir: 'desc' },
+  bills: { column: 'dueDate', dir: 'asc' },
+  expenses: { column: 'expenseDate', dir: 'desc' },
+  accounts: { column: 'name', dir: 'asc' },
+  'customer-jobs': { column: 'jobDate', dir: 'desc' },
+  parties: { column: 'name', dir: 'asc' },
+  products: { column: 'name', dir: 'asc' },
+  assets: { column: 'purchaseDate', dir: 'desc' },
+  'makerworld-rewards': { column: 'rewardDate', dir: 'desc' },
+  'audit-documents': { column: 'documentDate', dir: 'desc' },
+  'action-items': { column: 'priority', dir: 'desc' }
+};
+
+function defaultSortFor(config) {
+  return defaultSortByRoute[config.route] || { column: firstExistingColumn(config, ['updatedAtUtc','updatedAt','createdAtUtc','createdAt','id']) || config.columns[0], dir: 'desc' };
+}
+
+function firstExistingColumn(config, names) {
+  return names.find(name => config.columns.includes(name) || config.fields?.some(f => f.name === name));
+}
+
+function sortRows(rows, config, state) {
+  const fallback = defaultSortFor(config);
+  const column = state.sortColumn || fallback.column;
+  const dir = state.sortDir || fallback.dir || 'asc';
+  const factor = dir === 'desc' ? -1 : 1;
+  return [...rows].sort((a, b) => factor * compareCellValue(a, b, column));
+}
+
+function compareCellValue(a, b, column) {
+  const av = sortValue(a, column);
+  const bv = sortValue(b, column);
+  if (typeof av === 'number' && typeof bv === 'number') return av - bv;
+  return String(av ?? '').localeCompare(String(bv ?? ''), undefined, { numeric: true, sensitivity: 'base' });
+}
+
+function sortValue(row, column) {
+  if (column === 'priority') return ({ Low: 1, Normal: 2, High: 3 }[row[column]] ?? 0);
+  if (column === 'status' || column.toLowerCase().includes('status')) {
+    return ({ Overdue: 0, Open: 1, Unpaid: 1, Sent: 2, Partial: 3, Waiting: 4, Draft: 5, Lead: 6, Quoted: 7, 'In Progress': 8, Paid: 9, Done: 10, Completed: 10, Void: 11, Cancelled: 11 }[row[column]] ?? String(row[column] || ''));
+  }
+  if (moneyFields.has(column)) return Number(row[column] || 0);
+  if (dateFields.has(column) || column.toLowerCase().includes('date') || column.toLowerCase().includes('at') || column === 'lastActivity') {
+    const time = new Date(row[column] || 0).getTime();
+    return Number.isNaN(time) ? 0 : time;
+  }
+  if (column === 'netBeforeCogs') return Number(row.customerPaid || 0) - Number(row.platformFees || 0) - Number(row.shippingLabelCost || 0) - Number(row.refunds || 0);
+  if (column === 'estNetAfterCogs') return Number(row.customerPaid || 0) - Number(row.platformFees || 0) - Number(row.shippingLabelCost || 0) - Number(row.refunds || 0) - Number(row.estimatedCogs || 0);
+  if (column === 'estimatedCost') return (Number(row.grams || 0) * Number(row.materialCostPerGram || 0)) + (Number(row.printHours || 0) * Number(row.machineRatePerHour || 0)) + Number(row.packagingCost || 0);
+  return row[column] ?? '';
+}
+
+function sortableHeader(config, state, column) {
+  const fallback = defaultSortFor(config);
+  const active = (state.sortColumn || fallback.column) === column;
+  const dir = active ? (state.sortDir || fallback.dir) : '';
+  const arrow = active ? (dir === 'desc' ? '↓' : '↑') : '↕';
+  return `<th><button class="sort-header ${active ? 'active' : ''}" type="button" data-sort-col="${escapeHtml(column)}">${labelize(column)} <span>${arrow}</span></button></th>`;
+}
 
 function renderEntityTable(config, rows, filter) {
   const f = (filter || '').toLowerCase();
@@ -797,7 +1402,7 @@ function renderEntityTable(config, rows, filter) {
   }
 
   const key = config.route;
-  if (!tablePageState[key]) tablePageState[key] = { page: 0, pageSize: 25 };
+  if (!tablePageState[key]) tablePageState[key] = { page: 0, pageSize: 25, ...defaultSortFor(config) };
   const state = tablePageState[key];
   // Reset to page 0 when filter changes
   if (filter !== state._lastFilter || statusFilter !== state._lastStatus) {
@@ -805,10 +1410,11 @@ function renderEntityTable(config, rows, filter) {
     state._lastFilter = filter;
     state._lastStatus = statusFilter;
   }
+  const sorted = sortRows(filtered, config, state);
   const pageSize = state.pageSize;
-  const totalPages = Math.ceil(filtered.length / pageSize);
+  const totalPages = Math.ceil(sorted.length / pageSize);
   if (state.page >= totalPages) state.page = totalPages - 1;
-  const pageRows = filtered.slice(state.page * pageSize, (state.page + 1) * pageSize);
+  const pageRows = sorted.slice(state.page * pageSize, (state.page + 1) * pageSize);
 
   const pagerHtml = filtered.length > 25 ? `
     <div class="table-pager">
@@ -824,7 +1430,7 @@ function renderEntityTable(config, rows, filter) {
       </span>
     </div>` : '';
 
-  tableArea.innerHTML = `<div class="table-wrap"><table><thead><tr>${cols.map(c=>`<th>${labelize(c)}</th>`).join('')}<th>Actions</th></tr></thead><tbody>${pageRows.map(row => `
+  tableArea.innerHTML = `<div class="table-wrap"><table><thead><tr>${cols.map(c=>sortableHeader(config, state, c)).join('')}<th>Actions</th></tr></thead><tbody>${pageRows.map(row => `
     <tr>
       ${cols.map(c => `<td>${cell(row, c)}</td>`).join('')}
       <td class="row-actions">
@@ -834,8 +1440,15 @@ function renderEntityTable(config, rows, filter) {
       </td>
     </tr>`).join('')}</tbody></table></div>${pagerHtml}`;
 
-  qsa('[data-edit]').forEach(btn => btn.onclick = () => openModal(config, filtered.find(r => r.id == btn.dataset.edit)));
-  qsa('[data-reviewed]').forEach(btn => btn.onclick = () => markReviewed(config, filtered.find(r => r.id == btn.dataset.reviewed)));
+  qsa('[data-sort-col]').forEach(btn => btn.onclick = () => {
+    const col = btn.dataset.sortCol;
+    state.sortDir = state.sortColumn === col && state.sortDir === 'asc' ? 'desc' : 'asc';
+    state.sortColumn = col;
+    state.page = 0;
+    renderEntityTable(config, rows, filter);
+  });
+  qsa('[data-edit]').forEach(btn => btn.onclick = () => openModal(config, sorted.find(r => r.id == btn.dataset.edit)));
+  qsa('[data-reviewed]').forEach(btn => btn.onclick = () => markReviewed(config, sorted.find(r => r.id == btn.dataset.reviewed)));
   qsa('[data-delete]').forEach(btn => btn.onclick = () => archiveRow(config, btn.dataset.delete));
 
   if (filtered.length > 25) {
@@ -856,6 +1469,12 @@ function summarizeMoney(rows, config) {
 }
 
 function cell(row, key) {
+  if (key === 'customerName' && row[key]) {
+    return `<button class="table-link" onclick="event.stopPropagation(); showPage('customerDetail:${encodeURIComponent(row[key])}')">${escapeHtml(row[key])}</button>`;
+  }
+  if (key === 'vendorName' && row[key]) {
+    return `<button class="table-link" onclick="event.stopPropagation(); showPage('vendorDetail:${encodeURIComponent(row[key])}')">${escapeHtml(row[key])}</button>`;
+  }
   if (key === 'needsReview') return row.needsReview ? badgeFor('Needs Review', true) : badgeFor('OK');
   if (key.toLowerCase().includes('status') || key === 'priority') return badgeFor(row[key], row.needsReview);
   if (key === 'estimatedCost') {
@@ -910,6 +1529,160 @@ function quickLinkCard(title, desc, page) {
   return `<button class="quick-card" data-page="${page}"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(desc)}</span></button>`;
 }
 
+function renderLedgerMap(el) {
+  const topics = {
+    invoice: {
+      title: 'Invoice PDF',
+      plain: 'The paper you send the customer.',
+      why: 'It is for communication: line items, prices, terms, PDF preview, download/print. It is the customer-facing document.',
+      not: 'It is not the same thing as money being paid. Sending an invoice does not mean cash came in.',
+      use: 'Use Invoices -> New Invoice when you need the real printable invoice.'
+    },
+    ar: {
+      title: 'AR Ledger',
+      plain: 'The scoreboard for money customers owe you.',
+      why: 'AR tells you who still owes, what was paid, what is overdue, and what balance remains. It can exist even if the invoice PDF came from somewhere else.',
+      not: 'It is not the pretty PDF. It is the payment tracker.',
+      use: 'Use AR directly only for old/outside/manual invoices. Builder invoices update AR for you.'
+    },
+    sale: {
+      title: 'Sale',
+      plain: 'The money actually came in.',
+      why: 'Sales feed revenue, dashboard totals, gross receipts, cash reporting, tax prep, and customer paid totals.',
+      not: 'It is not a quote and not an unpaid invoice. If nobody paid yet, it is not a sale.',
+      use: 'Use Sales for Etsy orders, paid direct sales, and paid invoices.'
+    },
+    job: {
+      title: 'Customer Job',
+      plain: 'The work/project you are doing.',
+      why: 'Jobs track the real work: requested item, design/print status, due dates, notes, materials, and whether it was quoted/invoiced/completed.',
+      not: 'It is not automatically income. A quoted job can exist before any invoice or sale.',
+      use: 'Use Jobs when you need project history beyond just money.'
+    },
+    proof: {
+      title: 'Proof / Audit Doc',
+      plain: 'The file that proves the row.',
+      why: 'Proof keeps PDFs, receipts, screenshots, Etsy order files, messages, and file paths tied to the business event.',
+      not: 'It is not the accounting entry by itself. Uploading a receipt does not automatically mean it is an expense until you approve/create that record.',
+      use: 'Use Document Intake when the file comes first, then attach or create the related record.'
+    }
+  };
+  el.innerHTML = `
+    <section class="workspace-hero ledger-map-hero">
+      <div>
+        <span class="eyebrow">Visual Ledger Map</span>
+        <h2>One real job can show up in several ledgers because each ledger answers a different question.</h2>
+        <p>This page is the “why do I need all these tabs?” map. Come back here when invoices, AR, sales, jobs, and proof start blending together.</p>
+      </div>
+      <div class="hero-actions">
+        <button class="primary-button" onclick="showPage('estimates')">New Estimate</button>
+        <button class="ghost-button dark" onclick="showPage('invoices')">New Invoice</button>
+        <button class="ghost-button dark" onclick="showPage('quickAdd')">Quick Add</button>
+      </div>
+    </section>
+
+    <section class="ledger-question-grid">
+      ${ledgerQuestion('job', 'What is the work?', 'Customer Job', 'Project notes, status, due date, product, materials.')}
+      ${ledgerQuestion('invoice', 'What did I send?', 'Estimate / Invoice PDF', 'Customer-facing quote or bill with line items and PDF preview.')}
+      ${ledgerQuestion('ar', 'Who owes me?', 'AR Ledger', 'Open balance, due date, paid amount, payment status.')}
+      ${ledgerQuestion('sale', 'What money came in?', 'Sale', 'Revenue, gross receipts, cash reporting, tax prep.')}
+      ${ledgerQuestion('proof', 'Can I prove it?', 'Audit Docs / Proof', 'PDFs, receipts, screenshots, file paths.')}
+    </section>
+
+    <section class="ledger-flow-card">
+      <div class="card-header-lite">
+        <h3>The Normal Direct Customer Flow</h3>
+        <span class="badge">Estimate -> Invoice -> AR -> Sale</span>
+      </div>
+      <div class="ledger-flow">
+        ${ledgerFlowNode('job', 'Job', 'Customer asks for work', 'Track the request')}
+        ${ledgerFlowArrow('quote')}
+        ${ledgerFlowNode('invoice', 'Estimate PDF', 'You send a price', 'Not income')}
+        ${ledgerFlowArrow('approved')}
+        ${ledgerFlowNode('invoice', 'Invoice PDF', 'You bill the customer', 'Creates/updates AR')}
+        ${ledgerFlowArrow('owed')}
+        ${ledgerFlowNode('ar', 'AR Ledger', 'Customer owes you', 'Balance due')}
+        ${ledgerFlowArrow('paid')}
+        ${ledgerFlowNode('sale', 'Sale', 'Money came in', 'Counts as revenue')}
+      </div>
+      <div class="ledger-proof-row">
+        ${ledgerFlowNode('proof', 'Proof', 'PDFs / receipts / messages', 'Attached to the rows above')}
+      </div>
+    </section>
+
+    <section class="grid two">
+      <div class="card">
+        <div class="card-header-lite"><h3>Why Not Just Invoices?</h3><span class="badge warn">Important</span></div>
+        <div class="ledger-why-list">
+          <div><strong>An estimate is not money.</strong><p>It is only “here is the price.” It should not inflate income.</p></div>
+          <div><strong>An invoice is not money yet.</strong><p>It is “please pay me.” AR tracks whether they actually paid.</p></div>
+          <div><strong>A sale is money.</strong><p>This is what belongs in gross receipts, charts, and tax prep.</p></div>
+          <div><strong>A job is the work story.</strong><p>You may need notes, due dates, design status, material, and proof even before billing.</p></div>
+          <div><strong>Proof is your receipt trail.</strong><p>It explains why the row exists if you review it months later.</p></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header-lite"><h3>Click A Concept</h3><span class="badge">Interactive</span></div>
+        <div class="ledger-topic-tabs">
+          ${Object.entries(topics).map(([key, item]) => `<button class="ledger-topic-btn ${key === 'invoice' ? 'active' : ''}" data-ledger-topic="${key}">${escapeHtml(item.title)}</button>`).join('')}
+        </div>
+        <div id="ledgerTopicPanel" class="ledger-topic-panel">${ledgerTopicPanel(topics.invoice)}</div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-header-lite"><h3>What The Screenshot Is Showing</h3><span class="badge">Customer detail page</span></div>
+      <div class="ledger-screenshot-map">
+        <div><span>Sales</span><strong>Money collected from this customer.</strong><p>If Ryan paid $118.35, that belongs here and in revenue/tax prep.</p></div>
+        <div><span>AR Ledger</span><strong>Invoice payment tracker.</strong><p>Shows whether Ryan still owes anything. Paid AR can have $0 balance.</p></div>
+        <div><span>Estimate / Invoice PDFs</span><strong>The actual customer documents.</strong><p>These are the printable estimate/invoice records with line items and PDF preview.</p></div>
+        <div><span>Jobs</span><strong>The project history.</strong><p>Quoted, invoiced, completed, due date, description, customer request.</p></div>
+        <div><span>Proof / Audit Docs</span><strong>The files behind the story.</strong><p>Invoice PDF, receipt, screenshot, message, or other proof.</p></div>
+      </div>
+    </section>`;
+  bindLedgerMap(topics);
+}
+
+function ledgerQuestion(key, question, answer, detail) {
+  return `<button class="ledger-question ${key}" data-ledger-topic="${key}">
+    <span>${escapeHtml(question)}</span>
+    <strong>${escapeHtml(answer)}</strong>
+    <small>${escapeHtml(detail)}</small>
+  </button>`;
+}
+
+function ledgerFlowNode(key, title, main, sub) {
+  return `<button class="ledger-flow-node ${key}" data-ledger-topic="${key}">
+    <span>${escapeHtml(title)}</span>
+    <strong>${escapeHtml(main)}</strong>
+    <small>${escapeHtml(sub)}</small>
+  </button>`;
+}
+
+function ledgerFlowArrow(label) {
+  return `<div class="ledger-flow-arrow"><span>${escapeHtml(label)}</span></div>`;
+}
+
+function ledgerTopicPanel(item) {
+  return `<h3>${escapeHtml(item.title)}</h3>
+    <p class="plain">${escapeHtml(item.plain)}</p>
+    <dl>
+      <dt>Why it exists</dt><dd>${escapeHtml(item.why)}</dd>
+      <dt>What it is not</dt><dd>${escapeHtml(item.not)}</dd>
+      <dt>When to use it</dt><dd>${escapeHtml(item.use)}</dd>
+    </dl>`;
+}
+
+function bindLedgerMap(topics) {
+  qsa('[data-ledger-topic]').forEach(btn => btn.onclick = () => {
+    const topic = btn.dataset.ledgerTopic;
+    const panel = qs('#ledgerTopicPanel');
+    if (panel && topics[topic]) panel.innerHTML = ledgerTopicPanel(topics[topic]);
+    qsa('.ledger-topic-btn').forEach(b => b.classList.toggle('active', b.dataset.ledgerTopic === topic));
+    panel?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  });
+}
+
 function renderWorkflowGuide(el) {
   const flows = [
     ['Estimate needed', 'Estimates -> New Estimate', 'Use the builder when you need a customer-facing quote/PDF. Saving an estimate creates or updates a quoted Customer Job. It is not income and not AR.'],
@@ -931,6 +1704,7 @@ function renderWorkflowGuide(el) {
         <p>Tabs are ledgers/views, not chores to fill one by one. Use the builder for customer PDFs, Quick Add for simple events, and Document Intake for proof files.</p>
       </div>
       <div class="hero-actions">
+        <button class="ghost-button dark" onclick="showPage('ledgerMap')">Ledger Map</button>
         <button class="ghost-button dark" onclick="showPage('estimates')">New Estimate</button>
         <button class="ghost-button dark" onclick="showPage('invoices')">New Invoice</button>
         <button class="primary-button" onclick="showPage('quickAdd')">Start Quick Add</button>
@@ -987,7 +1761,7 @@ function renderWorkflowGuide(el) {
 function quickCard(title, text, config, kind) {
   return `<button class="quick-card" data-config="${config}" data-kind="${kind}"><strong>${title}</strong><span>${text}</span></button>`;
 }
-function quickOpen(configKey, kind) {
+function quickOpen(configKey, kind, overrides = {}) {
   const config = configs[configKey];
   const today = new Date().toISOString().substring(0,10);
   const presets = {
@@ -999,7 +1773,17 @@ function quickOpen(configKey, kind) {
     expense: { expenseDate: today, taxDeductible: true, taxBucket: 'Review', deductibleStatus: 'Review', countedExpense: true, businessUsePercent: 100, needsReview: true, notes: 'Classify as COGS/Materials, Operating Expense, Asset, or Memo Only before filing.' },
     assetPurchase: { purchaseDate: today, inServiceDate: today, category: 'Equipment', businessUsePercent: 100, taxTreatment: 'Review', countedExpenseThisYear: false, needsReview: true, notes: 'Review with tax preparer before choosing Section 179, De Minimis Expense, or Depreciation.' }
   };
-  openModal(config, presets[kind] || null, true);
+  openModal(config, { ...(presets[kind] || {}), ...overrides }, true);
+}
+
+async function handleInboxSuggestion(suggestion) {
+  if (suggestion?.suggestedConfig && configs[suggestion.suggestedConfig]) {
+    const overrides = suggestion.suggestedPrefill || {};
+    await showPage(suggestion.suggestedConfig);
+    quickOpen(suggestion.suggestedConfig, suggestion.suggestedKind || '', overrides);
+    return;
+  }
+  await showPage(suggestion?.suggestedRoute || 'quickAdd');
 }
 
 function openModal(config, row, presetOnly = false) {
@@ -1007,11 +1791,38 @@ function openModal(config, row, presetOnly = false) {
   qs('#modalTitle').textContent = `${appState.modal.mode === 'edit' ? 'Edit' : 'Add'} ${config.title}`;
   qs('#modalHelp').textContent = config.purpose;
   const form = qs('#modalForm');
-  form.innerHTML = config.fields.map(field => renderField(field, row || {})).join('');
+  form.innerHTML = `${modalIntro(config, row || {})}${config.fields.map(field => renderField(field, row || {})).join('')}`;
   qs('#modalBackdrop').classList.remove('hidden');
   qs('#modal').classList.remove('hidden');
   initProofPickers(config);
   initMoneyFormCalculators(config);
+}
+
+function modalIntro(config, row) {
+  if (config.route !== 'receivable-invoices') return '';
+  const customer = escapeAttr(row.customerName || '');
+  return `<section class="modal-guide full" aria-label="AR ledger explanation">
+    <div class="guide-main">
+      <span class="eyebrow">Plain English</span>
+      <h3>This form is the payment tracker, not the PDF maker.</h3>
+      <p><b>Use this AR Ledger form</b> when you only need to track “someone owes me money” or “they paid me.” It does not create the pretty invoice PDF.</p>
+    </div>
+    <div class="guide-choice-grid">
+      <div class="guide-choice good">
+        <strong>Need a printable invoice?</strong>
+        <p>Use the invoice builder. It creates the customer PDF and also updates AR for you.</p>
+        <button class="primary-button" type="button" onclick="closeModal(); startCustomerDocument('${customer}','INVOICE')">Make PDF Invoice</button>
+      </div>
+      <div class="guide-choice">
+        <strong>Already have an invoice elsewhere?</strong>
+        <p>Stay here. Enter the number, customer, total, paid amount, and attach proof.</p>
+      </div>
+      <div class="guide-choice warn">
+        <strong>Already paid?</strong>
+        <p>Set status to Paid and Amount Paid. That is what makes this money count as collected.</p>
+      </div>
+    </div>
+  </section>`;
 }
 
 function renderField(field, row) {
@@ -1172,6 +1983,8 @@ function renderDocumentIntake(el) {
                 <option>Bill</option>
                 <option>Expense</option>
                 <option>Customer Job</option>
+                <option>Customer</option>
+                <option>Vendor</option>
                 <option>Product</option>
                 <option>Tax</option>
               </select>
@@ -1200,6 +2013,12 @@ function renderDocumentIntake(el) {
       </div>
     </div>`;
   qs('#uploadDocsBtn').onclick = uploadDocuments;
+  if (appState.documentIntakePrefill) {
+    const { relatedType, relatedNumber } = appState.documentIntakePrefill;
+    if (relatedType) qs('#relatedType').value = relatedType;
+    if (relatedNumber) qs('#relatedNumber').value = relatedNumber;
+    appState.documentIntakePrefill = null;
+  }
   const zone = qs('#uploadZone');
   zone.ondragover = e => { e.preventDefault(); zone.classList.add('dragging'); };
   zone.ondragleave = () => zone.classList.remove('dragging');
@@ -1289,12 +2108,21 @@ async function renderMergedInvoiceTool(el, initialView = 'dashboard', newType = 
     });
   });
 
-  const module = await import('/invoice-builder/js/app.js?v=3');
-  await module.init({ initialView, restoreSnapshot });
-  if (newType && !restoreSnapshot) {
-    const buttonId = newType === 'INVOICE' ? 'btnNewInvoice' : 'btnNewEstimate';
-    setTimeout(() => qs(`#${buttonId}`)?.click(), 50);
-  }
+  const prefill = appState.invoiceToolPrefill;
+  appState.invoiceToolPrefill = null;
+  const module = await import('/invoice-builder/js/app.js?v=14');
+  await module.init({ initialView, restoreSnapshot, newType, prefill });
+}
+
+async function startCustomerDocument(name, type) {
+  appState.invoiceToolSnapshot = null;
+  appState.invoiceToolPrefill = { customerName: name };
+  await showPage(type === 'INVOICE' ? 'invoices' : 'estimates');
+}
+
+async function openDocumentIntakeWithPrefill(relatedType, relatedNumber = '') {
+  appState.documentIntakePrefill = { relatedType, relatedNumber };
+  await showPage('documentIntake');
 }
 
 function ensureMergedInvoiceStyles() {
@@ -1302,7 +2130,7 @@ function ensureMergedInvoiceStyles() {
     const link = document.createElement('link');
     link.id = 'invoiceBuilderCss';
     link.rel = 'stylesheet';
-    link.href = '/invoice-builder/css/app.css';
+    link.href = '/invoice-builder/css/app.css?v=20260530-ar-guide';
     document.head.appendChild(link);
   }
   document.getElementById('invoiceBuilderCss').disabled = false;
@@ -1628,7 +2456,7 @@ function renderInvoiceEditor(doc) {
       </div>
       <div class="actions">
         <button class="ghost-button" onclick="showPage('invoiceCenter')">Back</button>
-        ${doc.id ? `<button class="ghost-button" id="duplicateInvoiceDocBtn">Duplicate</button>${doc.docType === 'ESTIMATE' ? `<button class="ghost-button" id="convertInvoiceDocBtn">Convert to Invoice</button>` : ''}<button class="ghost-button" id="deleteInvoiceDocBtn">Delete</button>` : ''}
+        ${doc.id ? `<button class="ghost-button" id="duplicateInvoiceDocBtn">Duplicate</button>${doc.docType === 'ESTIMATE' ? `<button class="ghost-button" id="convertInvoiceDocBtn">Convert to Invoice</button>` : ''}<button class="ghost-button" id="deleteInvoiceDocBtn">Archive</button>` : ''}
         <button class="ghost-button" id="previewInvoiceDocBtn">Open PDF Preview</button>
         <button class="ghost-button" id="printInvoiceDocBtn">Print / Save PDF</button>
         <button class="primary-button" id="saveInvoiceDocBtn">Save</button>
@@ -1909,9 +2737,9 @@ async function convertEstimateToInvoice() {
 
 async function deleteInvoiceDocument() {
   const id = qs('#invoiceDocForm').dataset.id;
-  if (!id || !confirm('Delete this estimate/invoice?')) return;
+  if (!id || !confirm('Archive this estimate/invoice? It will be hidden from normal records and totals, but kept in the database.')) return;
   await api(`/api/invoice-documents/${id}`, { method: 'DELETE' });
-  toast('Document deleted.');
+  toast('Document archived.');
   await showPage('invoiceCenter');
 }
 
@@ -1950,6 +2778,8 @@ async function renderTaxPrep(el) {
   const expensedAssets = assets.filter(isFullyExpensedAsset);
   const makerWorldIncome = sum(rewards.filter(x => equalsText(x.incomeStatus, 'Yes - Count as income')), x => x.giftCardAmount);
   const deductibleTotal = sum(deductibleExpenses, taxExpenseAmount) + sum(expensedAssets, taxAssetAmount);
+  const filingIncome = Number(k.grossReceipts || 0) + makerWorldIncome;
+  const taxEstimate = buildTaxEstimate(filingIncome, deductibleTotal, Number(k.salesTaxMemo || 0));
   const openProofGaps = [
     ...sales.filter(x => x.needsReview || !x.sourceProof),
     ...expenses.filter(x => x.needsReview || !x.receiptProof),
@@ -1976,6 +2806,7 @@ async function renderTaxPrep(el) {
       ${kpi('MakerWorld Income Review', makerWorldIncome, 'Rewards marked Yes - Count as income. Review before filing.', makerWorldIncome > 0 ? 'warn' : '', true)}
       ${kpi('Proof Gaps', openProofGaps.length, 'Rows missing proof or marked Needs Review.', openProofGaps.length ? 'bad' : 'good', false)}
     </section>
+    ${renderTaxEstimate(taxEstimate)}
     <div class="grid two">
       <div class="card">
         <div class="card-header-lite"><h3>Filing Checklist</h3><span class="badge">Do before filing</span></div>
@@ -2020,6 +2851,114 @@ async function renderTaxPrep(el) {
       <p>Use this as a memo/checking number, not as automatic tax filing advice. Etsy and other marketplaces may collect/remit marketplace sales tax. Direct invoices may be different. Verify with your accountant or tax software.</p>
       ${smallTable(dashboard.monthly, ['month','grossReceipts','salesTaxMemo','estimatedCosts','estimatedNet','orders'])}
     </div>`;
+}
+
+function buildTaxEstimate(income, deductions, salesTaxMemo) {
+  const settings = taxEstimateSettings();
+  const businessProfit = Math.max(0, Number(income || 0) - Number(deductions || 0));
+  const seTaxableProfit = businessProfit * 0.9235;
+  const selfEmploymentTax = seTaxableProfit * 0.153;
+  const federalIncomeTaxReserve = businessProfit * (settings.federalRate / 100);
+  const stateIncomeTaxReserve = businessProfit * (settings.stateRate / 100);
+  const localIncomeTaxReserve = businessProfit * (settings.localRate / 100);
+  const subtotal = selfEmploymentTax + federalIncomeTaxReserve + stateIncomeTaxReserve + localIncomeTaxReserve;
+  const cushion = subtotal * (settings.cushionRate / 100);
+  return {
+    settings,
+    income,
+    deductions,
+    businessProfit,
+    seTaxableProfit,
+    selfEmploymentTax,
+    federalIncomeTaxReserve,
+    stateIncomeTaxReserve,
+    localIncomeTaxReserve,
+    cushion,
+    totalReserve: subtotal + cushion,
+    salesTaxMemo
+  };
+}
+
+function taxEstimateSettings() {
+  const defaults = { federalRate: 12, stateRate: 2.75, localRate: 0, cushionRate: 10 };
+  try {
+    return { ...defaults, ...JSON.parse(localStorage.getItem('epataTaxEstimateSettings') || '{}') };
+  } catch {
+    return defaults;
+  }
+}
+
+function syncBrowserHistory(page, options = {}) {
+  if (!window.history?.pushState) return;
+  if (options.fromPop) return;
+  const url = new URL(window.location.href);
+  url.hash = page === 'dashboard' ? '' : `#${encodeURIComponent(page)}`;
+  const state = { page };
+  appState.suppressPopState = true;
+  if (options.replace || !history.state?.page) history.replaceState(state, '', url);
+  else if (appState.currentPage !== history.state?.page) history.pushState(state, '', url);
+  appState.suppressPopState = false;
+}
+
+function updateBackButton() {
+  const btn = qs('#appBackBtn');
+  if (!btn) return;
+  btn.classList.toggle('hidden', appState.pageHistory.length === 0);
+}
+
+async function goBack() {
+  const previous = appState.pageHistory.pop() || 'dashboard';
+  await showPage(previous, { skipHistory: true, replace: true });
+}
+
+function saveTaxEstimateSetting(key, value) {
+  const settings = taxEstimateSettings();
+  settings[key] = Math.max(0, Number(value || 0));
+  localStorage.setItem('epataTaxEstimateSettings', JSON.stringify(settings));
+  showPage('taxPrep');
+}
+
+function taxRateInput(key, label, value, hint) {
+  return `<label class="tax-rate-input">
+    <span>${escapeHtml(label)}</span>
+    <input type="number" min="0" step="0.25" value="${Number(value || 0)}" onchange="saveTaxEstimateSetting('${escapeHtml(key)}', this.value)">
+    <small>${escapeHtml(hint)}</small>
+  </label>`;
+}
+
+function renderTaxEstimate(e) {
+  return `<section class="tax-estimate-panel">
+    <div class="tax-estimate-head">
+      <div>
+        <span class="eyebrow">Tax Estimate</span>
+        <h3>Estimated amount to reserve</h3>
+        <p>Working estimate only. It uses entered business income, counted deductions, self-employment tax, and your editable reserve rates.</p>
+      </div>
+      <strong>${formatMoney(e.totalReserve)}</strong>
+    </div>
+    <div class="tax-estimate-grid">
+      <div class="tax-estimate-main">
+        <div><span>Filing prep income</span><strong>${formatMoney(e.income)}</strong></div>
+        <div><span>Counted deductions</span><strong>-${formatMoney(e.deductions)}</strong></div>
+        <div><span>Estimated business profit</span><strong>${formatMoney(e.businessProfit)}</strong></div>
+        <div><span>Self-employment tax estimate</span><strong>${formatMoney(e.selfEmploymentTax)}</strong><small>15.3% of 92.35% of profit</small></div>
+        <div><span>Federal income reserve</span><strong>${formatMoney(e.federalIncomeTaxReserve)}</strong><small>${e.settings.federalRate}% editable rate</small></div>
+        <div><span>State income reserve</span><strong>${formatMoney(e.stateIncomeTaxReserve)}</strong><small>${e.settings.stateRate}% editable rate</small></div>
+        <div><span>Local income reserve</span><strong>${formatMoney(e.localIncomeTaxReserve)}</strong><small>${e.settings.localRate}% editable rate</small></div>
+        <div><span>Safety cushion</span><strong>${formatMoney(e.cushion)}</strong><small>${e.settings.cushionRate}% of estimated tax</small></div>
+      </div>
+      <div class="tax-rate-card">
+        <h4>Reserve assumptions</h4>
+        <div class="tax-rate-grid">
+          ${taxRateInput('federalRate', 'Federal %', e.settings.federalRate, 'Marginal reserve rate')}
+          ${taxRateInput('stateRate', 'State %', e.settings.stateRate, 'Default estimate')}
+          ${taxRateInput('localRate', 'Local %', e.settings.localRate, 'City/school/etc.')}
+          ${taxRateInput('cushionRate', 'Cushion %', e.settings.cushionRate, 'Extra buffer')}
+        </div>
+        <p>Sales-tax memo: ${formatMoney(e.salesTaxMemo)}. Keep this separate and verify whether Etsy/marketplaces already collected and remitted it.</p>
+      </div>
+    </div>
+  </section>`;
 }
 
 function nonNegative(value, fallback = 0) {
@@ -2101,11 +3040,20 @@ async function uploadDocuments() {
 
 function renderUploadResult(result) {
   const docs = result.documents || [];
+  const suggestions = result.suggestions || [];
   return `
     <div class="help-item">
       <strong>Uploaded and indexed ${result.count} document${result.count === 1 ? '' : 's'}.</strong>
       <p>These are now Audit Docs. Next, either create the business record they prove, or edit the Audit Doc and add missing details.</p>
     </div>
+    ${suggestions.length ? `<div class="assistant-suggestions">
+      <div class="assistant-head">
+        <span class="eyebrow">Inbox → Ledger Assistant</span>
+        <h3>Suggested next steps</h3>
+        <p>These are review prompts only. Nothing posts to the ledger until you choose where it belongs.</p>
+      </div>
+      ${suggestions.map(renderInboxSuggestion).join('')}
+    </div>` : ''}
     <div class="upload-next-grid">
       ${docs.map(doc => `
         <div class="upload-next-card">
@@ -2127,6 +3075,40 @@ function renderUploadResult(result) {
         <div class="workflow-row"><div><span>You owe vendor</span><strong>Quick Add → Bill / AP</strong></div><p>Use this for bills you have not paid yet.</p></div>
       </div>
     </div>`;
+}
+
+function renderInboxSuggestion(suggestion) {
+  const amount = suggestion.suggestedAmount !== null && suggestion.suggestedAmount !== undefined
+    ? `<span>${formatMoney(suggestion.suggestedAmount)}</span>`
+    : '';
+  const reasons = Array.isArray(suggestion.reasons) && suggestion.reasons.length
+    ? `<ul class="assistant-reasons">${suggestion.reasons.map(r => `<li>${escapeHtml(r)}</li>`).join('')}</ul>`
+    : '';
+  const extracted = suggestion.extracted
+    ? Object.entries(suggestion.extracted)
+        .filter(([, v]) => v !== null && v !== undefined && v !== '')
+        .map(([k, v]) => `<span>${escapeHtml(labelize(k))}: ${escapeHtml(String(v))}</span>`)
+        .join('')
+    : '';
+  const steps = Array.isArray(suggestion.nextSteps) && suggestion.nextSteps.length
+    ? `<div class="assistant-steps">${suggestion.nextSteps.map(s => `<span>${escapeHtml(s)}</span>`).join('')}</div>`
+    : '';
+  const action = JSON.stringify(suggestion).replaceAll("'", "&#39;");
+  return `<div class="assistant-suggestion">
+    <div>
+      <span class="badge ${suggestion.confidence === 'Low' ? 'warn' : 'good'}">${escapeHtml(suggestion.lane)} · ${escapeHtml(suggestion.confidence)} confidence</span>
+      <strong>${escapeHtml(suggestion.title)}</strong>
+      <p>${escapeHtml(suggestion.detail)}</p>
+      ${extracted ? `<div class="assistant-extracted">${extracted}</div>` : ''}
+      ${reasons}
+      ${steps}
+      <small>${escapeHtml(suggestion.fileName || '')}</small>
+    </div>
+    <div class="actions">
+      ${amount}
+      <button class="primary-button" onclick='handleInboxSuggestion(${action})'>Go There</button>
+    </div>
+  </div>`;
 }
 
 function renderImportExport(el) {
@@ -2263,6 +3245,7 @@ function renderHelp(el) {
         <button class="ghost-button dark" onclick="showPage('estimates')">New Estimate</button>
         <button class="ghost-button dark" onclick="showPage('invoices')">New Invoice</button>
         <button class="primary-button" onclick="showPage('quickAdd')">Start Quick Add</button>
+        <button class="ghost-button dark" onclick="showPage('ledgerMap')">Open Ledger Map</button>
         <button class="ghost-button dark" onclick="showPage('workflowGuide')">Open Workflow Guide</button>
       </div>
     </section>
@@ -2398,10 +3381,11 @@ async function backupDb() {
 }
 
 qs('#backupBtn').onclick = backupDb;
+qs('#appBackBtn').onclick = goBack;
 bindTooltips();
 qs('#globalSearch').oninput = () => {
   clearTimeout(appState.globalSearchTimer);
-  appState.globalSearchTimer = setTimeout(() => showPage('globalSearch'), 220);
+  appState.globalSearchTimer = setTimeout(() => showPage('globalSearch', { replace: true }), 220);
 };
 qs('#modalClose').onclick = closeModal;
 qs('#modalCancel').onclick = e => { e.preventDefault(); closeModal(); };
@@ -2414,4 +3398,12 @@ renderNav();
 api('/api/app-info').then(info => {
   if (info?.isTest) qs('#testModeBanner')?.classList.remove('hidden');
 }).catch(() => {});
-showPage('dashboard');
+window.addEventListener('popstate', event => {
+  if (appState.suppressPopState) return;
+  const page = event.state?.page || decodeURIComponent(location.hash.replace(/^#/, '')) || 'dashboard';
+  if (appState.pageHistory[appState.pageHistory.length - 1] === page) appState.pageHistory.pop();
+  showPage(page, { skipHistory: true, fromPop: true });
+});
+const initialPage = decodeURIComponent(location.hash.replace(/^#/, '')) || 'dashboard';
+history.replaceState?.({ page: initialPage }, '', initialPage === 'dashboard' ? location.pathname : `#${encodeURIComponent(initialPage)}`);
+showPage(initialPage, { replace: true, skipHistory: true });

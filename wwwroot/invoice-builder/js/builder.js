@@ -55,6 +55,7 @@ export function addLineItem(item = {}) {
   if (!tbody) return;
 
   const row = document.createElement('tr');
+  if (item.source) row.dataset.source = item.source;
   row.innerHTML = `
     <td class="li-num"></td>
     <td class="li-desc">

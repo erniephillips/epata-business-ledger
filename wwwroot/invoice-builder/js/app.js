@@ -3,19 +3,20 @@
 //  .NET 10 SPA Entry Point
 // ═══════════════════════════════════════════════════════
 
-import { api }                                    from './api.js?v=2';
+import { api }                                    from './api.js?v=4';
 import { el, toast, money, setVal, textVal,
          fmtDateTime, statusBadge, typeBadge,
          debounce, todayStr }                     from './utils.js?v=2';
 import { initCalculator, calculate, getCalcState,
          restoreCalcState, pushToBuilder,
-         applyConfigDefaults, syncDifficultyButtons } from './calculator.js?v=2';
+         applyConfigDefaults, syncDifficultyButtons } from './calculator.js?v=3';
 import { initBuilder, addLineItem, removeLineItem,
          getLineItems, updateTotals, captureState,
-         restoreState, getFormData, newDocument } from './builder.js?v=2';
+         restoreState, getFormData, newDocument } from './builder.js?v=3';
 import { initRecords, refreshRecords, loadRecord,
          duplicateRecord, deleteRecord, exportCsv,
-         getRecords }                             from './records.js?v=2';
+         getRecords, convertEstimateToInvoice,
+         restoreRecord }                          from './records.js?v=9';
 import { generatePdf, renderInvoiceHtml }         from './pdf.js?v=2';
 
 // ── State ─────────────────────────────────────────────
@@ -37,7 +38,9 @@ export async function init(initialView = 'dashboard') {
   window._removeLineItem = removeLineItem;
   window._loadRecord     = (id) => onLoadRecord(id);
   window._dupeRecord     = (id) => onDuplicateRecord(id);
+  window._convertEstimate = (id) => onConvertEstimate(id);
   window._delRecord      = (id) => onDeleteRecord(id);
+  window._restoreRecord  = (id) => onRestoreRecord(id);
   window._copyText       = copyText;
   window._invoiceToolSnapshot = createDocumentSnapshot;
 
@@ -138,10 +141,12 @@ export async function init(initialView = 'dashboard') {
       restoreDocumentSnapshot(options.restoreSnapshot);
       setDbStatus(`Ready — ${activeRecordId ? 'editing' : 'draft'} ${textVal('docNumber') || 'document'}`, 'ready');
     } else {
-      const num = await api.nextNumber('ESTIMATE').then(r => r.number).catch(() => '');
+      const startType = options.newType || 'ESTIMATE';
+      const num = await api.nextNumber(startType).then(r => r.number).catch(() => '');
       activeRecordId = null;
-      startCleanDocument('ESTIMATE', num);
-      setDbStatus('Ready — new estimate', 'ready');
+      startCleanDocument(startType, num);
+      applyDocumentPrefill(options.prefill);
+      setDbStatus(`Ready — new ${startType === 'INVOICE' ? 'invoice' : 'estimate'}`, 'ready');
     }
 
     // Refresh dashboard stats
@@ -190,7 +195,7 @@ async function loadDashboardStats() {
     if (tbody) {
       tbody.innerHTML = rows.length ? rows.map(r => `
         <tr>
-          <td class="doc-number" style="cursor:pointer" onclick="window._loadRecord(${r.id})">${r.docNumber||'—'}</td>
+          <td class="doc-number" style="cursor:pointer" onclick="${r.sourceKind === 'receivable' ? `window.openLedgerEntityRecord && window.openLedgerEntityRecord('receivables', ${r.sourceId || r.id})` : `window._loadRecord(${r.id})`}">${r.docNumber||'—'}</td>
           <td>${typeBadge(r.docType)}</td>
           <td>${statusBadge(r.status||'Draft')}</td>
           <td>${r.customerName||'—'}</td>
@@ -272,6 +277,22 @@ function startCleanDocument(type = 'ESTIMATE', number = '') {
   cancelPendingAutoSave();
   newDocument(type, number);
   restoreCalcState(defaultCalcState());
+}
+
+function applyDocumentPrefill(prefill = null) {
+  if (!prefill) return;
+  const fields = {
+    preparedFor: prefill.preparedFor || prefill.customerName || '',
+    customerName: prefill.customerName || '',
+    customerPhone: prefill.customerPhone || '',
+    customerAddress: prefill.customerAddress || '',
+    customerEmail: prefill.customerEmail || '',
+    projectName: prefill.projectName || '',
+    projectDescription: prefill.projectDescription || ''
+  };
+  Object.entries(fields).forEach(([id, value]) => {
+    if (value) setVal(id, value);
+  });
 }
 
 function createDocumentSnapshot() {
@@ -455,17 +476,20 @@ function applySelectedProduct() {
   if (!selected) return;
   if (selected.material) setVal('material', selected.material);
   if (selected.color) setVal('color', selected.color);
-  if (selected.grams != null) setVal('calcGrams', selected.grams);
-  if (selected.printHours != null) setVal('calcHours', selected.printHours);
-  if (selected.materialCostPerGram != null) setVal('calcGramRate', selected.materialCostPerGram);
-  if (selected.machineRatePerHour != null) setVal('calcHourRate', selected.machineRatePerHour);
-  if (selected.designMinutes != null) setVal('calcDesignHours', Number(selected.designMinutes || 0) / 60);
+  if (selected.grams != null) setVal('grams', selected.grams);
+  if (selected.printHours != null) setVal('hours', selected.printHours);
+  if (selected.materialCostPerGram != null) setVal('gramRate', selected.materialCostPerGram);
+  if (selected.machineRatePerHour != null) setVal('hourRate', selected.machineRatePerHour);
+  if (selected.designMinutes != null) setVal('designHours', Number(selected.designMinutes || 0) / 60);
+  if (selected.packagingCost != null && !Number(textVal('postFee') || 0)) setVal('postFee', selected.packagingCost);
+  if (selected.targetPrice != null && !Number(textVal('minimum') || 0)) setVal('minimum', selected.targetPrice);
+  calculate();
   const hasMeaningfulLine = Array.from(document.querySelectorAll('#lineItemsBody tr')).some(row =>
     row.querySelector('.item-desc')?.value?.trim() || Number(row.querySelector('.item-rate')?.value || 0) > 0);
   if (selected.targetPrice && !hasMeaningfulLine) {
     const rows = document.querySelectorAll('#lineItemsBody tr');
     rows.forEach(row => row.remove());
-    addLineItem({ description: selected.name, details: selected.sku || selected.category || '', qty: 1, rate: selected.targetPrice });
+    addLineItem({ description: selected.name, details: [selected.sku, selected.category, selected.material].filter(Boolean).join(' · '), qty: 1, rate: selected.targetPrice });
   }
   updateTotals();
   refreshInvoicePreview();
@@ -491,13 +515,9 @@ function defaultCalcState() {
 
 // ── Auto-save ─────────────────────────────────────────
 function scheduleAutoSave() {
-  if (!activeRecordId || !apiReady) return;
-  clearTimeout(autoSaveTimer);
-  setAutoSaveStatus('saving');
-  autoSaveTimer = setTimeout(async () => {
-    try { await saveRecord(false); }
-    catch { setAutoSaveStatus(''); }
-  }, AUTOSAVE_MS);
+  // Intentionally disabled. Estimates/invoices should only change on explicit Save,
+  // Save as New, Download PDF, or another direct user action.
+  cancelPendingAutoSave();
 }
 
 function cancelPendingAutoSave() {
@@ -518,8 +538,8 @@ function setAutoSaveStatus(state) {
 // ── PDF ───────────────────────────────────────────────
 async function onGeneratePdf(preview = false) {
   try {
-    // Save first. If the database is broken, do not generate a PDF that never got tracked.
-    if (apiReady) await saveRecord(false);
+    // Preview is read-only. Download saves first so the exported PDF is tracked.
+    if (!preview && apiReady) await saveRecord(false);
 
     const formData = getFormData();
     const data = { ...formData, ...appConfig, brandColor: appConfig.brandColor || '#17468f' };
@@ -533,7 +553,13 @@ async function onGeneratePdf(preview = false) {
 // ── Calculator → Builder push ─────────────────────────
 function onPushToBuilder() {
   const calc = calculate();
-  pushToBuilder(calc, getLineItems, addLineItem);
+  const selectedProduct = productLookups.find(p => (p.name || '').toLowerCase() === textVal('projectName').toLowerCase());
+  pushToBuilder(calc, getLineItems, addLineItem, {
+    productName: textVal('projectName'),
+    productDetails: selectedProduct
+      ? [selectedProduct.sku, selectedProduct.category, selectedProduct.material, selectedProduct.color].filter(Boolean).join(' · ')
+      : ''
+  });
   updateTotals();
   refreshInvoicePreview();
   scheduleAutoSave();
@@ -574,9 +600,27 @@ async function onDuplicateRecord(id) {
   try { await duplicateRecord(id); } catch (e) { toast('Duplicate failed: ' + e.message, 'error'); }
 }
 
+async function onConvertEstimate(id) {
+  try {
+    await convertEstimateToInvoice(id, (doc) => {
+      if (!doc?.id || doc.docType !== 'INVOICE') {
+        throw new Error('The server did not return the new invoice record.');
+      }
+      onLoadRecord(doc.id);
+    });
+  } catch (e) {
+    toast('Invoice creation failed: ' + e.message, 'error');
+  }
+}
+
 async function onDeleteRecord(id) {
   try { await deleteRecord(id, activeRecordId, (newId) => { activeRecordId = newId; updateActiveBar(); }); }
-  catch (e) { toast('Delete failed: ' + e.message, 'error'); }
+  catch (e) { toast('Archive failed: ' + e.message, 'error'); }
+}
+
+async function onRestoreRecord(id) {
+  try { await restoreRecord(id); }
+  catch (e) { toast('Restore failed: ' + e.message, 'error'); }
 }
 
 // ── Settings ──────────────────────────────────────────
