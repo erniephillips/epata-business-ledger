@@ -4,8 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>EPATA Estimate & Invoice Builder</title>
-  <link rel="stylesheet" href="./css/app.css" />
-  <script type="module" src="./js/app.js?v=4"></script>
+  <link rel="stylesheet" href="./css/app.css?v=20260609-ai-full-prefill" />
+  <script type="module" src="./js/app.js?v=10"></script>
 </head>
 <body>
 <div id="app">
@@ -486,7 +486,7 @@
                   <div class="field"><label>Prepared for (c/o)</label><input id="preparedFor" type="text" placeholder="Optional contact name" /></div>
                 </div>
                 <div class="form-row" style="margin-top:14px">
-                  <div class="field"><label>Phone</label><input id="customerPhone" type="tel" placeholder="(555) 000-0000" /></div>
+                  <div class="field"><label>Phone</label><input id="customerPhone" type="tel" inputmode="tel" maxlength="14" pattern="\(\d{3}\) \d{3}-\d{4}" placeholder="(555) 123-4567" title="Use a 10-digit US phone number: (555) 123-4567" /><span class="field-hint">10-digit US format: (555) 123-4567</span></div>
                   <div class="field"><label>Email</label><input id="customerEmail" type="email" placeholder="customer@email.com" /></div>
                 </div>
                 <div class="field" style="margin-top:14px"><label>Address</label><input id="customerAddress" type="text" placeholder="123 Main St, City, ST 12345" /></div>
@@ -565,6 +565,22 @@
                     <div class="field"><label>Rush (%)</label><input id="docRushPercent" type="number" min="0" max="200" step="5" value="0" /></div>
                     <div class="field"><label>Tax rate (%)</label><input id="docTaxRate" type="number" min="0" max="30" step="0.001" value="0" /></div>
                     <div class="field"><label>Amount paid ($)</label><input id="amountPaid" type="number" min="0" step="0.01" value="0" /></div>
+                    <div class="field"><label>Payment method</label><select id="paymentMethod">
+                      <option>Unknown / Review</option>
+                      <option>Cash</option>
+                      <option>Zelle</option>
+                      <option>Venmo</option>
+                      <option>Cash App</option>
+                      <option>PayPal</option>
+                      <option>ACH / Bank Transfer</option>
+                      <option>Check</option>
+                      <option>Credit Card</option>
+                      <option>Debit Card</option>
+                      <option>Etsy Payments</option>
+                      <option>MakerWorld</option>
+                      <option>Online Marketplace</option>
+                      <option>Other Non-Cash</option>
+                    </select></div>
                   </div>
                 </div>
               </div>
@@ -718,6 +734,7 @@
               </tbody>
             </table>
           </div>
+          <div id="recordsPager" class="records-pager"></div>
         </div>
 
         <div class="flex gap-3 mt-3" style="font-size:12.5px;color:#64748b;align-items:center">
@@ -893,7 +910,7 @@
                 <div class="field"><label>Business name</label><input id="businessName" type="text" placeholder="EPATA 3D Prints" /></div>
                 <div class="field"><label>Location / city</label><input id="businessLocation" type="text" placeholder="City, State" /></div>
                 <div class="field"><label>Email</label><input id="businessEmail" type="email" placeholder="hello@epata.com" /></div>
-                <div class="field"><label>Phone</label><input id="businessPhone" type="tel" placeholder="(555) 000-0000" /></div>
+                <div class="field"><label>Phone</label><input id="businessPhone" type="tel" inputmode="tel" maxlength="14" pattern="\(\d{3}\) \d{3}-\d{4}" placeholder="(555) 123-4567" title="Use a 10-digit US phone number: (555) 123-4567" /></div>
                 <div class="field"><label>Website</label><input id="businessWebsite" type="url" placeholder="https://epata.com" /></div>
                 <div class="field"><label>Etsy shop</label><input id="businessEtsy" type="text" placeholder="etsy.com/shop/EPATA" /></div>
                 <div class="field"><label>Instagram</label><input id="businessInstagram" type="text" placeholder="@epata3d" /></div>

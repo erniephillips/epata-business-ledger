@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "businessName": "EPATA LLC",
+  "currency": "USD",
+  "defaults": {
+    "minimumOrder": 15.00,
+    "taxRatePercent": 0.0,
+    "material": "PLA",
+    "infill": "20%",
+    "estimateValidDays": 14,
+    "pageSize": "LETTER",
+    "paymentMethod": "Unknown / Review",
+    "pricingGuide": "Print-only jobs: use setup + material + machine time, subject to the minimum. Basic modeling: $25/hour with a one-hour minimum. Additional revisions: $15-$25 or hourly. Rush work: add 25%-50%. ABS/ASA: include a 20%-35% handling surcharge when appropriate.",
+    "termsNotes": "This estimate is valid for 14 days. Final price may vary if requirements or model files change. Payment is due before printing begins. Thank you for supporting EPATA 3D Prints!",
+    "standardTurnaround": "Estimated timeline provided after design review and schedule confirmation",
+    "rushTurnaround": "Expedited service available upon request, subject to current workload"
+  },
+  "rates": {
+    "designHourly": 25.00,
+    "machineHourly": 3.00,
+    "materialPerGram": 0.05,
+    "setupFee": 5.00,
+    "postProcessingFee": 5.00,
+    "rushPercent": 25.00
+  },
+  "keywordPrices": [
+    {
+      "keywords": [ "keychain", "key chain" ],
+      "description": "Custom keychain design and print",
+      "details": "Final size, color, quantity, and artwork require confirmation.",
+      "rate": 15.00
+    },
+    {
+      "keywords": [ "replacement part", "replacement piece", "repair part" ],
+      "description": "Replacement part design and print",
+      "details": "Final price depends on dimensions, fit requirements, material, and testing.",
+      "rate": 25.00
+    },
+    {
+      "keywords": [ "prototype", "functional prototype" ],
+      "description": "Functional prototype design and print",
+      "details": "Includes initial design review. Revisions and additional copies may change the final price.",
+      "rate": 35.00
+    }
+  ],
+  "pricingRules": [
+    "Use the minimum order when the request does not contain enough detail for a reliable price.",
+    "Do not invent dimensions, quantities, materials, deadlines, or customer details.",
+    "Treat customer budgets as review information, not guaranteed pricing.",
+    "Create a separate estimate line item for each distinct product or service requested.",
+    "Use an Etsy listing price as the draft rate when it is available, but flag it for review if customization may change the price.",
+    "Treat multiple pictures as reference views unless the text or image analysis indicates they are separate products.",
+    "Add questions whenever information needed for a reliable quote is missing.",
+    "All AI-generated prices and fields must be reviewed before the estimate is saved or sent."
+    ,"When estimating material usage, use total grams for the quoted quantity and include a reasonable waste/support allowance only when supported by the source or clearly disclosed."
+    ,"When estimating machine or design time, disclose uncertainty in projectNotes and add a question if slicer or design-time information is missing."
+  ],
+  "aiInstructions": [
+    "Extract customer and project details from pasted messages, email chains, uploaded documents, public source-page metadata, and uploaded pictures.",
+    "Return multiple lineItems when the sources describe multiple distinct products or services.",
+    "Create an ESTIMATE in Draft status.",
+    "Return structured fields only. Do not include commentary outside the JSON response.",
+    "Use concise customer-facing project descriptions and keep uncertainty in projectNotes, warnings, and questions.",
+    "Use the editable rates and keyword prices in this file. Never silently invent a custom fee.",
+    "Fill the complete HTML builder field contract, including calculator inputs. The application recomputes all money and replaces calculator-backed line items with its deterministic breakdown."
+  ]
+}

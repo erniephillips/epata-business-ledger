@@ -10,8 +10,13 @@ $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $dbPath = Join-Path $root 'Data\full-acceptance.db'
 $base = "http://127.0.0.1:$Port"
 $project = Join-Path $root 'EPATA.BusinessLedger.csproj'
-$builtDll = Join-Path $root 'bin\Release\net10.0\EPATA.BusinessLedger.dll'
+$builtDll = @(
+    Join-Path $root 'bin\Release\net10.0\EPATA.BusinessLedger.dll'
+    Join-Path $root 'obj\verify-build\EPATA.BusinessLedger.dll'
+) | Where-Object { Test-Path -LiteralPath $_ } | Sort-Object { (Get-Item -LiteralPath $_).LastWriteTimeUtc } -Descending | Select-Object -First 1
 $uploadProbe = Join-Path $root 'Data\acceptance-upload-proof.txt'
+$aiDocxProbe = Join-Path $root 'Data\acceptance-ai-source.docx'
+$aiPdfProbe = Join-Path $root 'Data\acceptance-ai-source.pdf'
 $serverJob = $null
 
 function Write-Step($message) {
@@ -41,18 +46,7 @@ function Invoke-Json($method, $path, $body = $null) {
 
 function Invoke-Raw($method, $path) {
     $uri = "$base$path"
-    try {
-        return Invoke-WebRequest -Method $method -Uri $uri -UseBasicParsing
-    } catch [System.Net.WebException] {
-        if ($_.Exception.Response) {
-            return [pscustomobject]@{
-                StatusCode = [int]$_.Exception.Response.StatusCode
-                Content = ''
-                Headers = $_.Exception.Response.Headers
-            }
-        }
-        throw
-    }
+    return Invoke-WebRequest -Method $method -Uri $uri -UseBasicParsing -SkipHttpErrorCheck
 }
 
 function New-DocPayload($type, $status, $number, $paid, $customer) {
@@ -81,6 +75,7 @@ function New-DocPayload($type, $status, $number, $paid, $customer) {
         total = 1
         amountPaid = $paid
         balance = 12345
+        paymentMethod = 'Zelle'
         pricingGuide = 'Acceptance'
         termsNotes = 'Acceptance terms'
         standardTurnaround = '5 days'
@@ -178,9 +173,69 @@ function Upload-ProofFile {
     return $text | ConvertFrom-Json
 }
 
+function Invoke-AiEstimateUpload {
+    $client = [System.Net.Http.HttpClient]::new()
+    $content = [System.Net.Http.MultipartFormDataContent]::new()
+    $content.Add([System.Net.Http.StringContent]::new("- 2x Custom keychains - `$18 each`n- 1x Replacement part - `$27"), 'sourceText')
+    $content.Add([System.Net.Http.StringContent]::new('acceptance mixed sources'), 'sourceName')
+    $imageContent = [System.Net.Http.ByteArrayContent]::new([byte[]](1, 2, 3, 4))
+    $imageContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('image/png')
+    $content.Add($imageContent, 'files', 'reference-view.png')
+    $response = $client.PostAsync("$base/api/ai/estimate-draft/upload", $content).GetAwaiter().GetResult()
+    $text = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+    if (-not $response.IsSuccessStatusCode) {
+        throw "AI estimate upload failed with $($response.StatusCode): $text"
+    }
+    return $text | ConvertFrom-Json
+}
+
+function New-AcceptanceDocx {
+    param([string]$Path)
+    Add-Type -AssemblyName System.IO.Compression
+    $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Create)
+    try {
+        $archive = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Create, $false)
+        try {
+            $entry = $archive.CreateEntry('word/document.xml')
+            $writer = [System.IO.StreamWriter]::new($entry.Open())
+            try {
+                $writer.Write('<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Customer: Acceptance DOCX Customer</w:t></w:r></w:p><w:p><w:r><w:t>- 2x DOCX bracket - $31</w:t></w:r></w:p></w:body></w:document>')
+            } finally {
+                $writer.Dispose()
+            }
+        } finally {
+            $archive.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
+
+function Invoke-AiEstimateDocumentUpload {
+    New-AcceptanceDocx -Path $aiDocxProbe
+    [System.IO.File]::WriteAllText($aiPdfProbe, '%PDF-1.4 BT (PDF custom sign request) Tj ET %%EOF', [System.Text.Encoding]::Latin1)
+    $client = [System.Net.Http.HttpClient]::new()
+    $content = [System.Net.Http.MultipartFormDataContent]::new()
+    $content.Add([System.Net.Http.StringContent]::new('acceptance PDF and DOCX sources'), 'sourceName')
+    foreach ($spec in @(
+        @{ Path = $aiDocxProbe; Type = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'; Name = 'customer-request.docx' },
+        @{ Path = $aiPdfProbe; Type = 'application/pdf'; Name = 'customer-reference.pdf' }
+    )) {
+        $fileContent = [System.Net.Http.ByteArrayContent]::new([System.IO.File]::ReadAllBytes($spec.Path))
+        $fileContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse($spec.Type)
+        $content.Add($fileContent, 'files', $spec.Name)
+    }
+    $response = $client.PostAsync("$base/api/ai/estimate-draft/upload", $content).GetAwaiter().GetResult()
+    $text = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+    if (-not $response.IsSuccessStatusCode) {
+        throw "AI document estimate upload failed with $($response.StatusCode): $text"
+    }
+    return $text | ConvertFrom-Json
+}
+
 try {
     Write-Step 'Preparing disposable database'
-    foreach ($path in @($dbPath, "$dbPath-shm", "$dbPath-wal", $uploadProbe)) {
+    foreach ($path in @($dbPath, "$dbPath-shm", "$dbPath-wal", $uploadProbe, $aiDocxProbe, $aiPdfProbe)) {
         if (Test-Path -LiteralPath $path) {
             Remove-Item -LiteralPath $path -Force
         }
@@ -219,10 +274,127 @@ try {
         $response = Invoke-Raw GET $path
         Assert-True ($response.StatusCode -eq 200) "Static asset $path failed."
     }
+    $appJs = (Invoke-Raw GET '/js/app.js').Content
+    Assert-True ($appJs -match 'function assistanceIndicator') 'Assistance source indicator is missing from the app shell.'
+    Assert-True ($appJs -match 'Automatic fallback while Local AI is unavailable') 'Local AI fallback indicator is missing.'
     Invoke-Json GET '/api/dashboard' | Out-Null
     Invoke-Json GET '/api/tax-audit' | Out-Null
+    $taxProfile = Invoke-Json GET '/api/tax-profile'
+    Assert-True ($taxProfile.state -eq 'New Jersey') 'Tax profile did not default to New Jersey.'
+    $taxProfile.entityType = 'Single-member LLC / Schedule C'
+    $taxProfile.formationMonth = 5
+    $taxProfile.njSalesTaxRegistration = 'Registered'
+    $taxProfile.usesVehicle = 'Yes'
+    $taxProfile.businessMileageRate = 0.70
+    $savedTaxProfile = Invoke-Json PUT '/api/tax-profile' $taxProfile
+    Assert-True ($savedTaxProfile.formationMonth -eq 5) 'Tax profile formation month did not save.'
+    $taxCalendar = Invoke-Json POST '/api/tax-calendar/generate?year=2026'
+    Assert-True (@($taxCalendar).Count -ge 10) 'Tax calendar generation did not create the expected obligation set.'
+    Assert-True (@($taxCalendar | Where-Object { $_.title -like '*annual report*' -and ([datetime]$_.dueDate).Month -eq 5 }).Count -eq 1) 'NJ annual report did not use the configured formation month.'
+    $taxSummary = Invoke-Json GET '/api/tax-summary?year=2026'
+    Assert-True ($taxSummary.taxYear -eq 2026) 'Tax summary returned the wrong year.'
     Invoke-Json GET '/api/lookups' | Out-Null
     Invoke-Json GET '/api/app-info' | Out-Null
+    $localAiStatus = Invoke-Json GET '/api/ai/local/status'
+    Assert-True ($localAiStatus.localOnly -eq $true) 'Local AI status did not enforce its local-only boundary.'
+    Assert-True ($localAiStatus.baseUrl -eq 'http://127.0.0.1:1234') 'Local AI status did not use the safe default loopback URL.'
+    $savedLocalAiSettings = Invoke-Json PUT '/api/ai/local/settings' @{
+        baseUrl = 'http://localhost:1234'
+        modelPath = $null
+        modelIdentifier = 'acceptance-local'
+        contextLength = 4096
+        idleUnloadSeconds = 600
+    }
+    Assert-True ($savedLocalAiSettings.baseUrl -eq 'http://localhost:1234') 'Local AI settings did not save a loopback URL.'
+    Assert-True ($savedLocalAiSettings.modelIdentifier -eq 'acceptance-local') 'Local AI settings did not save the model identifier.'
+    $invalidLocalAiSettings = Invoke-WebRequest -Method PUT -Uri "$base/api/ai/local/settings" -ContentType 'application/json' -Body (@{
+        baseUrl = 'https://example.com'
+        modelPath = $null
+        modelIdentifier = 'unsafe'
+        contextLength = 4096
+        idleUnloadSeconds = 600
+    } | ConvertTo-Json) -SkipHttpErrorCheck
+    Assert-True ($invalidLocalAiSettings.StatusCode -eq 400) 'Local AI settings accepted a non-loopback URL.'
+    $catalogProduct = Invoke-Json POST '/api/products' @{
+        name = 'Acceptance Catalog Widget'
+        sku = 'AI-CATALOG-001'
+        category = '3D Printed Product'
+        material = 'PETG'
+        color = 'Blue'
+        grams = 100
+        materialCostPerGram = 0.04
+        printHours = 2
+        machineRatePerHour = 3
+        packagingCost = 2
+        designMinutes = 30
+        targetPrice = 40
+        notes = 'Saved product costing acceptance test'
+    }
+    $aiStatus = Invoke-Json GET '/api/ai/estimate/status'
+    Assert-True ($aiStatus.instructionsPath -like '*AiEstimateInstructions.json') 'AI estimate status did not report the editable instructions path.'
+    Assert-True (@($aiStatus.supportedUploads) -contains '.png') 'AI estimate status did not report picture upload support.'
+    Assert-True (@($aiStatus.supportedUploads) -contains '.pdf') 'AI estimate status did not report PDF upload support.'
+    Assert-True (@($aiStatus.supportedUploads) -contains '.docx') 'AI estimate status did not report DOCX upload support.'
+    Assert-True ($aiStatus.limits.maxCombinedTextCharacters -eq 500000) 'AI estimate status did not report the expanded text limit.'
+    Assert-True ($aiStatus.builderPath -like '*invoice-builder*index.html') 'AI estimate status did not report the ingested HTML builder path.'
+    Assert-True (@($aiStatus.builderFields) -contains 'grams') 'AI estimate status did not ingest calculator fields from the HTML builder.'
+    Assert-True (@($aiStatus.builderFields) -contains 'termsNotes') 'AI estimate status did not ingest terms fields from the HTML builder.'
+    Assert-True ($aiStatus.productCatalogCount -ge 1) 'AI estimate status did not report the saved product/cost catalog.'
+    $aiDraft = Invoke-Json POST '/api/ai/estimate-draft' @{
+        sourceName = 'acceptance-email.txt'
+        sourceText = "From: Jane Customer`nSubject: Replacement bracket`nPlease make 3 black PETG replacement parts, 40mm x 20mm x 10mm. My phone is 973-555-0123."
+    }
+    Assert-True ($aiDraft.prefill.docType -eq 'ESTIMATE') 'AI estimate intake did not return an estimate draft.'
+    Assert-True (@($aiDraft.prefill.lineItems).Count -gt 0) 'AI estimate intake did not return a line item.'
+    Assert-True ($aiDraft.prefill.customerPhone -eq '(973) 555-0123') 'AI estimate intake did not normalize the customer phone.'
+    Assert-True ($aiDraft.prefill.projectNotes -like '*ASSISTANCE:*') 'AI estimate intake did not add durable assistance provenance to Project Notes.'
+    Assert-True ($aiDraft.prefill.termsNotes.Length -gt 20) 'AI estimate intake did not fill estimate terms.'
+    Assert-True ($aiDraft.prefill.standardTurnaround.Length -gt 10) 'AI estimate intake did not fill standard turnaround.'
+    Assert-True ($aiDraft.prefill.calcGramRate -eq 0.05) 'AI estimate intake did not fill the calculator material rate.'
+    Assert-True ($aiDraft.prefill.assistanceSource -eq 'LOCAL RULES') 'AI estimate fallback did not identify its builder assistance source.'
+    Assert-True ($aiDraft.executionReceipt.engine -eq 'LOCAL RULES') 'AI estimate fallback did not return a Local Rules execution receipt.'
+    Assert-True ($aiDraft.executionReceipt.usedAi -eq $false) 'AI estimate fallback execution receipt incorrectly claimed model AI use.'
+    Assert-True ($aiDraft.executionReceipt.totalTokens -eq $null) 'AI estimate fallback execution receipt incorrectly reported model tokens.'
+    Assert-True ($aiDraft.prefill.projectNotes -like '*LOCAL RULES RECEIPT:*') 'AI estimate fallback did not preserve its execution receipt in Project Notes.'
+    $aiPricedDraft = Invoke-Json POST '/api/ai/estimate-draft' @{
+        sourceName = 'acceptance-priced-request.txt'
+        sourceText = "Customer: Price Check Customer`nSubject: PETG enclosure`nUse black PETG. Material: 120 grams. Print time: 6 hours. Design time: 1 hour. Setup fee: `$5. Post-processing: `$4. Material rate: `$0.05 per gram. Machine rate: `$3. Design rate: `$25. Minimum: `$15. Rush: 25%. Discount: `$2. Tax: 6.625%."
+    }
+    Assert-True ($aiPricedDraft.pricing.usedCalculatorInputs -eq $true) 'AI estimate intake did not use supplied calculator inputs.'
+    Assert-Close ([decimal]$aiPricedDraft.pricing.material) 6 0.01 'AI estimate material calculation'
+    Assert-Close ([decimal]$aiPricedDraft.pricing.machine) 18 0.01 'AI estimate machine-time calculation'
+    Assert-Close ([decimal]$aiPricedDraft.pricing.design) 25 0.01 'AI estimate design calculation'
+    Assert-Close ([decimal]$aiPricedDraft.pricing.lineSubtotal) 58 0.01 'AI estimate deterministic line subtotal'
+    Assert-Close ([decimal]$aiPricedDraft.pricing.total) 75.17 0.01 'AI estimate deterministic quote total'
+    Assert-True (@($aiPricedDraft.prefill.lineItems | Where-Object { $_.description -eq 'Material usage' }).Count -eq 1) 'AI estimate did not build the material-cost line item.'
+    Assert-True ($aiPricedDraft.prefill.projectNotes -like '*PRICING BASIS:*') 'AI estimate did not add durable pricing provenance.'
+    $aiCatalogDraft = Invoke-Json POST '/api/ai/estimate-draft' @{
+        sourceName = 'saved-product-request.txt'
+        sourceText = 'Please quote one Acceptance Catalog Widget.'
+    }
+    Assert-True ($aiCatalogDraft.prefill.material -eq 'PETG') 'AI estimate did not use the saved product material.'
+    Assert-Close ([decimal]$aiCatalogDraft.prefill.calcGrams) 100 0.01 'AI estimate saved product grams'
+    Assert-Close ([decimal]$aiCatalogDraft.pricing.total) 40 0.01 'AI estimate saved product target-price floor'
+    Assert-True (@($aiCatalogDraft.warnings | Where-Object { $_ -like '*Saved product costing was applied*' }).Count -eq 1) 'AI estimate did not disclose saved product costing use.'
+    Invoke-Json DELETE "/api/products/$($catalogProduct.id)" | Out-Null
+    $aiMixedDraft = Invoke-AiEstimateUpload
+    Assert-True (@($aiMixedDraft.prefill.lineItems).Count -ge 3) 'Mixed-source AI estimate intake did not create separate pasted-text and picture items.'
+    Assert-True (@($aiMixedDraft.prefill.lineItems | Where-Object { $_.description -like 'Item from picture:*' }).Count -eq 1) 'Picture upload did not create a review line item in local fallback mode.'
+    $aiDocumentDraft = Invoke-AiEstimateDocumentUpload
+    Assert-True ($aiDocumentDraft.prefill.projectDescription -like '*Acceptance DOCX Customer*') 'DOCX source text was not extracted into the AI estimate draft.'
+    Assert-True ($aiDocumentDraft.prefill.projectDescription -like '*PDF custom sign request*') 'PDF source text was not extracted into the AI estimate draft.'
+    $aiBlockedUrlDraft = Invoke-Json POST '/api/ai/estimate-draft' @{
+        sourceName = 'blocked URL safety test'
+        sourceText = 'One custom bracket'
+        sourceUrls = @('https://localhost/private-product')
+    }
+    Assert-True (@($aiBlockedUrlDraft.warnings | Where-Object { $_ -like '*public HTTPS pages only*' }).Count -eq 1) 'AI estimate intake did not disclose that a private/local URL was blocked.'
+    $aiReviewStatus = Invoke-Json GET '/api/ai/review/status'
+    Assert-True ($aiReviewStatus.sendsDataToAiProvider -eq $false) 'AI review status did not disclose that local review stays local.'
+    Assert-True ($aiReviewStatus.safety -like '*Read-only*') 'AI review status did not disclose its read-only safety boundary.'
+    $aiReview = Invoke-Json GET '/api/ai/review'
+    Assert-True ($aiReview.engine -like '*Local rules*') 'AI review did not identify its engine.'
+    Assert-True ($aiReview.safety -like '*Read-only*') 'AI review did not identify its safety boundary.'
 
     Write-Step 'Checking admin/config endpoints'
     $config = Invoke-Json GET '/api/config'
@@ -237,12 +409,12 @@ try {
     $party = Assert-CrudRoundTrip 'parties' @{ name='Acceptance Customer'; partyType='Both'; email='customer@example.test'; phone='973-555-0101'; city='Testville'; state='NJ'; country='United States'; notes='acceptance' } 'notes' 'updated party'
     Assert-CrudRoundTrip 'products' @{ name='Acceptance Product'; sku='ACC-001'; category='3D Printed Product'; material='PLA'; color='Black'; grams=-10; materialCostPerGram=-0.1; printHours=2; machineRatePerHour=3; packagingCost=-1; designMinutes=20; targetPrice=-5; notes='acceptance' } 'notes' 'updated product' | Out-Null
     Assert-CrudRoundTrip 'customer-jobs' @{ jobDate='2026-05-30'; customerName='Acceptance Customer'; platform='Direct'; jobNumber='JOB-ACC-001'; relatedInvoiceNumber='INV-ACC-001'; jobName='Acceptance Job'; jobType='Print'; status='Open'; productName='Acceptance Product'; material='PLA'; color='Black'; quoteAmount=-25; invoiceAmount=-40; amountPaid=-10; notes='acceptance' } 'status' 'Completed' | Out-Null
-    $sale = Assert-CrudRoundTrip 'sales' @{ saleDate='2026-05-30'; platform='Direct'; orderNumber='ORD-ACC-001'; invoiceNumber=''; customerName='Acceptance Customer'; productName='Acceptance Product'; quantity=-1; itemSales=80; shippingCharged=5; salesTaxCollected=6.8; customerPaid=999; platformFees=-3; shippingLabelCost=-2; refunds=-4; estimatedCogs=-5; status='Paid'; includeInDashboard=$true; notes='acceptance' } 'notes' 'updated sale'
+    $sale = Assert-CrudRoundTrip 'sales' @{ saleDate='2026-05-30'; platform='Direct'; paymentMethod='Credit Card'; salesTaxHandling='Seller Collected'; orderNumber='ORD-ACC-001'; invoiceNumber=''; customerName='Acceptance Customer'; productName='Acceptance Product'; quantity=-1; itemSales=80; shippingCharged=5; salesTaxCollected=6.8; customerPaid=999; platformFees=-3; shippingLabelCost=-2; refunds=-4; estimatedCogs=-5; status='Paid'; includeInDashboard=$true; notes='acceptance' } 'notes' 'updated sale'
     Assert-Close ([decimal]$sale.customerPaid) 91.8 0.01 'Sale CRUD customer paid should be normalized.'
     Assert-CrudRoundTrip 'receivable-invoices' @{ invoiceNumber='AR-ACC-001'; invoiceDate='2026-05-30'; dueDate='2026-06-15'; customerName='Acceptance Customer'; projectName='AR Project'; status='Partial'; subtotal=100; discount=-12; rushFee=-4; taxRatePercent=10; salesTax=-7; invoiceTotal=1; amountPaid=-2; includeInCashReports=$true; notes='acceptance' } 'status' 'Paid' | Out-Null
     $bill = Assert-CrudRoundTrip 'bills' @{ vendorName='Acceptance Vendor'; billNumber='BILL-ACC-001'; billDate='2026-05-30'; dueDate='2026-06-30'; category='Supplies'; description='Acceptance bill'; amount=100; salesTax=7; total=1; amountPaid=-8; status='Partial'; paymentAccount='Checking'; taxDeductible=$true; notes='acceptance' } 'status' 'Paid'
     Assert-Close ([decimal]$bill.total) 107 0.01 'Bill total should normalize amount plus tax.'
-    $expense = Assert-CrudRoundTrip 'expenses' @{ expenseDate='2026-05-30'; vendorName='Acceptance Vendor'; category='Supplies'; description='Acceptance expense'; paymentAccount='Checking'; amount=20; salesTax=2; total=1; receiptProof='proof'; taxBucket='COGS/Materials'; deductibleStatus='Yes'; businessUsePercent=150; countedExpense=$true; taxDeductible=$true; notes='acceptance' } 'notes' 'updated expense'
+    $expense = Assert-CrudRoundTrip 'expenses' @{ expenseDate='2026-05-30'; vendorName='Acceptance Vendor'; category='Supplies'; taxCategory='COGS / materials'; description='Acceptance expense'; paymentAccount='Checking'; amount=20; salesTax=2; total=1; receiptProof='proof'; taxBucket='COGS/Materials'; deductibleStatus='Yes'; businessUsePercent=150; countedExpense=$true; taxDeductible=$true; notes='acceptance' } 'notes' 'updated expense'
     Assert-Close ([decimal]$expense.total) 22 0.01 'Expense total should normalize amount plus tax.'
     Assert-Close ([decimal]$expense.businessUsePercent) 100 0.01 'Expense business use should clamp at 100.'
     Assert-CrudRoundTrip 'assets' @{ name='Acceptance Printer'; purchaseDate='2026-05-30'; vendorName='Bambu'; category='Equipment'; cost=-200; serialNumber='ACC123'; businessUsePercent=150; inServiceDate='2026-05-30'; taxTreatment='Section 179'; countedExpenseThisYear=$true; notes='acceptance' } 'notes' 'updated asset' | Out-Null
@@ -250,6 +422,8 @@ try {
     Assert-CrudRoundTrip 'audit-documents' @{ documentDate='2026-05-30'; documentType='Receipt'; relatedRecordType='Expense'; relatedRecordNumber='EXP-ACC'; fileName='acceptance.pdf'; filePathOrUrl='C:\acceptance.pdf'; notes='acceptance' } 'notes' 'updated audit doc' | Out-Null
     Assert-CrudRoundTrip 'business-accounts' @{ name='Acceptance Checking'; accountType='Checking'; institution='Acceptance Bank'; last4='1111'; openingBalance=-10; currentBalance=-5; isActive=$true; notes='acceptance' } 'notes' 'updated account' | Out-Null
     Assert-CrudRoundTrip 'action-items' @{ title='Acceptance action'; area='Tax'; priority='High'; dueDate='2026-06-01'; status='Open'; relatedRecord='ACC'; notes='acceptance' } 'status' 'Done' | Out-Null
+    Assert-CrudRoundTrip 'tax-obligations' @{ taxYear=2026; title='Acceptance tax obligation'; jurisdiction='Federal'; obligationType='Estimated Income Tax'; formName='1040-ES'; period='Q2'; dueDate='2026-06-15'; status='Review Applicability'; estimatedAmount=-20; amountPaid=-10; appliesIf='Acceptance'; needsReview=$true; notes='acceptance' } 'status' 'Filed / Paid' | Out-Null
+    Assert-CrudRoundTrip 'mileage-logs' @{ tripDate='2026-05-30'; vehicle='Acceptance Vehicle'; startLocation='Home'; endLocation='Post Office'; businessPurpose='Ship customer order'; businessMiles=-12; parkingAndTolls=-2; proofReference='calendar'; notes='acceptance' } 'notes' 'updated mileage' | Out-Null
     Assert-CrudRoundTrip 'settings' @{ key='AcceptanceSetting'; value='One'; notes='acceptance' } 'value' 'Two' | Out-Null
 
     Write-Step 'Checking proof/document intake upload'
@@ -257,6 +431,9 @@ try {
     Assert-True ($upload.count -eq 1) 'Document upload did not create one audit document.'
     Assert-True ($upload.documents[0].id -gt 0) 'Document upload did not return an audit document id.'
     Assert-True ($upload.documents[0].fileName -eq 'acceptance-upload-proof.txt') 'Document upload returned the wrong filename.'
+    Assert-True ($upload.suggestions[0].engine -eq 'Local rules') 'Document suggestion did not identify its local-rules engine.'
+    Assert-True ($upload.suggestions[0].usedAi -eq $false) 'Document suggestion incorrectly claimed model AI use.'
+    Assert-True ($upload.suggestions[0].doesNot -like '*Does not create or save*') 'Document suggestion did not disclose its write boundary.'
 
     Write-Step 'Checking estimate and invoice builder workflows'
     $nextEstimate = Invoke-Json GET '/api/documents/next-number?type=ESTIMATE'
@@ -285,6 +462,7 @@ try {
     Assert-Close ([decimal]$paidSale.itemSales) 100 0.01 'Paid invoice sale item sales allocation'
     Assert-Close ([decimal]$paidSale.salesTaxCollected) 10 0.01 'Paid invoice sale tax allocation'
     Assert-Close ([decimal]$paidSale.customerPaid) 110 0.01 'Paid invoice sale customer paid'
+    Assert-True ($paidSale.paymentMethod -eq 'Zelle') 'Paid invoice payment method did not sync to Sales.'
 
     $arRows = Invoke-Json GET '/api/receivable-invoices?includeArchived=true'
     $paidAr = @($arRows | Where-Object { $_.invoiceNumber -eq $paidInvoice.docNumber })[0]
@@ -323,11 +501,28 @@ try {
     Assert-True ($legacy.success -eq $false) 'Legacy import without old app should fail gracefully, not claim success.'
 
     Write-Step 'Checking exports and backups'
-    foreach ($entity in @('parties', 'sales', 'customer-jobs', 'receivable-invoices', 'bills', 'expenses', 'products', 'assets', 'makerworld-rewards', 'audit-documents', 'business-accounts', 'action-items')) {
+    foreach ($entity in @('parties', 'sales', 'customer-jobs', 'receivable-invoices', 'bills', 'expenses', 'products', 'assets', 'makerworld-rewards', 'audit-documents', 'business-accounts', 'action-items', 'tax-obligations', 'mileage-logs')) {
         $csv = Invoke-Raw GET "/api/export/$entity"
         Assert-True ($csv.StatusCode -eq 200) "CSV export failed for $entity."
         Assert-True ($csv.Content.Length -gt 10) "CSV export for $entity looked empty."
     }
+    foreach ($group in @('all', 'noncash', 'digital', 'card', 'online', 'cash', 'other', 'unknown')) {
+        $csv = Invoke-Raw GET "/api/export/tax-sales?paymentGroup=$group"
+        Assert-True ($csv.StatusCode -eq 200) "Tax sales export failed for payment group $group."
+        Assert-True ($csv.Content -like '*PaymentGroup*') "Tax sales export for $group did not include PaymentGroup."
+    }
+    $digitalTaxCsv = Invoke-Raw GET '/api/export/tax-sales?paymentGroup=digital'
+    Assert-True ($digitalTaxCsv.Content -like '*Zelle*') 'Digital-transfer tax export did not include the paid Zelle invoice.'
+    $cardTaxCsv = Invoke-Raw GET '/api/export/tax-sales?paymentGroup=card'
+    Assert-True ($cardTaxCsv.Content -like '*Credit Card*') 'Card tax export did not include the credit-card sale.'
+    $njSalesTaxCsv = Invoke-Raw GET '/api/export/nj-sales-tax?year=2026'
+    Assert-True ($njSalesTaxCsv.StatusCode -eq 200) 'NJ sales-tax review export failed.'
+    Assert-True ($njSalesTaxCsv.Content -like '*Seller Collected*') 'NJ sales-tax review export did not include seller-collected handling.'
+    $taxSummaryCsv = Invoke-Raw GET '/api/export/tax-summary?year=2026'
+    Assert-True ($taxSummaryCsv.Content -like '*WorkingNetProfit*') 'Tax summary export did not include working net profit.'
+    $taxPackage = Invoke-Raw GET '/api/export/tax-package?year=2026'
+    Assert-True ($taxPackage.StatusCode -eq 200) 'Tax package ZIP export failed.'
+    Assert-True ($taxPackage.Content.Length -gt 500) 'Tax package ZIP looked empty.'
     $backup = Invoke-Raw GET '/api/database/backup'
     Assert-True ($backup.StatusCode -eq 200) 'Database backup endpoint failed.'
     $systemBackup = Invoke-Raw POST '/api/system/backup'
@@ -369,7 +564,7 @@ try {
         Remove-Job -Job $serverJob -Force -ErrorAction SilentlyContinue | Out-Null
     }
 
-    foreach ($path in @($uploadProbe)) {
+    foreach ($path in @($uploadProbe, $aiDocxProbe, $aiPdfProbe)) {
         if (Test-Path -LiteralPath $path) {
             Remove-Item -LiteralPath $path -Force
         }

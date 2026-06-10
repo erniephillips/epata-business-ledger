@@ -10,18 +10,21 @@ let _onLoad   = null;
 let _onNew    = null;
 let _sortBy   = 'updated';
 let _sortDir  = 'desc';
+let _page     = 0;
+let _pageSize = 25;
 
 export function initRecords({ onLoad, onNew }) {
   _onLoad = onLoad;
   _onNew  = onNew;
 
-  el('recSearch')?.addEventListener('input', render);
-  el('recType')?.addEventListener('change', render);
-  el('recStatus')?.addEventListener('change', render);
+  el('recSearch')?.addEventListener('input', () => { _page = 0; render(); });
+  el('recType')?.addEventListener('change', () => { _page = 0; render(); });
+  el('recStatus')?.addEventListener('change', () => { _page = 0; render(); });
   el('recIncludeArchived')?.addEventListener('change', refreshRecords);
   el('recSortBy')?.addEventListener('change', e => {
     _sortBy = e.target.value || 'updated';
     _sortDir = ['customer', 'project'].includes(_sortBy) ? 'asc' : 'desc';
+    _page = 0;
     render();
   });
   document.querySelectorAll('[data-record-sort]').forEach(btn => {
@@ -29,6 +32,7 @@ export function initRecords({ onLoad, onNew }) {
       const next = btn.dataset.recordSort || 'updated';
       _sortDir = _sortBy === next && _sortDir === 'asc' ? 'desc' : 'asc';
       _sortBy = next;
+      _page = 0;
       const dropdown = el('recSortBy');
       if (dropdown && [...dropdown.options].some(o => o.value === next)) dropdown.value = next;
       render();
@@ -63,15 +67,20 @@ function render() {
           <div class="empty-desc">Try adjusting your filters or create a new estimate.</div>
         </div>
       </td></tr>`;
+    renderPager(0);
     return;
   }
 
-  tbody.innerHTML = rows.map(r => `
+  const totalPages = Math.max(1, Math.ceil(rows.length / _pageSize));
+  if (_page >= totalPages) _page = totalPages - 1;
+  const pageRows = rows.slice(_page * _pageSize, (_page + 1) * _pageSize);
+
+  tbody.innerHTML = pageRows.map(r => `
     <tr class="${r.sourceKind === 'receivable' ? 'ledger-record' : ''} ${r.isArchived ? 'archived-record' : ''}">
       <td class="doc-number">${escapeHtml(r.docNumber || '—')}</td>
       <td>${recordTypeCell(r)}${r.isArchived ? ` <span class="badge badge-gray" title="${escapeHtml(r.archiveReason || 'Archived record retained in the database.')}">Archived</span>` : ''}</td>
       <td>${statusBadge(r.status || 'Draft')}</td>
-      <td>${escapeHtml(r.customerName || '—')}</td>
+      <td>${customerCell(r.customerName)}</td>
       <td>${escapeHtml(r.projectName || '—')}</td>
       <td class="num">${money(r.total)}</td>
       <td class="num">${money(r.amountPaid)}</td>
@@ -89,7 +98,43 @@ function render() {
         </div>
       </td>
     </tr>`).join('');
+  renderPager(rows.length);
   updateSortHeaders();
+}
+
+function customerCell(name) {
+  const clean = String(name || '').trim();
+  if (!clean) return '—';
+  return `<button class="record-link" onclick="window.openCustomerDetail && window.openCustomerDetail(decodeURIComponent('${encodeURIComponent(clean)}'))">${escapeHtml(clean)}</button>`;
+}
+
+function renderPager(totalRows) {
+  const pager = el('recordsPager');
+  if (!pager) return;
+  if (totalRows <= 0) {
+    pager.innerHTML = '';
+    return;
+  }
+  const totalPages = Math.max(1, Math.ceil(totalRows / _pageSize));
+  const start = totalRows ? (_page * _pageSize) + 1 : 0;
+  const end = Math.min(totalRows, (_page + 1) * _pageSize);
+  pager.innerHTML = `
+    <div class="records-pager-info">Showing ${start}-${end} of ${totalRows}</div>
+    <div class="records-pager-controls">
+      <button class="btn-ghost btn-sm" id="recPageFirst" ${_page === 0 ? 'disabled' : ''}>«</button>
+      <button class="btn-ghost btn-sm" id="recPagePrev" ${_page === 0 ? 'disabled' : ''}>‹ Prev</button>
+      <select id="recPageSize" class="records-page-size">
+        ${[10,25,50,100].map(n => `<option value="${n}"${n === _pageSize ? ' selected' : ''}>${n} / page</option>`).join('')}
+      </select>
+      <span>Page ${_page + 1} of ${totalPages}</span>
+      <button class="btn-ghost btn-sm" id="recPageNext" ${_page >= totalPages - 1 ? 'disabled' : ''}>Next ›</button>
+      <button class="btn-ghost btn-sm" id="recPageLast" ${_page >= totalPages - 1 ? 'disabled' : ''}>»</button>
+    </div>`;
+  el('recPageFirst')?.addEventListener('click', () => { _page = 0; render(); });
+  el('recPagePrev')?.addEventListener('click', () => { _page = Math.max(0, _page - 1); render(); });
+  el('recPageNext')?.addEventListener('click', () => { _page = Math.min(totalPages - 1, _page + 1); render(); });
+  el('recPageLast')?.addEventListener('click', () => { _page = totalPages - 1; render(); });
+  el('recPageSize')?.addEventListener('change', e => { _pageSize = Number(e.target.value) || 25; _page = 0; render(); });
 }
 
 function recordTypeCell(r) {

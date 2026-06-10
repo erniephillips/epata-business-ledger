@@ -17,6 +17,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<AuditDocument> AuditDocuments => Set<AuditDocument>();
     public DbSet<BusinessAccount> BusinessAccounts => Set<BusinessAccount>();
     public DbSet<ActionItem> ActionItems => Set<ActionItem>();
+    public DbSet<TaxObligation> TaxObligations => Set<TaxObligation>();
+    public DbSet<MileageLog> MileageLogs => Set<MileageLog>();
     public DbSet<AppSetting> AppSettings => Set<AppSetting>();
     public DbSet<InvoiceDocument> InvoiceDocuments => Set<InvoiceDocument>();
     public DbSet<InvoiceLineItem> InvoiceLineItems => Set<InvoiceLineItem>();
@@ -36,6 +38,9 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         modelBuilder.Entity<Expense>().HasIndex(x => x.ExpenseDate);
         modelBuilder.Entity<Product>().HasIndex(x => x.Sku).IsUnique(false);
         modelBuilder.Entity<AuditDocument>().HasIndex(x => x.RelatedRecordNumber);
+        modelBuilder.Entity<TaxObligation>().HasIndex(x => x.DueDate);
+        modelBuilder.Entity<TaxObligation>().HasIndex(x => new { x.TaxYear, x.Title, x.Period });
+        modelBuilder.Entity<MileageLog>().HasIndex(x => x.TripDate);
         modelBuilder.Entity<AppSetting>().HasIndex(x => x.Key).IsUnique();
         modelBuilder.Entity<InvoiceDocument>().HasIndex(x => x.DocNumber).IsUnique(false);
         modelBuilder.Entity<InvoiceDocument>().HasIndex(x => x.UpdatedAt);

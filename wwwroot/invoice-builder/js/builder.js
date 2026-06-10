@@ -10,7 +10,7 @@ const FORM_FIELD_IDS = [
   'customerName','customerPhone','customerAddress','customerEmail',
   'projectName','material','color','infill',
   'projectDescription','projectNotes',
-  'docDiscount','docRushPercent','docTaxRate','amountPaid',
+  'docDiscount','docRushPercent','docTaxRate','amountPaid','paymentMethod',
   'pricingGuide','termsNotes','standardTurnaround','rushTurnaround',
   'docStatus',
 ];
@@ -127,11 +127,12 @@ export function updateTotals() {
   const closedStatus = textVal('docStatus');
   const isInvoice = textVal('docType') === 'INVOICE';
   const isPaid   = isInvoice && closedStatus === 'Paid';
-  const paid     = isInvoice ? (isPaid ? total : val('amountPaid')) : 0;
-  const balance  = isInvoice ? Math.max(0, total - paid) : 0;
+  const isVoid   = isInvoice && closedStatus === 'Void';
+  const paid     = isInvoice && !isVoid ? (isPaid ? total : val('amountPaid')) : 0;
+  const balance  = isInvoice && !isVoid ? Math.max(0, total - paid) : 0;
 
   if (isPaid) setVal('amountPaid', total.toFixed(2));
-  else if (!isInvoice) setVal('amountPaid', '0');
+  else if (!isInvoice || isVoid) setVal('amountPaid', '0');
 
   setText('bSubtotal',  money(subtotal));
   setText('bDiscount',  '-' + money(discount));
@@ -259,6 +260,7 @@ export function getFormData() {
     pageSize: textVal('pageSize'),
     docDate:  textVal('docDate'),
     dueDate:  textVal('dueDate'),
+    paymentMethod: textVal('paymentMethod') || 'Unknown / Review',
     docRushPercent: val('docRushPercent'),
     docTaxRate: val('docTaxRate'),
     pricingGuide: textVal('pricingGuide'),
@@ -299,6 +301,7 @@ export function newDocument(type = 'ESTIMATE', nextNumber = '') {
   setVal('docRushPercent','0');
   setVal('docTaxRate',    '0');
   setVal('amountPaid',    '0');
+  setVal('paymentMethod', 'Unknown / Review');
   setVal('pricingGuide', DEFAULT_PRICING_GUIDE);
   setVal('termsNotes', type === 'INVOICE' ? DEFAULT_INVOICE_TERMS_NOTES : DEFAULT_TERMS_NOTES);
   setVal('standardTurnaround', 'Estimated timeline provided after design review and schedule confirmation');

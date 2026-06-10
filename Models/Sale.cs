@@ -10,6 +10,12 @@ public class Sale : AuditableEntity
     public string Platform { get; set; } = "Direct"; // Etsy, Direct, MakerWorld, Other
 
     [MaxLength(80)]
+    public string PaymentMethod { get; set; } = "Unknown / Review";
+
+    [MaxLength(100)]
+    public string SalesTaxHandling { get; set; } = "Unknown / Review";
+
+    [MaxLength(80)]
     public string? OrderNumber { get; set; }
 
     [MaxLength(80)]

@@ -12,6 +12,9 @@ public class Expense : AuditableEntity
     [MaxLength(120)]
     public string Category { get; set; } = "General Business";
 
+    [MaxLength(120)]
+    public string TaxCategory { get; set; } = "Other business expense";
+
     [MaxLength(260)]
     public string Description { get; set; } = string.Empty;
 

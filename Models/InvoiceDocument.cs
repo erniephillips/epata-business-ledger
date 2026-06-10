@@ -61,6 +61,9 @@ public class InvoiceDocument
     public decimal AmountPaid { get; set; }
     public decimal Balance { get; set; }
 
+    [MaxLength(80)]
+    public string PaymentMethod { get; set; } = "Unknown / Review";
+
     public string? PricingGuide { get; set; }
     public string? TermsNotes { get; set; }
     public string? StandardTurnaround { get; set; }

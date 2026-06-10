@@ -21,7 +21,13 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 });
 
 builder.Services.AddScoped<DashboardService>();
+builder.Services.AddScoped<AiBusinessReviewService>();
+builder.Services.AddScoped<TaxPlanningService>();
+builder.Services.AddScoped<AiSourceDocumentTextExtractor>();
 builder.Services.AddHttpClient<InvoiceAppImportService>();
+builder.Services.AddHttpClient<LocalAiService>(client => client.Timeout = TimeSpan.FromMinutes(10));
+builder.Services.AddHttpClient<AiEstimateService>(client => client.Timeout = TimeSpan.FromMinutes(10))
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
     options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
@@ -73,11 +79,84 @@ MapCrud<MakerWorldReward>(app, "makerworld-rewards");
 MapCrud<AuditDocument>(app, "audit-documents");
 MapCrud<BusinessAccount>(app, "business-accounts");
 MapCrud<ActionItem>(app, "action-items");
+MapCrud<TaxObligation>(app, "tax-obligations");
+MapCrud<MileageLog>(app, "mileage-logs");
 MapCrud<AppSetting>(app, "settings");
 
 app.MapGet("/api/dashboard", async (DashboardService dashboard) => Results.Ok(await dashboard.BuildAsync()));
 
 app.MapGet("/api/tax-audit", async (AppDbContext db) => Results.Ok(await BuildTaxAuditAsync(db)));
+
+app.MapGet("/api/tax-profile", async (TaxPlanningService tax) => Results.Ok(await tax.GetProfileAsync()));
+
+app.MapPut("/api/tax-profile", async (TaxPlanningService tax, TaxProfile profile) => Results.Ok(await tax.SaveProfileAsync(profile)));
+
+app.MapGet("/api/tax-summary", async (TaxPlanningService tax, int? year) =>
+    Results.Ok(await tax.BuildSummaryAsync(year ?? DateTime.Today.Year)));
+
+app.MapGet("/api/tax-calendar", async (AppDbContext db, int? year) =>
+    Results.Ok(await db.TaxObligations.AsNoTracking()
+        .Where(x => !x.IsArchived && x.TaxYear == (year ?? DateTime.Today.Year))
+        .OrderBy(x => x.DueDate == null)
+        .ThenBy(x => x.DueDate)
+        .ThenBy(x => x.Title)
+        .ToListAsync()));
+
+app.MapPost("/api/tax-calendar/generate", async (TaxPlanningService tax, int? year) =>
+    Results.Ok(await tax.GenerateObligationsAsync(year ?? DateTime.Today.Year)));
+
+app.MapGet("/api/ai/review/status", (AiBusinessReviewService review) => Results.Ok(review.Status()));
+
+app.MapGet("/api/ai/review", async (AiBusinessReviewService review) => Results.Ok(await review.BuildAsync()));
+
+app.MapPost("/api/ai/review/model", async Task<IResult> (AiBusinessReviewService review, CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return Results.Ok(await review.BuildModelAssistedAsync(cancellationToken));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { message = ex.Message });
+    }
+});
+
+app.MapGet("/api/ai/local/status", async (LocalAiService localAi, CancellationToken cancellationToken) =>
+    Results.Ok(await localAi.GetStatusAsync(cancellationToken: cancellationToken)));
+
+app.MapPut("/api/ai/local/settings", async Task<IResult> (
+    LocalAiService localAi,
+    SaveLocalAiSettingsRequest request,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return Results.Ok(await localAi.SaveSettingsAsync(request, cancellationToken));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { message = ex.Message });
+    }
+});
+
+app.MapPost("/api/ai/local/start", async Task<IResult> (LocalAiService localAi, CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var result = await localAi.StartAsync(cancellationToken);
+        return result.Success ? Results.Ok(result) : Results.BadRequest(result);
+    }
+    catch (Exception ex) when (ex is InvalidOperationException or IOException)
+    {
+        return Results.BadRequest(new { message = ex.Message });
+    }
+});
+
+app.MapPost("/api/ai/local/stop", async Task<IResult> (LocalAiService localAi, CancellationToken cancellationToken) =>
+{
+    var result = await localAi.StopAsync(cancellationToken);
+    return result.Success ? Results.Ok(result) : Results.BadRequest(result);
+});
 
 app.MapGet("/api/job-timeline", async (AppDbContext db, string? q, string? customer) =>
     Results.Ok(await BuildJobTimelineAsync(db, q, customer)));
@@ -471,6 +550,33 @@ app.MapPost("/api/documents/upload", async (HttpRequest request, AppDbContext db
     });
 });
 
+app.MapGet("/api/audit-documents/{id:int}/file", async Task<IResult> (int id, AppDbContext db, IWebHostEnvironment env) =>
+{
+    var doc = await db.AuditDocuments.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id && !x.IsArchived);
+    if (doc is null)
+    {
+        return Results.NotFound(new { message = "Audit document not found." });
+    }
+
+    if (string.IsNullOrWhiteSpace(doc.FilePathOrUrl))
+    {
+        return Results.NotFound(new { message = "This Audit Doc does not have a saved file path." });
+    }
+
+    var fullPath = Path.GetFullPath(doc.FilePathOrUrl);
+    if (!IsAllowedProofFilePath(env.ContentRootPath, fullPath))
+    {
+        return Results.BadRequest(new { message = "This file path is outside the EPATA business folders the app is allowed to open." });
+    }
+
+    if (!System.IO.File.Exists(fullPath))
+    {
+        return Results.NotFound(new { message = "The saved file is missing from UploadedDocs." });
+    }
+
+    return Results.File(System.IO.File.OpenRead(fullPath), ContentTypeForFile(fullPath), fileDownloadName: null, enableRangeProcessing: true);
+});
+
 app.MapGet("/api/export/{entity}", async (string entity, AppDbContext db, bool includeArchived = false) =>
 {
     var fileName = $"epata-{entity}-{DateTime.Now:yyyyMMdd-HHmmss}.csv";
@@ -488,8 +594,154 @@ app.MapGet("/api/export/{entity}", async (string entity, AppDbContext db, bool i
         "audit-documents" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.AuditDocuments.AsNoTracking(), includeArchived).ToListAsync())),
         "business-accounts" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.BusinessAccounts.AsNoTracking(), includeArchived).ToListAsync())),
         "action-items" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.ActionItems.AsNoTracking(), includeArchived).ToListAsync())),
+        "tax-obligations" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.TaxObligations.AsNoTracking(), includeArchived).ToListAsync())),
+        "mileage-logs" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.MileageLogs.AsNoTracking(), includeArchived).ToListAsync())),
         _ => Results.NotFound(new { message = "Unknown export entity." })
     };
+});
+
+app.MapGet("/api/export/tax-sales", async (AppDbContext db, string? paymentGroup = "all", int? year = null) =>
+{
+    var sales = await db.Sales.AsNoTracking()
+        .Where(x => !x.IsArchived && x.IncludeInDashboard && (!year.HasValue || (x.SaleDate.HasValue && x.SaleDate.Value.Year == year.Value)))
+        .OrderBy(x => x.SaleDate)
+        .ThenBy(x => x.Id)
+        .ToListAsync();
+    var rows = sales
+        .Select(x => new TaxSaleExportRow(
+            x.Id,
+            x.SaleDate,
+            x.Platform,
+            x.PaymentMethod,
+            PaymentChannelFor(x),
+            x.SalesTaxHandling,
+            x.OrderNumber,
+            x.InvoiceNumber,
+            x.CustomerName,
+            x.ProductName,
+            x.ItemSales,
+            x.ShippingCharged,
+            x.SalesTaxCollected,
+            x.CustomerPaid,
+            x.PlatformFees,
+            x.ShippingLabelCost,
+            x.Refunds,
+            x.EstimatedCogs,
+            x.Status,
+            x.SourceProof,
+            x.NeedsReview,
+            x.Notes))
+        .Where(x => PaymentChannelMatches(x.PaymentGroup, paymentGroup))
+        .ToList();
+    var group = string.IsNullOrWhiteSpace(paymentGroup) ? "all" : Regex.Replace(paymentGroup.ToLowerInvariant(), @"[^a-z0-9]+", "-").Trim('-');
+    return Csv($"epata-tax-sales-{year?.ToString() ?? "all-years"}-{group}-{DateTime.Now:yyyyMMdd-HHmmss}.csv", CsvExportService.ToCsv(rows));
+});
+
+app.MapGet("/api/export/tax-summary", async (TaxPlanningService tax, int? year) =>
+{
+    var resolvedYear = year ?? DateTime.Today.Year;
+    return Csv($"epata-tax-summary-{resolvedYear}-{DateTime.Now:yyyyMMdd-HHmmss}.csv", CsvExportService.ToCsv(new[] { await tax.BuildSummaryAsync(resolvedYear) }));
+});
+
+app.MapGet("/api/export/nj-sales-tax", async (TaxPlanningService tax, int? year, int? quarter) =>
+{
+    var resolvedYear = year ?? DateTime.Today.Year;
+    var quarterName = quarter is >= 1 and <= 4 ? $"-q{quarter}" : "-all-quarters";
+    return Csv($"epata-nj-sales-tax-review-{resolvedYear}{quarterName}-{DateTime.Now:yyyyMMdd-HHmmss}.csv", CsvExportService.ToCsv(await tax.BuildNjSalesTaxReviewAsync(resolvedYear, quarter)));
+});
+
+app.MapGet("/api/export/tax-package", async (TaxPlanningService tax, int? year) =>
+{
+    var resolvedYear = year ?? DateTime.Today.Year;
+    return Results.File(await tax.BuildTaxPackageAsync(resolvedYear), "application/zip", $"epata-tax-package-{resolvedYear}-{DateTime.Now:yyyyMMdd-HHmmss}.zip");
+});
+
+app.MapGet("/api/ai/estimate/status", async (AiEstimateService ai, CancellationToken cancellationToken) =>
+    Results.Ok(await ai.StatusAsync(cancellationToken)));
+
+app.MapPost("/api/ai/estimate-draft", async Task<IResult> (AiEstimateService ai, AiEstimateDraftRequest request, CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return Results.Ok(await ai.CreateDraftAsync(request, cancellationToken));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { message = ex.Message });
+    }
+});
+
+app.MapPost("/api/ai/estimate-draft/upload", async Task<IResult> (
+    HttpRequest request,
+    AiEstimateService ai,
+    AiSourceDocumentTextExtractor extractor,
+    CancellationToken cancellationToken) =>
+{
+    if (!request.HasFormContentType)
+    {
+        return Results.BadRequest(new { message = "AI estimate uploads must be sent as multipart/form-data." });
+    }
+
+    var form = await request.ReadFormAsync(cancellationToken);
+    var sourceText = form["sourceText"].FirstOrDefault() ?? string.Empty;
+    var sourceName = form["sourceName"].FirstOrDefault() ?? "Mixed sources";
+    var sourceUrls = form["sourceUrls"]
+        .SelectMany(value => value?.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) ?? [])
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .Take(AiEstimateService.MaxSourceUrls)
+        .ToList();
+    var images = new List<AiEstimateImageInput>();
+    var warnings = new List<string>();
+    var files = form.Files.Take(AiEstimateService.MaxUploadFiles).ToList();
+    if (form.Files.Count > AiEstimateService.MaxUploadFiles)
+    {
+        warnings.Add($"Only the first {AiEstimateService.MaxUploadFiles} files were read.");
+    }
+    var totalBytes = files.Sum(file => file.Length);
+    if (totalBytes > AiEstimateService.MaxTotalUploadBytes)
+    {
+        return Results.BadRequest(new { message = $"The selected files total more than {AiEstimateService.MaxTotalUploadBytes / 1024 / 1024} MB. Remove or split some files and try again." });
+    }
+
+    foreach (var file in files)
+    {
+        if (file.Length <= 0) continue;
+        if (file.Length > AiEstimateService.MaxUploadFileBytes)
+        {
+            return Results.BadRequest(new { message = $"{file.FileName} is larger than the {AiEstimateService.MaxUploadFileBytes / 1024 / 1024} MB per-file AI intake limit." });
+        }
+
+        if (file.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+        {
+            await using var memory = new MemoryStream();
+            await file.CopyToAsync(memory, cancellationToken);
+            images.Add(new AiEstimateImageInput(file.FileName, file.ContentType, Convert.ToBase64String(memory.ToArray())));
+            continue;
+        }
+
+        try
+        {
+            var extraction = await extractor.ExtractAsync(file, cancellationToken);
+            if (!string.IsNullOrWhiteSpace(extraction.Text))
+            {
+                sourceText = string.Join("\n\n", new[] { sourceText, $"SOURCE FILE: {file.FileName}\n{extraction.Text}" }.Where(x => !string.IsNullOrWhiteSpace(x)));
+            }
+            if (!string.IsNullOrWhiteSpace(extraction.Warning)) warnings.Add(extraction.Warning);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or System.Xml.XmlException)
+        {
+            warnings.Add($"{file.FileName} could not be read as a valid {Path.GetExtension(file.FileName).TrimStart('.').ToUpperInvariant()} document.");
+        }
+    }
+
+    try
+    {
+        return Results.Ok(await ai.CreateDraftAsync(new AiEstimateDraftRequest(sourceText, sourceName, sourceUrls, images, warnings), cancellationToken));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { message = ex.Message });
+    }
 });
 
 app.MapPost("/api/system/backup", async (AppDbContext db, IConfiguration configuration, IWebHostEnvironment env) =>
@@ -1037,6 +1289,7 @@ static object BuildInboxSuggestion(AuditDocument doc)
 
     ScoreWhen(scores, reasons, "sale", 45, doc.RelatedRecordType?.Equals("Sale", StringComparison.OrdinalIgnoreCase) == true, "You selected Related Area = Sale.");
     ScoreWhen(scores, reasons, "expense", 45, doc.RelatedRecordType?.Equals("Expense", StringComparison.OrdinalIgnoreCase) == true, "You selected Related Area = Expense.");
+    ScoreWhen(scores, reasons, "estimate", 55, doc.RelatedRecordType?.Equals("Estimate", StringComparison.OrdinalIgnoreCase) == true, "You selected Related Area = Estimate.");
     ScoreWhen(scores, reasons, "invoice", 45, doc.RelatedRecordType?.Equals("Invoice", StringComparison.OrdinalIgnoreCase) == true, "You selected Related Area = Invoice.");
     ScoreWhen(scores, reasons, "bill", 45, doc.RelatedRecordType?.Equals("Bill", StringComparison.OrdinalIgnoreCase) == true, "You selected Related Area = Bill.");
     ScoreWhen(scores, reasons, "sale", 35, HasAny(text, "etsy order", "payment for order", "customer paid", "sale", "buyer paid", "order total"), "Looks like customer money or an order.");
@@ -1070,6 +1323,10 @@ static object BuildInboxSuggestion(AuditDocument doc)
         relatedRecordType = doc.RelatedRecordType,
         relatedRecordNumber = doc.RelatedRecordNumber,
         proofReference = proof,
+        engine = "Local rules",
+        usedAi = false,
+        touches = "Uploaded filename, selected related area/reference, and locally extracted text patterns.",
+        doesNot = "Does not create or save the suggested ledger record.",
         confidence,
         reasons = reasons.Distinct().Take(5).ToList(),
         extracted = new
@@ -1163,29 +1420,66 @@ static InboxSuggestionLane BuildSuggestionForLane(string lane, string text, stri
         "invoice" => new InboxSuggestionLane(
             "Invoice",
             "Likely invoice proof",
-            "Open or create the invoice/AR row, confirm whether it is sent, partial, paid, or still open, then attach proof.",
-            "receivables",
-            "receivables",
-            "invoice",
+            "Create a draft Invoice PDF from the extracted fields, review it, then save only if it looks right. Use AR after it is sent or if money is owed.",
+            "invoices",
+            null,
+            null,
             new Dictionary<string, object?>
             {
-                ["invoiceDate"] = date ?? today,
-                ["invoiceNumber"] = invoiceNumber ?? orderNumber,
+                ["docType"] = "INVOICE",
+                ["docNumber"] = invoiceNumber ?? orderNumber,
+                ["docDate"] = date ?? today,
+                ["dueDate"] = date ?? today,
                 ["projectName"] = product,
-                ["status"] = amount.HasValue && text.Contains("paid") ? "Paid" : "Sent",
-                ["invoiceTotal"] = amount,
+                ["docStatus"] = amount.HasValue && text.Contains("paid") ? "Paid" : "Draft",
                 ["amountPaid"] = text.Contains("paid") ? amount : 0,
+                ["projectNotes"] = $"Draft built from uploaded proof. Verify every copied field before saving. Proof: {proof}",
                 ["sourceProof"] = proof,
-                ["needsReview"] = true
+                ["lineItems"] = amount.HasValue
+                    ? new[]
+                    {
+                        new Dictionary<string, object?>
+                        {
+                            ["description"] = product ?? "Uploaded invoice item",
+                            ["details"] = "Copied from uploaded proof. Review description, quantity, rate, and total.",
+                            ["quantity"] = 1,
+                            ["rate"] = amount,
+                            ["amount"] = amount
+                        }
+                    }
+                    : Array.Empty<Dictionary<string, object?>>()
             }),
         "estimate" => new InboxSuggestionLane(
             "Estimate",
             "Likely estimate/quote proof",
-            "Use the estimate builder or create a customer job if this quote was created outside the app.",
+            "Create a draft Estimate from the extracted fields, review it, then save only if you want this old quote tracked in the app.",
             "estimates",
             null,
             null,
-            new Dictionary<string, object?>()),
+            new Dictionary<string, object?>
+            {
+                ["docType"] = "ESTIMATE",
+                ["docNumber"] = invoiceNumber ?? orderNumber,
+                ["docDate"] = date ?? today,
+                ["dueDate"] = DateTime.TryParse(date, out var estimateDate) ? estimateDate.AddDays(14).ToString("yyyy-MM-dd") : DateTime.Today.AddDays(14).ToString("yyyy-MM-dd"),
+                ["docStatus"] = "Draft",
+                ["projectName"] = product,
+                ["projectNotes"] = $"Draft built from uploaded proof. Verify every copied field before saving. Proof: {proof}",
+                ["sourceProof"] = proof,
+                ["lineItems"] = amount.HasValue
+                    ? new[]
+                    {
+                        new Dictionary<string, object?>
+                        {
+                            ["description"] = product ?? "Uploaded estimate item",
+                            ["details"] = "Copied from uploaded proof. Review description, quantity, rate, and total.",
+                            ["quantity"] = 1,
+                            ["rate"] = amount,
+                            ["amount"] = amount
+                        }
+                    }
+                    : Array.Empty<Dictionary<string, object?>>()
+            }),
         "shipping" => new InboxSuggestionLane(
             "Shipping / Sale Cost",
             "Likely shipping label or postage",
@@ -1730,6 +2024,39 @@ static IResult Csv(string fileName, string csv)
     return Results.File(Encoding.UTF8.GetBytes(csv), "text/csv", fileName);
 }
 
+static string PaymentChannelFor(Sale sale)
+{
+    var method = (sale.PaymentMethod ?? string.Empty).Trim().ToLowerInvariant();
+    var platform = (sale.Platform ?? string.Empty).Trim().ToLowerInvariant();
+    if (method == "cash") return "Cash";
+    if (new[] { "zelle", "venmo", "cash app", "paypal", "ach", "bank transfer", "wire" }.Any(method.Contains))
+        return "Digital Transfer";
+    if (new[] { "credit card", "debit card", "card", "square", "stripe" }.Any(method.Contains))
+        return "Credit / Debit Card";
+    if (new[] { "etsy", "makerworld", "online marketplace", "shopify", "ebay", "amazon", "website", "online" }.Any(method.Contains)
+        || new[] { "etsy", "makerworld", "shopify", "ebay", "amazon", "online" }.Any(platform.Contains))
+        return "Online Marketplace";
+    if (!string.IsNullOrWhiteSpace(method) && method is not "unknown" and not "unknown / review")
+        return "Other Non-Cash";
+    return "Unknown / Review";
+}
+
+static bool PaymentChannelMatches(string paymentChannel, string? requested)
+{
+    return (requested ?? "all").Trim().ToLowerInvariant() switch
+    {
+        "" or "all" => true,
+        "noncash" or "non-cash" => paymentChannel is not "Cash" and not "Unknown / Review",
+        "digital" or "transfer" or "digital-transfer" => paymentChannel == "Digital Transfer",
+        "card" or "credit-card" or "credit-debit-card" => paymentChannel == "Credit / Debit Card",
+        "online" or "marketplace" or "online-marketplace" => paymentChannel == "Online Marketplace",
+        "cash" => paymentChannel == "Cash",
+        "unknown" or "review" => paymentChannel == "Unknown / Review",
+        "other" or "other-noncash" or "other-non-cash" => paymentChannel == "Other Non-Cash",
+        _ => true
+    };
+}
+
 static void NormalizeCrudEntity<TEntity>(TEntity entity) where TEntity : AuditableEntity
 {
     ApplyDefaultClockToBusinessDates(entity);
@@ -1751,6 +2078,7 @@ static void NormalizeCrudEntity<TEntity>(TEntity entity) where TEntity : Auditab
             expense.SalesTax = ClampMoney(expense.SalesTax);
             expense.Total = (expense.Amount ?? 0) + (expense.SalesTax ?? 0);
             expense.BusinessUsePercent = ClampPercent(expense.BusinessUsePercent);
+            if (string.IsNullOrWhiteSpace(expense.TaxCategory)) expense.TaxCategory = "Other business expense";
             break;
         case ReceivableInvoice invoice:
             invoice.Subtotal = ClampMoney(invoice.Subtotal);
@@ -1792,6 +2120,30 @@ static void NormalizeCrudEntity<TEntity>(TEntity entity) where TEntity : Auditab
             {
                 sale.IncludeInDashboard = false;
             }
+            if (string.IsNullOrWhiteSpace(sale.PaymentMethod))
+            {
+                sale.PaymentMethod = PaymentChannelFor(sale) == "Online Marketplace"
+                    ? $"{sale.Platform} Payments"
+                    : "Unknown / Review";
+            }
+            if (string.IsNullOrWhiteSpace(sale.SalesTaxHandling))
+            {
+                sale.SalesTaxHandling = "Unknown / Review";
+            }
+            break;
+        case TaxObligation obligation:
+            obligation.EstimatedAmount = ClampMoney(obligation.EstimatedAmount);
+            obligation.AmountPaid = ClampMoney(obligation.AmountPaid);
+            obligation.TaxYear = obligation.TaxYear is >= 2000 and <= 2200 ? obligation.TaxYear : DateTime.Today.Year;
+            if (obligation.Status.Equals("Filed / Paid", StringComparison.OrdinalIgnoreCase)
+                || obligation.Status.Equals("Not Required", StringComparison.OrdinalIgnoreCase))
+            {
+                obligation.NeedsReview = false;
+            }
+            break;
+        case MileageLog mileage:
+            mileage.BusinessMiles = ClampMoney(mileage.BusinessMiles);
+            mileage.ParkingAndTolls = ClampMoney(mileage.ParkingAndTolls);
             break;
         case CustomerJob job:
             job.QuoteAmount = ClampMoney(job.QuoteAmount);
@@ -2190,6 +2542,7 @@ static async Task<InvoiceDocument?> DuplicateInvoiceDocumentAsync(AppDbContext d
         Total = source.Total,
         AmountPaid = 0,
         Balance = docType == "INVOICE" ? source.Total : 0,
+        PaymentMethod = source.PaymentMethod,
         PricingGuide = source.PricingGuide,
         TermsNotes = docType == "INVOICE" ? "Payment due by the due date shown above." : source.TermsNotes,
         StandardTurnaround = source.StandardTurnaround,
@@ -2453,6 +2806,57 @@ static string MakeSafeFileName(string fileName)
     return string.IsNullOrWhiteSpace(name) ? "uploaded-document" : name;
 }
 
+static string ContentTypeForFile(string filePath)
+{
+    return Path.GetExtension(filePath).ToLowerInvariant() switch
+    {
+        ".pdf" => "application/pdf",
+        ".png" => "image/png",
+        ".jpg" or ".jpeg" => "image/jpeg",
+        ".webp" => "image/webp",
+        ".gif" => "image/gif",
+        ".svg" => "image/svg+xml",
+        ".txt" => "text/plain; charset=utf-8",
+        ".csv" => "text/csv; charset=utf-8",
+        ".json" => "application/json; charset=utf-8",
+        ".md" => "text/markdown; charset=utf-8",
+        _ => "application/octet-stream"
+    };
+}
+
+static bool IsAllowedProofFilePath(string contentRootPath, string fullPath)
+{
+    if (!Path.IsPathFullyQualified(fullPath)) return false;
+
+    var roots = new List<string>
+    {
+        Path.GetFullPath(contentRootPath),
+        Path.GetFullPath(Path.Combine(contentRootPath, "UploadedDocs"))
+    };
+
+    var current = new DirectoryInfo(contentRootPath);
+    while (current is not null)
+    {
+        if (current.Name.Equals("__EPATA 3D Print Business Folder", StringComparison.OrdinalIgnoreCase))
+        {
+            roots.Add(current.FullName);
+            break;
+        }
+
+        current = current.Parent;
+    }
+
+    return roots.Distinct(StringComparer.OrdinalIgnoreCase).Any(root =>
+    {
+        var normalized = Path.GetFullPath(root);
+        var rootWithSeparator = normalized.EndsWith(Path.DirectorySeparatorChar)
+            ? normalized
+            : normalized + Path.DirectorySeparatorChar;
+        return fullPath.Equals(normalized, StringComparison.OrdinalIgnoreCase)
+            || fullPath.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase);
+    });
+}
+
 static string AppendNote(string? existing, string note)
 {
     if (string.IsNullOrWhiteSpace(existing))
@@ -2651,6 +3055,7 @@ static async Task EnsureUnifiedInvoiceTablesAsync(AppDbContext db)
             "Total" TEXT NOT NULL DEFAULT '0.0',
             "AmountPaid" TEXT NOT NULL DEFAULT '0.0',
             "Balance" TEXT NOT NULL DEFAULT '0.0',
+            "PaymentMethod" TEXT NOT NULL DEFAULT 'Unknown / Review',
             "PricingGuide" TEXT NULL,
             "TermsNotes" TEXT NULL,
             "StandardTurnaround" TEXT NULL,
@@ -2708,11 +3113,59 @@ static async Task EnsureUnifiedInvoiceTablesAsync(AppDbContext db)
         );
         """);
 
+    await db.Database.ExecuteSqlRawAsync("""
+        CREATE TABLE IF NOT EXISTS "TaxObligations" (
+            "Id" INTEGER NOT NULL CONSTRAINT "PK_TaxObligations" PRIMARY KEY AUTOINCREMENT,
+            "TaxYear" INTEGER NOT NULL,
+            "Title" TEXT NOT NULL,
+            "Jurisdiction" TEXT NOT NULL DEFAULT 'Federal',
+            "ObligationType" TEXT NOT NULL DEFAULT 'Other',
+            "FormName" TEXT NULL,
+            "Period" TEXT NULL,
+            "DueDate" TEXT NULL,
+            "Status" TEXT NOT NULL DEFAULT 'Review Applicability',
+            "EstimatedAmount" TEXT NULL,
+            "AmountPaid" TEXT NULL,
+            "PaidOrFiledDate" TEXT NULL,
+            "ConfirmationNumber" TEXT NULL,
+            "ProofReference" TEXT NULL,
+            "OfficialUrl" TEXT NULL,
+            "AppliesIf" TEXT NULL,
+            "NeedsReview" INTEGER NOT NULL DEFAULT 1,
+            "Notes" TEXT NULL,
+            "CreatedAtUtc" TEXT NOT NULL,
+            "UpdatedAtUtc" TEXT NOT NULL,
+            "IsArchived" INTEGER NOT NULL DEFAULT 0
+        );
+        """);
+
+    await db.Database.ExecuteSqlRawAsync("""
+        CREATE TABLE IF NOT EXISTS "MileageLogs" (
+            "Id" INTEGER NOT NULL CONSTRAINT "PK_MileageLogs" PRIMARY KEY AUTOINCREMENT,
+            "TripDate" TEXT NULL,
+            "Vehicle" TEXT NULL,
+            "StartLocation" TEXT NULL,
+            "EndLocation" TEXT NULL,
+            "BusinessPurpose" TEXT NOT NULL,
+            "BusinessMiles" TEXT NULL,
+            "ParkingAndTolls" TEXT NULL,
+            "ProofReference" TEXT NULL,
+            "NeedsReview" INTEGER NOT NULL DEFAULT 0,
+            "Notes" TEXT NULL,
+            "CreatedAtUtc" TEXT NOT NULL,
+            "UpdatedAtUtc" TEXT NOT NULL,
+            "IsArchived" INTEGER NOT NULL DEFAULT 0
+        );
+        """);
+
     await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_InvoiceDocuments_DocNumber\" ON \"InvoiceDocuments\" (\"DocNumber\");");
     await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_InvoiceDocuments_UpdatedAt\" ON \"InvoiceDocuments\" (\"UpdatedAt\");");
     await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_InvoiceLineItems_InvoiceDocumentId\" ON \"InvoiceLineItems\" (\"InvoiceDocumentId\");");
     await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_InvoiceDocumentEvents_InvoiceDocumentId\" ON \"InvoiceDocumentEvents\" (\"InvoiceDocumentId\");");
     await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_InvoiceDocumentEvents_CreatedAt\" ON \"InvoiceDocumentEvents\" (\"CreatedAt\");");
+    await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_TaxObligations_DueDate\" ON \"TaxObligations\" (\"DueDate\");");
+    await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_TaxObligations_TaxYear_Title_Period\" ON \"TaxObligations\" (\"TaxYear\", \"Title\", \"Period\");");
+    await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_MileageLogs_TripDate\" ON \"MileageLogs\" (\"TripDate\");");
 
     // ── Schema migrations for new fields (safe on existing DBs) ──────────────
     var alterations = new[]
@@ -2722,6 +3175,7 @@ static async Task EnsureUnifiedInvoiceTablesAsync(AppDbContext db)
         "ALTER TABLE \"Expenses\" ADD COLUMN \"DeductibleStatus\" TEXT NOT NULL DEFAULT 'Yes'",
         "ALTER TABLE \"Expenses\" ADD COLUMN \"BusinessUsePercent\" TEXT NULL",
         "ALTER TABLE \"Expenses\" ADD COLUMN \"CountedExpense\" INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE \"Expenses\" ADD COLUMN \"TaxCategory\" TEXT NOT NULL DEFAULT 'Other business expense'",
         // Assets
         "ALTER TABLE \"Assets\" ADD COLUMN \"InServiceDate\" TEXT NULL",
         "ALTER TABLE \"Assets\" ADD COLUMN \"TaxTreatment\" TEXT NOT NULL DEFAULT 'Review'",
@@ -2729,6 +3183,10 @@ static async Task EnsureUnifiedInvoiceTablesAsync(AppDbContext db)
         "ALTER TABLE \"Assets\" ADD COLUMN \"NotYetExpensed\" TEXT NULL",
         // MakerWorld
         "ALTER TABLE \"MakerWorldRewards\" ADD COLUMN \"IncomeStatus\" TEXT NOT NULL DEFAULT 'Review'",
+        // Payment-channel tax exports
+        "ALTER TABLE \"Sales\" ADD COLUMN \"PaymentMethod\" TEXT NOT NULL DEFAULT 'Unknown / Review'",
+        "ALTER TABLE \"Sales\" ADD COLUMN \"SalesTaxHandling\" TEXT NOT NULL DEFAULT 'Unknown / Review'",
+        "ALTER TABLE \"InvoiceDocuments\" ADD COLUMN \"PaymentMethod\" TEXT NOT NULL DEFAULT 'Unknown / Review'",
         // Unified invoice/estimate archive safety
         "ALTER TABLE \"InvoiceDocuments\" ADD COLUMN \"IsArchived\" INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE \"InvoiceDocuments\" ADD COLUMN \"ArchivedAt\" TEXT NULL",
@@ -2805,8 +3263,12 @@ static async Task NormalizeInvoiceDocumentRowsAsync(AppDbContext db)
         var taxable = MoneyRules.InvoiceTaxableSalesBase(subtotal, discount, rush);
         var tax = taxRate > 0 ? taxable * taxRate / 100m : Math.Max(0, doc.TaxAmount);
         var total = taxable + tax;
-        var paid = doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase) ? Math.Min(Math.Max(0, doc.AmountPaid), total) : 0;
-        var balance = doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase) ? Math.Max(0, total - paid) : 0;
+        var paid = doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase) && !doc.Status.Equals("Void", StringComparison.OrdinalIgnoreCase)
+            ? Math.Min(Math.Max(0, doc.AmountPaid), total)
+            : 0;
+        var balance = doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase) && !doc.Status.Equals("Void", StringComparison.OrdinalIgnoreCase)
+            ? Math.Max(0, total - paid)
+            : 0;
 
         if (Math.Abs(doc.Subtotal - subtotal) > 0.02m
             || Math.Abs(doc.DiscountAmount - discount) > 0.02m
@@ -3129,6 +3591,7 @@ static void ApplyInvoiceDocumentRequest(InvoiceDocument doc, SaveInvoiceDocument
     doc.PageSize = request.PageSize;
     doc.DocDate = request.DocDate;
     doc.DueDate = request.DueDate;
+    doc.PaymentMethod = string.IsNullOrWhiteSpace(request.PaymentMethod) ? "Unknown / Review" : request.PaymentMethod;
     doc.PricingGuide = request.PricingGuide;
     doc.TermsNotes = request.TermsNotes;
     doc.StandardTurnaround = request.StandardTurnaround;
@@ -3186,6 +3649,10 @@ static void NormalizeInvoiceDocumentMoney(InvoiceDocument doc, SaveInvoiceDocume
             doc.Status = "Accepted";
         }
     }
+    else if (doc.Status.Equals("Void", StringComparison.OrdinalIgnoreCase))
+    {
+        paid = 0;
+    }
     else if (doc.Status.Equals("Paid", StringComparison.OrdinalIgnoreCase) && paid <= 0 && total > 0)
     {
         paid = total;
@@ -3197,7 +3664,7 @@ static void NormalizeInvoiceDocumentMoney(InvoiceDocument doc, SaveInvoiceDocume
     doc.TaxAmount = tax;
     doc.Total = total;
     doc.AmountPaid = doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase) ? Math.Min(paid, total) : 0;
-    doc.Balance = doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase)
+    doc.Balance = doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase) && !doc.Status.Equals("Void", StringComparison.OrdinalIgnoreCase)
         ? Math.Max(0, total - doc.AmountPaid)
         : 0;
 }
@@ -3221,6 +3688,10 @@ static void NormalizeExistingInvoiceDocumentMoney(InvoiceDocument doc)
     {
         doc.Status = "Accepted";
     }
+    else if (doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase) && doc.Status.Equals("Void", StringComparison.OrdinalIgnoreCase))
+    {
+        paid = 0;
+    }
     else if (doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase) && doc.Status.Equals("Paid", StringComparison.OrdinalIgnoreCase) && paid <= 0 && total > 0)
     {
         paid = total;
@@ -3232,7 +3703,9 @@ static void NormalizeExistingInvoiceDocumentMoney(InvoiceDocument doc)
     doc.TaxAmount = tax;
     doc.Total = total;
     doc.AmountPaid = doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase) ? paid : 0;
-    doc.Balance = doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase) ? Math.Max(0, total - paid) : 0;
+    doc.Balance = doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase) && !doc.Status.Equals("Void", StringComparison.OrdinalIgnoreCase)
+        ? Math.Max(0, total - paid)
+        : 0;
 }
 
 static async Task SyncUnifiedInvoiceDocumentToLedgerAsync(AppDbContext db, InvoiceDocument doc)
@@ -3350,6 +3823,7 @@ static async Task SyncInvoicePaymentToSaleAsync(AppDbContext db, InvoiceDocument
     sale.SaleDate = ParseDate(doc.DocDate) ?? sale.SaleDate ?? DateTime.Today;
     sale.CustomerName = doc.CustomerName ?? sale.CustomerName;
     sale.ProductName = doc.ProjectName ?? sale.ProductName;
+    sale.PaymentMethod = string.IsNullOrWhiteSpace(doc.PaymentMethod) ? "Unknown / Review" : doc.PaymentMethod;
     sale.Color = doc.Color ?? sale.Color;
     sale.Quantity = 1;
     sale.ItemSales = allocated.SalesBase;
@@ -3451,6 +3925,7 @@ static object ToInvoiceDocumentDto(InvoiceDocument doc) => new
     doc.Total,
     doc.AmountPaid,
     doc.Balance,
+    doc.PaymentMethod,
     doc.PricingGuide,
     doc.TermsNotes,
     doc.StandardTurnaround,
@@ -3531,6 +4006,7 @@ public sealed record SaveInvoiceDocumentRequest(
     decimal Total,
     decimal AmountPaid,
     decimal Balance,
+    string? PaymentMethod,
     string? PricingGuide,
     string? TermsNotes,
     string? StandardTurnaround,
@@ -3620,3 +4096,27 @@ public sealed record InvoiceDocumentAuditState(
     string LineSignature);
 
 public sealed record TaxAuditIssue(string Severity, string Title, string Record, string Detail);
+
+public sealed record TaxSaleExportRow(
+    int Id,
+    DateTime? SaleDate,
+    string Platform,
+    string PaymentMethod,
+    string PaymentGroup,
+    string SalesTaxHandling,
+    string? OrderNumber,
+    string? InvoiceNumber,
+    string CustomerName,
+    string ProductName,
+    decimal? ItemSales,
+    decimal? ShippingCharged,
+    decimal? SalesTaxCollected,
+    decimal? CustomerPaid,
+    decimal? PlatformFees,
+    decimal? ShippingLabelCost,
+    decimal? Refunds,
+    decimal? EstimatedCogs,
+    string Status,
+    string? SourceProof,
+    bool NeedsReview,
+    string? Notes);

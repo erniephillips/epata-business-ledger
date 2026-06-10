@@ -5,20 +5,27 @@ const appState = {
   invoicePdfModule: null,
   invoiceToolSnapshot: null,
   invoiceToolPrefill: null,
+  aiEstimateDraft: null,
+  aiReviewModelResult: null,
+  localAiHeaderTimer: null,
   documentIntakePrefill: null,
   timelineQuery: '',
   timelineCustomer: '',
   timelineSort: 'lastActivityDesc',
   timelineTimer: null,
+  taxYear: new Date().getFullYear(),
   pageHistory: [],
   suppressPopState: false
 };
 
-const moneyFields = new Set(['itemSales','shippingCharged','salesTaxCollected','customerPaid','platformFees','shippingLabelCost','refunds','estimatedCogs','subtotal','discount','rushFee','salesTax','invoiceTotal','amountPaid','balanceDue','amount','total','openingBalance','currentBalance','cost','giftCardAmount','quoteAmount','invoiceAmount','targetPrice','grams','materialCostPerGram','printHours','machineRatePerHour','packagingCost','designMinutes','rewardValue','pointsValue','notYetExpensed','netBeforeCogs','estNetAfterCogs']);
-const dateFields = new Set(['saleDate','shipByDate','invoiceDate','dueDate','billDate','paymentDate','expenseDate','purchaseDate','warrantyEndDate','rewardDate','documentDate','jobDate','createdAtUtc','updatedAtUtc','createdAt','updatedAt','lastActivity']);
+const sidebarPreferenceKey = 'epataSidebarCollapsed';
+
+const moneyFields = new Set(['itemSales','shippingCharged','salesTaxCollected','customerPaid','platformFees','shippingLabelCost','refunds','estimatedCogs','subtotal','discount','rushFee','salesTax','invoiceTotal','amountPaid','balanceDue','amount','total','openingBalance','currentBalance','cost','giftCardAmount','quoteAmount','invoiceAmount','targetPrice','grams','materialCostPerGram','printHours','machineRatePerHour','packagingCost','designMinutes','rewardValue','pointsValue','notYetExpensed','netBeforeCogs','estNetAfterCogs','estimatedAmount','parkingAndTolls']);
+const dateFields = new Set(['saleDate','shipByDate','invoiceDate','dueDate','billDate','paymentDate','expenseDate','purchaseDate','warrantyEndDate','rewardDate','documentDate','jobDate','tripDate','paidOrFiledDate','createdAtUtc','updatedAtUtc','createdAt','updatedAt','lastActivity']);
 
 const commonOptions = {
   platform: ['Direct','Etsy','MakerWorld','Local','Other'],
+  paymentMethod: ['Unknown / Review','Cash','Zelle','Venmo','Cash App','PayPal','ACH / Bank Transfer','Check','Credit Card','Debit Card','Etsy Payments','MakerWorld','Online Marketplace','Other Non-Cash'],
   yesNo: ['Yes','No'],
   partyType: ['Customer','Vendor','Both'],
   saleStatus: ['Draft','Paid','Fulfilled','Refunded','Needs Review'],
@@ -27,6 +34,10 @@ const commonOptions = {
   jobStatus: ['Lead','Quoted','Open','In Progress','Invoiced','Completed','Paid','Cancelled'],
   priority: ['Low','Normal','High'],
   actionStatus: ['Open','Waiting','Done'],
+  taxObligationStatus: ['Review Applicability','Not Started','Ready to File / Pay','Filed / Paid','Not Required'],
+  yesNoUnknown: ['Not confirmed','Yes','No'],
+  salesTaxHandling: ['Unknown / Review','Marketplace Collected / Remitted','Seller Collected','Exempt / Not Taxable','No Tax Collected / Review'],
+  taxCategories: ['Advertising','Car and truck expenses','Commissions and fees','Contract labor','Employee benefit programs','Insurance','Interest','Legal and professional services','Office expense','Pension and profit-sharing','Rent or lease','Repairs and maintenance','Supplies','Taxes and licenses','Travel','Deductible meals','Utilities','Wages','COGS / materials','Other business expense','Review'],
   categories: ['Filament / Material','Shipping / Postage','Packaging','Marketplace Fees','Software','Tools','Equipment','Advertising','Office Supplies','General Business','Tax / Government','Other'],
   accountType: ['Cash','Checking','Credit Card','Etsy','Gift Card','Other'],
   documentType: ['Receipt','Invoice','Etsy Order','Tax','Bank','Photo Proof','Customer Message','Other']
@@ -90,10 +101,12 @@ const configs = {
     title: 'Sales / Income',
     nav: 'Sales',
     purpose: 'Use this for actual sales and paid customer orders. Etsy orders and paid direct invoices go here. Draft quotes do not belong here until paid.',
-    columns: ['saleDate','platform','orderNumber','customerName','productName','customerPaid','platformFees','estimatedCogs','netBeforeCogs','estNetAfterCogs','status','needsReview'],
+    columns: ['saleDate','platform','paymentMethod','orderNumber','customerName','productName','customerPaid','platformFees','estimatedCogs','netBeforeCogs','estNetAfterCogs','status','needsReview'],
     fields: [
       f('saleDate','Sale Date','date','Order date or paid date.'),
       f('platform','Platform','select','Where the sale happened.', commonOptions.platform),
+      f('paymentMethod','Payment Method','select','How the customer paid. This drives payment-channel tax exports.', commonOptions.paymentMethod),
+      f('salesTaxHandling','Sales Tax Handling','select','Who handled sales tax for this sale. Confirm marketplace-remitted versus seller-collected before filing NJ sales tax.', commonOptions.salesTaxHandling),
       f('orderNumber','Order #','text','Etsy order number or external order ID.'),
       f('invoiceNumber','Invoice #','text','Your direct invoice number if applicable.'),
       f('customerName','Customer Name','text','Customer who paid.'),
@@ -159,6 +172,7 @@ const configs = {
       f('billDate','Bill Date','date','Date on the bill.'),
       f('dueDate','Due Date','date','When payment is due.'),
       f('category','Category','select','Expense category.', commonOptions.categories),
+      f('taxCategory','Tax Return Category','select','Accountant/tax-software category for this expense. Keep Review until confirmed.', commonOptions.taxCategories),
       f('description','Description','text','What the bill is for.'),
       f('amount','Amount Before Tax','number','Pre-tax amount.'),
       f('salesTax','Sales Tax','number','Tax paid to vendor.'),
@@ -335,6 +349,51 @@ const configs = {
       f('relatedRecord','Related Record','text','Order #, invoice #, customer name, etc.'),
       f('notes','Notes','textarea','Details and next step.', null, 'full')
     ]
+  },
+  taxObligations: {
+    route: 'tax-obligations',
+    title: 'Tax Obligations / Filing & Payment Tracker',
+    nav: 'Tax Obligations',
+    purpose: 'Track possible and confirmed tax filings, payments, annual fees, confirmation numbers, and proof. Mark Not Required only after confirming that an obligation does not apply.',
+    columns: ['dueDate','jurisdiction','title','period','status','estimatedAmount','amountPaid','needsReview'],
+    fields: [
+      f('taxYear','Tax Year','number','Year the obligation belongs to.'),
+      f('title','Obligation','text','Filing, payment, annual report, fee, or review item.'),
+      f('jurisdiction','Jurisdiction','select','Agency or government level.', ['Federal','New Jersey','Federal / New Jersey','Local','Other']),
+      f('obligationType','Type','select','Kind of obligation.', ['Estimated Income Tax','Annual Income Tax','Sales Tax','Annual Report / Fee','Payroll / Information Returns','License / Permit','Other']),
+      f('formName','Form / Filing','text','Example: 1040-ES, NJ-1040-ES, ST-50, Annual Report.'),
+      f('period','Period','text','Example: Q2 or Annual.'),
+      f('dueDate','Due Date','date','Official due date. Confirm dates if circumstances or extensions change.'),
+      f('status','Status','select','Review applicability first, then track filing/payment.', commonOptions.taxObligationStatus),
+      f('estimatedAmount','Estimated Amount','number','Working estimate or expected fee.'),
+      f('amountPaid','Amount Paid','number','Actual payment amount.'),
+      f('paidOrFiledDate','Filed / Paid Date','date','Date filed or paid.'),
+      f('confirmationNumber','Confirmation #','text','Agency confirmation or payment reference.'),
+      f('proofReference','Proof / Receipt','text','Saved filing receipt, payment confirmation, or document path.'),
+      f('officialUrl','Official URL','text','Official agency page or filing portal.'),
+      f('appliesIf','Applies If','textarea','Condition that determines whether this obligation applies.', null, 'full'),
+      f('needsReview','Needs Review','checkbox','Keep checked until applicability, filing, payment, and proof are confirmed.'),
+      f('notes','Notes','textarea','Questions, extension details, preparer notes, or next step.', null, 'full')
+    ]
+  },
+  mileage: {
+    route: 'mileage-logs',
+    title: 'Business Mileage Log',
+    nav: 'Mileage Log',
+    purpose: 'Track business trips while details are fresh. Record purpose, miles, parking/tolls, and support. Confirm the correct mileage method/rate before filing.',
+    columns: ['tripDate','vehicle','businessPurpose','businessMiles','parkingAndTolls','needsReview'],
+    fields: [
+      f('tripDate','Trip Date','date','Date of the business trip.'),
+      f('vehicle','Vehicle','text','Vehicle used.'),
+      f('startLocation','Start','text','Starting location.'),
+      f('endLocation','End','text','Destination.'),
+      f('businessPurpose','Business Purpose','text','Why this trip was ordinary and necessary for the business.'),
+      f('businessMiles','Business Miles','number','Business miles for this trip.'),
+      f('parkingAndTolls','Parking & Tolls','number','Business parking and toll costs.'),
+      f('proofReference','Proof / Support','text','Calendar, receipt, map, mileage app export, or other support.'),
+      f('needsReview','Needs Review','checkbox','Use when purpose, miles, or support still needs confirmation.'),
+      f('notes','Notes','textarea','Additional route or business-purpose details.', null, 'full')
+    ]
   }
 };
 
@@ -349,6 +408,7 @@ const navGroups = [
       ['pricingCalculator','Calculator','calculator'],
       ['invoiceRecords','Invoice Records','folder'],
       ['jobTimeline','Job Timeline','clock'],
+      ['aiEstimate','AI Estimate Intake','sparkles'],
       ['documentIntake','Document Intake','upload']
     ]
   },
@@ -376,9 +436,13 @@ const navGroups = [
   {
     label: 'Control',
     items: [
+      ['aiReview','AI Review Center','scan-search'],
+      ['localAi','Local AI Power','settings'],
       ['auditDocs',configs.auditDocs.nav,'file-search'],
       ['actions',configs.actions.nav,'alert-circle'],
       ['taxPrep','Tax Prep','percent'],
+      ['taxObligations',configs.taxObligations.nav,'calendar-check'],
+      ['mileage',configs.mileage.nav,'route'],
       ['importExport','Import / Export','refresh-cw'],
       ['admin','Admin / Data','settings'],
       ['ledgerMap','Ledger Map','map'],
@@ -395,6 +459,14 @@ function f(name, label, type, tip, options = null, span = null) {
 function qs(sel) { return document.querySelector(sel); }
 function qsa(sel) { return [...document.querySelectorAll(sel)]; }
 window.openLedgerEntityRecord = openLedgerEntityRecord;
+window.openCustomerDetail = name => {
+  const clean = String(name || '').trim();
+  if (clean) showPage(`customerDetail:${encodeURIComponent(clean)}`);
+};
+window.openVendorDetail = name => {
+  const clean = String(name || '').trim();
+  if (clean) showPage(`vendorDetail:${encodeURIComponent(clean)}`);
+};
 
 async function openLedgerEntityRecord(page, id) {
   const config = configs[page];
@@ -497,8 +569,60 @@ function renderNav() {
     </div>`).join('');
   nav.addEventListener('click', e => {
     const btn = e.target.closest('button[data-page]');
-    if (btn) showPage(btn.dataset.page);
+    if (btn) {
+      closeMobileSidebar();
+      showPage(btn.dataset.page);
+    }
   });
+}
+
+function isMobileSidebar() {
+  return window.matchMedia('(max-width: 760px)').matches;
+}
+
+function updateSidebarToggle() {
+  const toggle = qs('#sidebarToggle');
+  if (!toggle) return;
+  const mobile = isMobileSidebar();
+  const expanded = mobile
+    ? document.body.classList.contains('sidebar-open')
+    : !document.body.classList.contains('sidebar-collapsed');
+  toggle.setAttribute('aria-expanded', String(expanded));
+  toggle.title = mobile
+    ? (expanded ? 'Close menu' : 'Open menu')
+    : (expanded ? 'Collapse menu' : 'Expand menu');
+  const icon = toggle.querySelector('.sidebar-toggle-icon');
+  if (icon) icon.textContent = mobile ? (expanded ? '×' : '☰') : (expanded ? '←' : '→');
+}
+
+function closeMobileSidebar() {
+  document.body.classList.remove('sidebar-open');
+  updateSidebarToggle();
+}
+
+function toggleSidebar() {
+  if (isMobileSidebar()) {
+    document.body.classList.toggle('sidebar-open');
+  } else {
+    const collapsed = document.body.classList.toggle('sidebar-collapsed');
+    localStorage.setItem(sidebarPreferenceKey, String(collapsed));
+  }
+  updateSidebarToggle();
+}
+
+function initializeSidebar() {
+  const saved = localStorage.getItem(sidebarPreferenceKey);
+  const startCollapsed = saved === null
+    ? window.matchMedia('(max-width: 1120px)').matches
+    : saved === 'true';
+  document.body.classList.toggle('sidebar-collapsed', startCollapsed);
+  qs('#sidebarToggle')?.addEventListener('click', toggleSidebar);
+  qs('#sidebarScrim')?.addEventListener('click', closeMobileSidebar);
+  window.addEventListener('resize', () => {
+    if (!isMobileSidebar()) document.body.classList.remove('sidebar-open');
+    updateSidebarToggle();
+  });
+  updateSidebarToggle();
 }
 
 async function showPage(page, options = {}) {
@@ -510,19 +634,32 @@ async function showPage(page, options = {}) {
     if (appState.pageHistory.length > 60) appState.pageHistory.shift();
   }
   const invoicePages = ['invoiceCenter','estimates','invoices','pricingCalculator','invoiceRecords'];
-  const movingWithinInvoiceTool = invoicePages.includes(appState.currentPage) && invoicePages.includes(page);
-  if (movingWithinInvoiceTool && window._invoiceToolSnapshot) {
+  const leavingInvoiceTool = invoicePages.includes(previousPage);
+  const enteringInvoiceTool = invoicePages.includes(page);
+  const movingWithinInvoiceTool = leavingInvoiceTool && enteringInvoiceTool;
+  if (movingWithinInvoiceTool && !options.resetInvoiceTool && window._invoiceToolSnapshot) {
     appState.invoiceToolSnapshot = window._invoiceToolSnapshot() || appState.invoiceToolSnapshot;
-  } else if (!invoicePages.includes(page)) {
+  } else if (!enteringInvoiceTool || options.resetInvoiceTool) {
     appState.invoiceToolSnapshot = null;
   }
 
   appState.currentPage = page;
   syncBrowserHistory(page, options);
   updateBackButton();
-  toggleMergedInvoiceStyles(invoicePages.includes(page));
+  toggleMergedInvoiceStyles(enteringInvoiceTool);
   if (page !== 'globalSearch') qs('#globalSearch').value = '';
   qsa('.nav-button').forEach(b => b.classList.toggle('active', b.dataset.page === page));
+
+  // These routes are views of one document workspace. Keeping it mounted
+  // preserves the active saved record, customer fields, calculator, and edits.
+  if (movingWithinInvoiceTool
+      && !options.resetInvoiceTool
+      && document.getElementById('epataInvoiceMerged')
+      && typeof window._invoiceToolShowView === 'function') {
+    window._invoiceToolShowView(invoiceRouteView(page));
+    return;
+  }
+
   const el = qs('#app');
   el.innerHTML = `<div class="card"><p>Loading...</p></div>`;
   try {
@@ -535,6 +672,9 @@ async function showPage(page, options = {}) {
     else if (page === 'pricingCalculator') await renderMergedInvoiceTool(el, 'calculator', '', appState.invoiceToolSnapshot);
     else if (page === 'invoiceRecords') await renderMergedInvoiceTool(el, 'records', '', appState.invoiceToolSnapshot);
     else if (page === 'jobTimeline') await renderJobTimeline(el);
+    else if (page === 'aiEstimate') await renderAiEstimateIntake(el);
+    else if (page === 'aiReview') await renderAiReviewCenter(el);
+    else if (page === 'localAi') await renderLocalAi(el);
     else if (page === 'customers') await renderRelationshipDirectory(el, 'customer');
     else if (page === 'vendors') await renderRelationshipDirectory(el, 'vendor');
     else if (page === 'ledgerMap') renderLedgerMap(el);
@@ -550,6 +690,16 @@ async function showPage(page, options = {}) {
   } catch (err) {
     el.innerHTML = `<div class="card"><h2>Something broke</h2><p>${escapeHtml(err.message)}</p></div>`;
   }
+}
+
+function invoiceRouteView(page) {
+  return {
+    invoiceCenter: 'dashboard',
+    estimates: 'builder',
+    invoices: 'builder',
+    pricingCalculator: 'calculator',
+    invoiceRecords: 'records'
+  }[page] || 'dashboard';
 }
 
 function milestonePulse(net) {
@@ -579,6 +729,7 @@ async function renderDashboard(el) {
       <div class="hero-actions">
         <button class="primary-button" onclick="showPage('quickAdd')">Add Transaction</button>
         <button class="ghost-button dark" onclick="showPage('documentIntake')">Upload Proof</button>
+        <button class="ghost-button dark" onclick="showPage('aiReview')">Open AI Review</button>
       </div>
     </section>
     <div class="page-head">
@@ -588,6 +739,7 @@ async function renderDashboard(el) {
       </div>
       <div class="actions">
         <button class="primary-button" onclick="showPage('quickAdd')">Quick Add</button>
+        <button class="ghost-button" onclick="showPage('aiReview')">AI Review Center</button>
         <button class="ghost-button" onclick="showPage('actions')">Review Actions</button>
       </div>
     </div>
@@ -701,6 +853,52 @@ function controlItem(label, value, detail, cls = '') {
 function emptyState(title, detail) {
   return `<div class="empty-state"><div class="empty-icon">◇</div><div class="empty-title">${escapeHtml(title)}</div><div class="empty-desc">${escapeHtml(detail)}</div></div>`;
 }
+function assistanceKind(engine) {
+  const value = String(engine || '').toLowerCase();
+  const explicitModel = value.includes('lm studio')
+    || value.includes('ai model')
+    || value.includes('local model')
+    || value.startsWith('ai ');
+  if (explicitModel && !value.includes('not ai')) return 'ai';
+  if (value.includes('local rules') || value.includes('rules') || value.includes('not ai')) return 'rules';
+  if (value.includes('automation') || value.includes('automated') || value.includes('synchron')) return 'automation';
+  return 'manual';
+}
+function assistanceIndicator(engine, detail = '') {
+  const kind = assistanceKind(engine);
+  const labels = {
+    ai: 'AI MODEL',
+    rules: 'LOCAL RULES',
+    automation: 'AUTOMATION',
+    manual: 'MANUAL / NONE'
+  };
+  const explanations = {
+    ai: 'A loaded language model interpreted selected content.',
+    rules: 'The app used fixed, repeatable local checks and patterns. This is not model AI.',
+    automation: 'The app followed a fixed synchronization or workflow rule after an explicit action.',
+    manual: 'No AI model or local-rule analysis produced this result.'
+  };
+  const source = detail || String(engine || '');
+  const title = `${explanations[kind]}${source ? ` Source: ${source}` : ''}`;
+  return `<span class="assistance-indicator ${kind}" title="${escapeHtml(title)}"><i aria-hidden="true"></i><b>${labels[kind]}</b>${source ? `<small>${escapeHtml(source)}</small>` : ''}</span>`;
+}
+function assistanceLegend() {
+  return `<div class="assistance-legend" aria-label="Assistance source key">
+    ${assistanceIndicator('AI model')}
+    ${assistanceIndicator('Local rules')}
+    ${assistanceIndicator('Automation')}
+  </div>`;
+}
+function aiTouchCard(engine, purpose, touches, writes, useWhen) {
+  return `<div class="ai-touch-card">
+    <div class="ai-touch-head">${assistanceIndicator(engine, engine)}<strong>${escapeHtml(purpose)}</strong></div>
+    <div class="ai-touch-grid">
+      <div><span>Touches</span><p>${escapeHtml(touches)}</p></div>
+      <div><span>Writes / changes</span><p>${escapeHtml(writes)}</p></div>
+      <div><span>Use it when</span><p>${escapeHtml(useWhen)}</p></div>
+    </div>
+  </div>`;
+}
 function lineChart(rows, labelKey, series) {
   if (!rows.length) return emptyState('No chart data yet.', 'Add sales to build chart history.');
   const width = 720, height = 260, pad = 34;
@@ -790,9 +988,12 @@ function navIcon(name) {
     'boxes': '<path d="M3 7l6-3 6 3-6 3zM9 10v7l-6-3V7M9 17l6-3V7"/><path d="M15 7l6 3-6 3M15 20l6-3v-7"/>',
     'printer': '<path d="M6 9V3h12v6"/><rect x="6" y="15" width="12" height="6"/><rect x="3" y="9" width="18" height="8" rx="2"/><path d="M7 13h0"/>',
     'gift': '<rect x="3" y="8" width="18" height="4"/><path d="M12 8v13M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/><path d="M12 8c-2.5 0-5-1-5-3a2 2 0 0 1 4 0c0 3-4 3-4 3M12 8c2.5 0 5-1 5-3a2 2 0 0 0-4 0c0 3 4 3 4 3"/>',
+    'scan-search': '<path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/><circle cx="11" cy="11" r="4"/><path d="M14 14l4 4"/>',
     'file-search': '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h7"/><path d="M14 3v6h6"/><circle cx="16" cy="16" r="3"/><path d="M18.2 18.2L21 21"/>',
     'alert-circle': '<circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 17h0"/>',
     'percent': '<path d="M19 5L5 19"/><circle cx="7" cy="7" r="2"/><circle cx="17" cy="17" r="2"/>',
+    'calendar-check': '<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18M8 15l2 2 5-5"/>',
+    'route': '<circle cx="6" cy="19" r="2"/><circle cx="18" cy="5" r="2"/><path d="M8 19h4a3 3 0 0 0 3-3V8M15 8l3-3 3 3"/>',
     'refresh-cw': '<path d="M21 12a9 9 0 0 1-15 6.7L3 16M3 12A9 9 0 0 1 18 5.3L21 8"/><path d="M3 16h5M16 8h5"/>',
     'settings': '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2 3-.2-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21h-3.4v-.2a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.2.1-2-3 .1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3v-3.4h.2a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9l-.1-.2 3-2 .1.2a1.7 1.7 0 0 0 1.9.3 1.7 1.7 0 0 0 1-1.5V3h3.4v.2a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.2-.1 3 2-.1.2a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.5 1h.2v3.4h-.2a1.7 1.7 0 0 0-1.5 1z"/>',
     'map': '<path d="M9 18l-6 3V6l6-3 6 3 6-3v15l-6 3z"/><path d="M9 3v15M15 6v15"/>',
@@ -1152,7 +1353,7 @@ async function renderRelationshipDirectory(el, mode) {
     ? buildCustomerRows(parties, sales, invoices, docs, jobs)
     : buildVendorRows(parties, expenses, bills, assets);
   const key = isCustomer ? 'customers-directory' : 'vendors-directory';
-  if (!tablePageState[key]) tablePageState[key] = { sortColumn: 'lastActivity', sortDir: 'desc' };
+  if (!tablePageState[key]) tablePageState[key] = { page: 0, pageSize: 25, sortColumn: 'lastActivity', sortDir: 'desc' };
   const state = tablePageState[key];
   const cols = isCustomer
     ? ['name','linkedRows','sources','salesTotal','invoiceTotal','openAr','lastActivity']
@@ -1238,17 +1439,54 @@ function renderRelationshipTable(rows, cols, mode, state, filter) {
   const config = { route: mode === 'customer' ? 'customers-directory' : 'vendors-directory', columns: cols, fields: [] };
   const sorted = sortRows(filtered, config, state);
   const target = qs('#relationshipTable');
+  if (filter !== state._lastFilter) {
+    state.page = 0;
+    state._lastFilter = filter;
+  }
   if (!sorted.length) {
     target.innerHTML = emptyState('No matching rows.', 'Clear the search or add a linked row.');
     return;
   }
+  const pageSize = state.pageSize || 25;
+  const totalPages = Math.max(1, Math.ceil(sorted.length / pageSize));
+  if (state.page >= totalPages) state.page = totalPages - 1;
+  if (state.page < 0) state.page = 0;
+  const pageRows = sorted.slice(state.page * pageSize, (state.page + 1) * pageSize);
+  const startRow = sorted.length ? (state.page * pageSize) + 1 : 0;
+  const endRow = Math.min(sorted.length, (state.page + 1) * pageSize);
+  const pagerHtml = `
+    <div class="table-pager relationship-pager">
+      <span class="pager-info">Showing ${startRow}-${endRow} of ${sorted.length} rows &nbsp;|&nbsp; Page ${state.page + 1} of ${totalPages}</span>
+      <span class="pager-controls">
+        <button class="ghost-button pager-btn" data-rel-page="first" ${state.page === 0 ? 'disabled' : ''}>«</button>
+        <button class="ghost-button pager-btn" data-rel-page="prev" ${state.page === 0 ? 'disabled' : ''}>‹ Prev</button>
+        <select class="pager-size" data-rel-page-size>
+          ${[25,50,100].map(n => `<option value="${n}"${n === pageSize ? ' selected' : ''}>${n} / page</option>`).join('')}
+        </select>
+        <button class="ghost-button pager-btn" data-rel-page="next" ${state.page >= totalPages - 1 ? 'disabled' : ''}>Next ›</button>
+        <button class="ghost-button pager-btn" data-rel-page="last" ${state.page >= totalPages - 1 ? 'disabled' : ''}>»</button>
+      </span>
+    </div>`;
   target.innerHTML = `<div class="table-wrap"><table><thead><tr>${cols.map(c => sortableHeader(config, state, c)).join('')}</tr></thead><tbody>
-    ${sorted.map(row => `<tr>${cols.map(c => `<td>${relationshipCell(row, c, mode)}</td>`).join('')}</tr>`).join('')}
-  </tbody></table></div>`;
+    ${pageRows.map(row => `<tr>${cols.map(c => `<td>${relationshipCell(row, c, mode)}</td>`).join('')}</tr>`).join('')}
+  </tbody></table></div>${pagerHtml}`;
   qsa('[data-sort-col]').forEach(btn => btn.onclick = () => {
     const col = btn.dataset.sortCol;
     state.sortDir = state.sortColumn === col && state.sortDir === 'asc' ? 'desc' : 'asc';
     state.sortColumn = col;
+    state.page = 0;
+    renderRelationshipTable(rows, cols, mode, state, filter);
+  });
+  qsa('[data-rel-page]').forEach(btn => btn.onclick = () => {
+    if (btn.dataset.relPage === 'first') state.page = 0;
+    if (btn.dataset.relPage === 'prev') state.page -= 1;
+    if (btn.dataset.relPage === 'next') state.page += 1;
+    if (btn.dataset.relPage === 'last') state.page = totalPages - 1;
+    renderRelationshipTable(rows, cols, mode, state, filter);
+  });
+  qs('[data-rel-page-size]')?.addEventListener('change', e => {
+    state.pageSize = Number(e.target.value) || 25;
+    state.page = 0;
     renderRelationshipTable(rows, cols, mode, state, filter);
   });
 }
@@ -1262,9 +1500,53 @@ function relationshipCell(row, key, mode) {
 
 function relationshipSection(title, configKey, config, rows, mode = '', name = '') {
   const cols = rows[0] ? Object.keys(rows[0]).filter(k => ['saleDate','invoiceNumber','docNumber','docType','status','customerName','vendorName','projectName','productName','description','total','customerPaid','invoiceTotal','balanceDue','expenseDate','dueDate','fileName','documentDate'].includes(k)).slice(0, 7) : [];
+  const stateKey = `relationship-section:${mode}:${name}:${configKey}`;
+  const stateArg = escapeAttr(encodeURIComponent(stateKey));
+  if (!tablePageState[stateKey]) tablePageState[stateKey] = { page: 0, pageSize: 10 };
+  const state = tablePageState[stateKey];
+  const pageSize = state.pageSize || 10;
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  if (state.page >= totalPages) state.page = totalPages - 1;
+  if (state.page < 0) state.page = 0;
+  const pageRows = rows.slice(state.page * pageSize, (state.page + 1) * pageSize);
+  const startRow = rows.length ? (state.page * pageSize) + 1 : 0;
+  const endRow = Math.min(rows.length, (state.page + 1) * pageSize);
+  const pager = rows.length ? `
+    <div class="table-pager relationship-section-pager">
+      <span class="pager-info">Showing ${startRow}-${endRow} of ${rows.length} rows &nbsp;|&nbsp; Page ${state.page + 1} of ${totalPages}</span>
+      <span class="pager-controls">
+        <button class="ghost-button pager-btn" onclick="setRelationshipSectionPage('${stateArg}','first')" ${state.page === 0 ? 'disabled' : ''}>«</button>
+        <button class="ghost-button pager-btn" onclick="setRelationshipSectionPage('${stateArg}','prev')" ${state.page === 0 ? 'disabled' : ''}>‹ Prev</button>
+        <select class="pager-size" onchange="setRelationshipSectionPageSize('${stateArg}', this.value)">
+          ${[10,25,50,100].map(n => `<option value="${n}"${n === pageSize ? ' selected' : ''}>${n} / page</option>`).join('')}
+        </select>
+        <button class="ghost-button pager-btn" onclick="setRelationshipSectionPage('${stateArg}','next')" ${state.page >= totalPages - 1 ? 'disabled' : ''}>Next ›</button>
+        <button class="ghost-button pager-btn" onclick="setRelationshipSectionPage('${stateArg}','last')" ${state.page >= totalPages - 1 ? 'disabled' : ''}>»</button>
+      </span>
+    </div>` : '';
   return `<section class="card relationship-section"><div class="card-header-lite"><h3>${escapeHtml(title)}</h3><div class="relationship-actions">${relationshipSectionActions(title, mode, name)}<span class="badge">${rows.length}</span></div></div>
-    ${rows.length ? `<div class="table-wrap"><table><thead><tr>${cols.map(c => `<th>${labelize(c)}</th>`).join('')}<th></th></tr></thead><tbody>${rows.map(row => `<tr>${cols.map(c => `<td>${cell(row, c)}</td>`).join('')}<td>${config && configKey ? `<button class="ghost-button" onclick="openModal(configs.${configKey}, ${escapeAttr(JSON.stringify(row))})">Open</button>` : recordOpenButton(row)}</td></tr>`).join('')}</tbody></table></div>` : emptyState('No linked rows.', 'Nothing has been tied to this name yet.')}</section>`;
+    ${rows.length ? `<div class="table-wrap"><table><thead><tr>${cols.map(c => `<th>${labelize(c)}</th>`).join('')}<th></th></tr></thead><tbody>${pageRows.map(row => `<tr>${cols.map(c => `<td>${cell(row, c)}</td>`).join('')}<td>${config && configKey ? `<button class="ghost-button" onclick="openModal(configs.${configKey}, ${escapeAttr(JSON.stringify(row))})">Open</button>` : recordOpenButton(row)}</td></tr>`).join('')}</tbody></table></div>${pager}` : emptyState('No linked rows.', 'Nothing has been tied to this name yet.')}</section>`;
 }
+
+window.setRelationshipSectionPage = (stateKey, action) => {
+  stateKey = decodeURIComponent(stateKey);
+  const state = tablePageState[stateKey];
+  if (!state) return;
+  if (action === 'first') state.page = 0;
+  if (action === 'prev') state.page = Math.max(0, state.page - 1);
+  if (action === 'next') state.page += 1;
+  if (action === 'last') state.page = Number.MAX_SAFE_INTEGER;
+  showPage(appState.currentPage, { replace: true });
+};
+
+window.setRelationshipSectionPageSize = (stateKey, size) => {
+  stateKey = decodeURIComponent(stateKey);
+  const state = tablePageState[stateKey];
+  if (!state) return;
+  state.pageSize = Number(size) || 10;
+  state.page = 0;
+  showPage(appState.currentPage, { replace: true });
+};
 
 function relationshipSectionActions(title, mode, name) {
   const n = escapeAttr(name);
@@ -1416,9 +1698,11 @@ function renderEntityTable(config, rows, filter) {
   if (state.page >= totalPages) state.page = totalPages - 1;
   const pageRows = sorted.slice(state.page * pageSize, (state.page + 1) * pageSize);
 
-  const pagerHtml = filtered.length > 25 ? `
+  const startRow = filtered.length ? (state.page * pageSize) + 1 : 0;
+  const endRow = Math.min(filtered.length, (state.page + 1) * pageSize);
+  const pagerHtml = `
     <div class="table-pager">
-      <span class="pager-info">${filtered.length} rows &nbsp;|&nbsp; Page ${state.page + 1} of ${totalPages}</span>
+      <span class="pager-info">Showing ${startRow}-${endRow} of ${filtered.length} rows &nbsp;|&nbsp; Page ${state.page + 1} of ${totalPages}</span>
       <span class="pager-controls">
         <button class="ghost-button pager-btn" id="pgFirst" ${state.page === 0 ? 'disabled' : ''}>«</button>
         <button class="ghost-button pager-btn" id="pgPrev" ${state.page === 0 ? 'disabled' : ''}>‹ Prev</button>
@@ -1428,12 +1712,13 @@ function renderEntityTable(config, rows, filter) {
         <button class="ghost-button pager-btn" id="pgNext" ${state.page >= totalPages - 1 ? 'disabled' : ''}>Next ›</button>
         <button class="ghost-button pager-btn" id="pgLast" ${state.page >= totalPages - 1 ? 'disabled' : ''}>»</button>
       </span>
-    </div>` : '';
+    </div>`;
 
   tableArea.innerHTML = `<div class="table-wrap"><table><thead><tr>${cols.map(c=>sortableHeader(config, state, c)).join('')}<th>Actions</th></tr></thead><tbody>${pageRows.map(row => `
     <tr>
       ${cols.map(c => `<td>${cell(row, c)}</td>`).join('')}
       <td class="row-actions">
+        ${config.route === 'audit-documents' && row.filePathOrUrl ? `<button class="ghost-button" type="button" onclick="openAuditDocFile(${Number(row.id)})">View File</button>` : ''}
         <button class="ghost-button" data-edit="${row.id}">Edit</button>
         ${row.needsReview === true ? `<button class="ghost-button" data-reviewed="${row.id}">Reviewed</button>` : ''}
         <button class="danger-button" data-delete="${row.id}">Archive</button>
@@ -1451,13 +1736,11 @@ function renderEntityTable(config, rows, filter) {
   qsa('[data-reviewed]').forEach(btn => btn.onclick = () => markReviewed(config, sorted.find(r => r.id == btn.dataset.reviewed)));
   qsa('[data-delete]').forEach(btn => btn.onclick = () => archiveRow(config, btn.dataset.delete));
 
-  if (filtered.length > 25) {
-    qs('#pgFirst')?.addEventListener('click', () => { state.page = 0; renderEntityTable(config, rows, filter); });
-    qs('#pgPrev')?.addEventListener('click', () => { state.page--; renderEntityTable(config, rows, filter); });
-    qs('#pgNext')?.addEventListener('click', () => { state.page++; renderEntityTable(config, rows, filter); });
-    qs('#pgLast')?.addEventListener('click', () => { state.page = totalPages - 1; renderEntityTable(config, rows, filter); });
-    qs('#pgSize')?.addEventListener('change', e => { state.pageSize = Number(e.target.value); state.page = 0; renderEntityTable(config, rows, filter); });
-  }
+  qs('#pgFirst')?.addEventListener('click', () => { state.page = 0; renderEntityTable(config, rows, filter); });
+  qs('#pgPrev')?.addEventListener('click', () => { state.page = Math.max(0, state.page - 1); renderEntityTable(config, rows, filter); });
+  qs('#pgNext')?.addEventListener('click', () => { state.page = Math.min(totalPages - 1, state.page + 1); renderEntityTable(config, rows, filter); });
+  qs('#pgLast')?.addEventListener('click', () => { state.page = totalPages - 1; renderEntityTable(config, rows, filter); });
+  qs('#pgSize')?.addEventListener('change', e => { state.pageSize = Number(e.target.value); state.page = 0; renderEntityTable(config, rows, filter); });
 }
 
 function summarizeMoney(rows, config) {
@@ -1469,6 +1752,9 @@ function summarizeMoney(rows, config) {
 }
 
 function cell(row, key) {
+  if (key === 'fileName' && row.id && row.filePathOrUrl) {
+    return `<button class="table-link" type="button" onclick="event.stopPropagation(); openAuditDocFile(${Number(row.id)})">${escapeHtml(row[key] || 'Open file')}</button>`;
+  }
   if (key === 'customerName' && row[key]) {
     return `<button class="table-link" onclick="event.stopPropagation(); showPage('customerDetail:${encodeURIComponent(row[key])}')">${escapeHtml(row[key])}</button>`;
   }
@@ -1564,7 +1850,14 @@ function renderLedgerMap(el) {
       plain: 'The file that proves the row.',
       why: 'Proof keeps PDFs, receipts, screenshots, Etsy order files, messages, and file paths tied to the business event.',
       not: 'It is not the accounting entry by itself. Uploading a receipt does not automatically mean it is an expense until you approve/create that record.',
-      use: 'Use Document Intake when the file comes first, then attach or create the related record.'
+      use: 'If you already know the exact Sale, AR row, Expense, Bill, Job, or Asset, open that row and attach the file in Source / Proof. Use Document Intake when you only have a file and still need to figure out where it belongs.'
+    },
+    action: {
+      title: 'Action Item',
+      plain: 'A cleanup reminder or follow-up task.',
+      why: 'Actions are the app saying “something needs human attention”: missing COGS, review proof, confirm a number, collect payment, classify an expense, or follow up.',
+      not: 'It is not money, not a sale, not an invoice, and not proof. It is a to-do attached to the bookkeeping story.',
+      use: 'Use Actions when you need to remember a cleanup task. Some actions are created by the app during imports/checks; you can also add them yourself.'
     }
   };
   el.innerHTML = `
@@ -1581,12 +1874,40 @@ function renderLedgerMap(el) {
       </div>
     </section>
 
+    <section class="card ledger-ask-card">
+      <div class="card-header-lite">
+        <h3>Ask The Ledger Map</h3>
+        <span class="badge">Local guide</span>
+      </div>
+      <div class="ledger-ask-row">
+        <input id="ledgerAskInput" class="search" type="search" placeholder="Example: Can a job exist before an estimate?">
+        <button id="ledgerAskBtn" class="primary-button" type="button" onclick="askLedgerMap()">Ask</button>
+      </div>
+      <div class="ledger-sample-questions">
+        ${[
+          'Can a job exist before an estimate?',
+          'Why do I need AR if I have invoices?',
+          'Why do I need sales if I have invoices?',
+          'When does an estimate become income?',
+          'Do Etsy orders need AR?',
+          'What if I only upload a receipt?',
+          'Should I use Document Intake or Source / Proof?',
+          'What are Actions and who creates them?'
+        ].map(q => `<button type="button" data-ledger-sample="${escapeAttr(q)}">${escapeHtml(q)}</button>`).join('')}
+      </div>
+      <div id="ledgerAskAnswer" class="ledger-answer">
+        <strong>Ask anything about jobs, estimates, invoices, AR, sales, expenses, AP, or proof.</strong>
+        <p>This is a local rules guide, not online AI. It answers from the workflow rules built into this app.</p>
+      </div>
+    </section>
+
     <section class="ledger-question-grid">
       ${ledgerQuestion('job', 'What is the work?', 'Customer Job', 'Project notes, status, due date, product, materials.')}
       ${ledgerQuestion('invoice', 'What did I send?', 'Estimate / Invoice PDF', 'Customer-facing quote or bill with line items and PDF preview.')}
       ${ledgerQuestion('ar', 'Who owes me?', 'AR Ledger', 'Open balance, due date, paid amount, payment status.')}
       ${ledgerQuestion('sale', 'What money came in?', 'Sale', 'Revenue, gross receipts, cash reporting, tax prep.')}
       ${ledgerQuestion('proof', 'Can I prove it?', 'Audit Docs / Proof', 'PDFs, receipts, screenshots, file paths.')}
+      ${ledgerQuestion('action', 'What needs attention?', 'Actions', 'Cleanup reminders, missing info, review tasks.')}
     </section>
 
     <section class="ledger-flow-card">
@@ -1638,10 +1959,86 @@ function renderLedgerMap(el) {
         <div><span>Estimate / Invoice PDFs</span><strong>The actual customer documents.</strong><p>These are the printable estimate/invoice records with line items and PDF preview.</p></div>
         <div><span>Jobs</span><strong>The project history.</strong><p>Quoted, invoiced, completed, due date, description, customer request.</p></div>
         <div><span>Proof / Audit Docs</span><strong>The files behind the story.</strong><p>Invoice PDF, receipt, screenshot, message, or other proof.</p></div>
+        <div><span>Actions</span><strong>Cleanup tasks that need attention.</strong><p>These can be app-created reminders or tasks you add manually.</p></div>
+      </div>
+      <div class="ledger-proof-rule">
+        <strong>Proof rule:</strong>
+        <span>If you know exactly what the file proves, open that row and use <b>Source / Proof</b>. If you just have a file and are not sure where it belongs yet, use <b>Document Intake</b>.</span>
       </div>
     </section>`;
   bindLedgerMap(topics);
 }
+
+function answerLedgerQuestion(question) {
+  const q = String(question || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ');
+  const has = (...words) => words.some(w => q.includes(w));
+  const all = (...words) => words.every(w => q.includes(w));
+
+  let title = 'Best ledger answer';
+  let answer = 'Use the record that matches what really happened in the world. The same customer story can appear in multiple ledgers because each one answers a different question.';
+  let next = 'If you are unsure, start with the Ledger Map flow: Job = work, Invoice = paper sent, AR = money owed, Sale = money received, Proof = file trail.';
+
+  if (all('job') && (has('before', 'exist', 'first') || has('estimate', 'quote'))) {
+    title = 'Yes. A job can exist before an estimate.';
+    answer = 'A Customer Job is the work/request itself. It can start as “customer asked about this part” before you know the price, before you send an estimate, before you invoice, and before anyone pays.';
+    next = 'Use Customer Jobs for early work tracking. If you later create an Estimate PDF, it can represent the quote for that same job.';
+  } else if (has('ar', 'receivable') && has('invoice', 'invoices')) {
+    title = 'Invoice and AR are not the same thing.';
+    answer = 'Invoice means “I sent the customer a bill/PDF.” AR means “does the customer still owe money?” The invoice is the paper. AR is the payment scoreboard.';
+    next = 'If you create the invoice in the builder, AR should update automatically. Use AR directly mostly for old/manual/outside invoices.';
+  } else if (has('sale', 'sales') && has('invoice', 'invoices')) {
+    title = 'Invoices ask for money. Sales are money received.';
+    answer = 'An invoice can sit unpaid. A Sale means cash came in or an order was paid. Sales feed gross receipts, dashboard revenue, charts, and tax prep.';
+    next = 'Do not count an unpaid invoice as a Sale. Mark the invoice paid or enter a Direct Paid Sale when the money actually arrives.';
+  } else if (has('estimate', 'quote') && has('income', 'sale', 'money', 'revenue')) {
+    title = 'An estimate is never income by itself.';
+    answer = 'An estimate is only a proposed price. It becomes business progress when accepted, becomes AR when invoiced, and becomes income only when paid/sold.';
+    next = 'Use Estimates for customer-facing quotes. Do not put them in Sales until money comes in.';
+  } else if (has('etsy') && has('ar', 'invoice', 'invoices')) {
+    title = 'Etsy orders usually do not need AR.';
+    answer = 'Etsy is usually already a paid marketplace order, not a direct unpaid invoice. That means it normally belongs in Sales, with fees, shipping label cost, COGS, and proof.';
+    next = 'Use Quick Add -> Etsy Sale. Attach the Etsy order/statement proof. Only use AR if you truly sent a separate direct invoice and are waiting for payment.';
+  } else if (has('intake') || (has('source', 'proof') && has('attach', 'attachment', 'file')) || has('receipt', 'pdf', 'upload', 'proof', 'document')) {
+    title = 'Use the direct row when you know where the file belongs.';
+    answer = 'Document Intake is the holding tray for loose files. Source / Proof is the attachment spot on the exact business row. If you already know “this PDF proves Charles’s AR row,” open Charles’s AR row and attach it in Source / Proof.';
+    next = 'Use Document Intake only when the file arrives first and you still need to decide whether it proves a Sale, Expense, AR row, Bill, Job, Asset, or something else.';
+  } else if (has('expense', 'expenses') && has('bill', 'ap', 'payable')) {
+    title = 'Expense means paid. AP/Bill means owed.';
+    answer = 'Use Expense when money already went out. Use AP/Bill when a vendor billed you but you have not paid yet.';
+    next = 'For cash-basis tracking, paid purchases go to Expenses. Unpaid vendor obligations go to AP Bills until paid.';
+  } else if (has('customer') && has('job') && has('invoice')) {
+    title = 'Customer Jobs explain the work behind the invoice.';
+    answer = 'The invoice tells what you billed. The job tracks what you are making, due dates, design notes, materials, status, and customer requirements.';
+    next = 'Use Jobs when the project has enough detail that you would otherwise lose track in notes or file explorer.';
+  } else if (has('tax', 'taxes', 'filing')) {
+    title = 'Taxes care most about Sales, Expenses, Assets, and proof.';
+    answer = 'Sales feed gross receipts. Expenses and COGS reduce profit. Assets may need special tax treatment. Proof explains where every number came from.';
+    next = 'Use Tax Prep after records are reviewed. Keep estimates out of income and keep unpaid AR separate from paid Sales.';
+  } else if (has('action', 'actions', 'task', 'tasks', 'todo', 'to do', 'cleanup', 'clean up')) {
+    title = 'Actions are cleanup reminders.';
+    answer = 'An Action is not a money record. It is a to-do item for missing or questionable bookkeeping work: review proof, enter COGS, confirm an invoice number, classify an expense, collect payment, or fix something imported.';
+    next = 'Some Actions are created by the app when it detects a review task. You can also add them manually when you want the app to remind you.';
+  } else if (has('void', 'delete', 'archive')) {
+    title = 'Void/archive keeps the history without counting it normally.';
+    answer = 'A wrong or cancelled document should usually be voided or archived instead of erased, because the trail helps explain what happened later.';
+    next = 'Use delete/archive carefully. For customer-facing documents, void is often better than pretending it never existed.';
+  }
+
+  return `<strong>${escapeHtml(title)}</strong><p>${escapeHtml(answer)}</p><p><b>Next move:</b> ${escapeHtml(next)}</p>`;
+}
+
+window.askLedgerMap = function askLedgerMap(questionOverride = '') {
+  const input = qs('#ledgerAskInput');
+  const answer = qs('#ledgerAskAnswer');
+  const question = String(questionOverride || input?.value || '').trim();
+  if (!answer) return;
+  if (!question) {
+    answer.innerHTML = `<strong>Ask a ledger question first.</strong><p>Try: “Can a job exist before an estimate?” or click one of the sample questions.</p>`;
+    return;
+  }
+  if (input) input.value = question;
+  answer.innerHTML = answerLedgerQuestion(question);
+};
 
 function ledgerQuestion(key, question, answer, detail) {
   return `<button class="ledger-question ${key}" data-ledger-topic="${key}">
@@ -1681,7 +2078,37 @@ function bindLedgerMap(topics) {
     qsa('.ledger-topic-btn').forEach(b => b.classList.toggle('active', b.dataset.ledgerTopic === topic));
     panel?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   });
+  const askInput = qs('#ledgerAskInput');
+  qs('#ledgerAskBtn')?.addEventListener('click', () => window.askLedgerMap());
+  askInput?.addEventListener('keydown', e => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      window.askLedgerMap();
+    }
+  });
+  qsa('[data-ledger-sample]').forEach(btn => btn.addEventListener('click', () => window.askLedgerMap(btn.dataset.ledgerSample)));
 }
+
+document.addEventListener('click', e => {
+  const askButton = e.target.closest('#ledgerAskBtn');
+  if (askButton) {
+    e.preventDefault();
+    window.askLedgerMap();
+    return;
+  }
+  const sampleButton = e.target.closest('[data-ledger-sample]');
+  if (sampleButton) {
+    e.preventDefault();
+    window.askLedgerMap(sampleButton.dataset.ledgerSample);
+  }
+});
+
+document.addEventListener('keydown', e => {
+  if (e.target?.id === 'ledgerAskInput' && e.key === 'Enter') {
+    e.preventDefault();
+    window.askLedgerMap();
+  }
+});
 
 function renderWorkflowGuide(el) {
   const flows = [
@@ -1766,8 +2193,8 @@ function quickOpen(configKey, kind, overrides = {}) {
   const today = new Date().toISOString().substring(0,10);
   const presets = {
     estimateSent: { platform: 'Direct', status: 'Quoted', jobDate: today, jobType: 'Estimate', needsReview: false, notes: 'Estimate entered manually. Do not count as income or AR until approved/invoiced.' },
-    etsy: { platform: 'Etsy', status: 'Paid', saleDate: today, quantity: 1, includeInDashboard: true, needsReview: true, notes: 'Remember to enter Etsy fees, actual label cost, packaging, and COGS.' },
-    directPaid: { platform: 'Direct', status: 'Paid', saleDate: today, quantity: 1, includeInDashboard: true },
+    etsy: { platform: 'Etsy', paymentMethod: 'Etsy Payments', status: 'Paid', saleDate: today, quantity: 1, includeInDashboard: true, needsReview: true, notes: 'Remember to enter Etsy fees, actual label cost, packaging, and COGS.' },
+    directPaid: { platform: 'Direct', paymentMethod: 'Unknown / Review', status: 'Paid', saleDate: today, quantity: 1, includeInDashboard: true },
     invoice: { status: 'Sent', invoiceDate: today, includeInCashReports: false, needsReview: false },
     bill: { status: 'Unpaid', billDate: today, taxDeductible: true },
     expense: { expenseDate: today, taxDeductible: true, taxBucket: 'Review', deductibleStatus: 'Review', countedExpense: true, businessUsePercent: 100, needsReview: true, notes: 'Classify as COGS/Materials, Operating Expense, Asset, or Memo Only before filing.' },
@@ -1777,6 +2204,12 @@ function quickOpen(configKey, kind, overrides = {}) {
 }
 
 async function handleInboxSuggestion(suggestion) {
+  if (suggestion?.suggestedRoute === 'estimates' || suggestion?.suggestedRoute === 'invoices') {
+    appState.invoiceToolSnapshot = null;
+    appState.invoiceToolPrefill = suggestion.suggestedPrefill || {};
+    await showPage(suggestion.suggestedRoute, { resetInvoiceTool: true });
+    return;
+  }
   if (suggestion?.suggestedConfig && configs[suggestion.suggestedConfig]) {
     const overrides = suggestion.suggestedPrefill || {};
     await showPage(suggestion.suggestedConfig);
@@ -1950,6 +2383,36 @@ async function markReviewed(config, row) {
   toast('Marked reviewed.');
   await showPage(appState.currentPage);
 }
+
+window.openAuditDocFile = async id => {
+  const url = `/api/audit-documents/${Number(id)}/file`;
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: { Range: 'bytes=0-0' },
+      cache: 'no-store'
+    });
+    const contentType = response.headers.get('content-type') || '';
+    if (!response.ok) {
+      let message = `File open failed (${response.status}).`;
+      try {
+        const data = await response.json();
+        if (data?.message) message = data.message;
+      } catch {
+      }
+      toast(message);
+      return;
+    }
+    if (contentType.includes('text/html')) {
+      toast('The running app needs to be restarted to enable file viewing.');
+      return;
+    }
+    window.open(url, '_blank', 'noopener');
+  } catch (err) {
+    toast(`File open failed: ${err.message}`);
+  }
+};
+
 function closeModal() {
   qs('#modalBackdrop').classList.add('hidden');
   qs('#modal').classList.add('hidden');
@@ -1978,6 +2441,7 @@ function renderDocumentIntake(el) {
               <label for="relatedType">Related Area</label>
               <select id="relatedType">
                 <option value=""></option>
+                <option>Estimate</option>
                 <option>Sale</option>
                 <option>Invoice</option>
                 <option>Bill</option>
@@ -2028,6 +2492,449 @@ function renderDocumentIntake(el) {
     qs('#docFiles').files = e.dataTransfer.files;
     toast(`${e.dataTransfer.files.length} file${e.dataTransfer.files.length === 1 ? '' : 's'} ready.`);
   };
+}
+
+async function renderAiEstimateIntake(el) {
+  const status = await api('/api/ai/estimate/status');
+  const mode = status.configured ? `${status.provider} / ${status.model}` : 'Local rules fallback';
+  const limits = status.limits || {};
+  const maxFiles = Number(limits.maxFiles || 25);
+  const maxFileMb = Number(limits.maxFileMegabytes || 20);
+  const maxTotalMb = Number(limits.maxTotalUploadMegabytes || 75);
+  const maxUrls = Number(limits.maxSourceUrls || 20);
+  const maxText = Number(limits.maxCombinedTextCharacters || 500000);
+  el.innerHTML = `
+    <section class="workspace-hero">
+      <div>
+        <span class="eyebrow">AI Estimate Intake</span>
+        <h2>Turn a customer conversation into a reviewable estimate draft.</h2>
+        <p>Paste a request, add product or reference URLs, or upload documents and pictures. The analyzer creates structured fields and one or more estimate items. It never saves or sends automatically.</p>
+      </div>
+      <div class="hero-actions">
+        <button class="ghost-button dark" onclick="showPage('estimates')">Open Estimates</button>
+      </div>
+    </section>
+    <div class="ai-status-strip">
+      ${assistanceIndicator(status.configured ? 'AI model' : 'Local rules', mode)}
+      <span><b>Editable pricing/rules:</b> ${escapeHtml(status.instructionsPath)}</span>
+      <span>${escapeHtml(status.safety)}</span>
+    </div>
+    ${aiTouchCard(
+      status.configured ? 'AI model' : 'Local rules',
+      'Estimate draft preparation',
+      'Only the text, public HTTPS URLs, pictures, and documents you add here, plus AiEstimateInstructions.json.',
+      'Creates a structured preview and can open an unsaved estimate draft. It does not save or send.',
+      'A customer request is scattered across messages, email, Etsy listings, pictures, or notes.'
+    )}
+    <div class="ai-intake-layout">
+      <section class="card ai-source">
+        <div class="card-header-lite"><h3>Estimate Sources</h3><span class="badge">Mix and match</span></div>
+        <label for="aiEstimateSource">Description, text messages, or email chain</label>
+        <textarea id="aiEstimateSource" placeholder="Example: From: Jane Customer&#10;Subject: Replacement bracket&#10;I need 3 black PETG brackets, about 40mm x 20mm x 10mm..."></textarea>
+        <div class="muted"><span id="aiEstimateTextCount">0</span> pasted characters. Combined extracted-text limit: ${maxText.toLocaleString()}.</div>
+        <label for="aiEstimateUrls">Product or source URLs, one per line</label>
+        <textarea id="aiEstimateUrls" class="ai-url-source" placeholder="https://www.etsy.com/listing/...&#10;https://another-public-site.example/product/..."></textarea>
+        <div class="ai-source-actions">
+          <label class="ghost-button file-button" for="aiEstimateFile">Add Documents / Pictures</label>
+          <input id="aiEstimateFile" class="visually-hidden" type="file" multiple accept=".txt,.md,.eml,.csv,.json,.pdf,.docx,.png,.jpg,.jpeg,.webp,text/*,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,image/png,image/jpeg,image/webp">
+          <span id="aiEstimateSourceName" class="muted">No files selected</span>
+          <button id="analyzeAiEstimateBtn" class="primary-button" type="button">Build Estimate Items</button>
+        </div>
+        <div id="aiEstimateFileList" class="ai-file-list muted">PDF, DOCX, text, email, CSV, and JSON files are read as source text. Pictures become items or visual references.</div>
+        <div class="callout">
+          <strong>Intake limits and file behavior</strong>
+          <p>Up to ${maxFiles} files, ${maxFileMb} MB each, ${maxTotalMb} MB total, and ${maxUrls} public HTTPS URLs. Scanned/image-only PDFs and pictures need OCR or a configured vision-capable AI model to understand their contents.</p>
+        </div>
+      </section>
+      <section class="card">
+        <div class="card-header-lite"><h3>How It Works</h3><span class="badge warn">Review first</span></div>
+        <div class="help-list">
+          <div class="help-item"><strong>1. Gather sources</strong><p>Combine customer text, public product/source URLs, PDF or DOCX documents, email/text files, and product/reference pictures.</p></div>
+          <div class="help-item"><strong>2. Price from your rules</strong><p>Rates and common fees come from <code>AiEstimateInstructions.json</code>, which is reread on every analysis.</p></div>
+          <div class="help-item"><strong>3. Review items and open</strong><p>Distinct products/services become line items. Review warnings and questions, then open an unsaved estimate draft.</p></div>
+          <div class="help-item"><strong>Picture analysis</strong><p>A configured vision-capable AI model can identify pictured items. Without one, each picture becomes a clearly marked review item.</p></div>
+        </div>
+      </section>
+    </div>
+    <section class="card">
+      <div class="card-header-lite"><h3>Structured Draft Preview</h3><span id="aiDraftProvider">${assistanceIndicator('', 'Waiting for analysis')}</span></div>
+      <div id="aiEstimateResult">${emptyState('No analysis yet.', 'Paste a customer request and click Analyze Request.')}</div>
+    </section>`;
+
+  let selectedFiles = [];
+  const sourceInput = qs('#aiEstimateSource');
+  const updateTextCount = () => {
+    const count = sourceInput.value.length;
+    qs('#aiEstimateTextCount').textContent = count.toLocaleString();
+    qs('#aiEstimateTextCount').className = count > maxText ? 'bad' : '';
+  };
+  sourceInput.oninput = updateTextCount;
+  updateTextCount();
+  const fileInput = qs('#aiEstimateFile');
+  fileInput.onchange = () => {
+    const incoming = Array.from(fileInput.files || []);
+    const before = selectedFiles.length;
+    selectedFiles = [...selectedFiles, ...incoming]
+      .filter((file, index, files) => files.findIndex(x => x.name === file.name && x.size === file.size && x.lastModified === file.lastModified) === index)
+      .slice(0, maxFiles);
+    fileInput.value = '';
+    if (before + incoming.length > maxFiles) toast(`Only the first ${maxFiles} files were selected.`);
+    qs('#aiEstimateSourceName').textContent = selectedFiles.length ? `${selectedFiles.length} file${selectedFiles.length === 1 ? '' : 's'} selected` : 'No files selected';
+    qs('#aiEstimateFileList').innerHTML = selectedFiles.length
+      ? selectedFiles.map(file => `<span class="badge">${escapeHtml(file.name)}</span>`).join('')
+      : 'PDF, DOCX, text, email, CSV, and JSON files are read as source text. Pictures become items or visual references.';
+  };
+
+  qs('#analyzeAiEstimateBtn').onclick = async () => {
+    const button = qs('#analyzeAiEstimateBtn');
+    const resultEl = qs('#aiEstimateResult');
+    button.disabled = true;
+    button.textContent = 'Analyzing...';
+    try {
+      const tooLarge = selectedFiles.find(file => file.size > maxFileMb * 1024 * 1024);
+      const totalBytes = selectedFiles.reduce((sum, file) => sum + file.size, 0);
+      if (tooLarge) throw new Error(`${tooLarge.name} is larger than the ${maxFileMb} MB per-file limit.`);
+      if (totalBytes > maxTotalMb * 1024 * 1024) throw new Error(`The selected files total more than ${maxTotalMb} MB.`);
+      const form = new FormData();
+      form.append('sourceText', qs('#aiEstimateSource').value);
+      form.append('sourceUrls', qs('#aiEstimateUrls').value);
+      form.append('sourceName', selectedFiles.length ? `Mixed sources (${selectedFiles.length} files)` : 'Pasted text / URLs');
+      selectedFiles.forEach(file => form.append('files', file, file.name));
+      const response = await fetch('/api/ai/estimate-draft/upload', { method: 'POST', body: form });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.message || `Analysis failed: ${response.status}`);
+      appState.aiEstimateDraft = result;
+      qs('#aiDraftProvider').innerHTML = assistanceIndicator(result.usedAi ? 'AI model' : 'Local rules', result.provider || 'Structured draft');
+      resultEl.innerHTML = renderAiEstimateResult(result);
+      qs('#openAiEstimateDraftBtn').onclick = async () => {
+        appState.invoiceToolSnapshot = null;
+        appState.invoiceToolPrefill = result.prefill;
+        await showPage('estimates', { resetInvoiceTool: true });
+      };
+    } catch (err) {
+      resultEl.innerHTML = `<div class="callout bad"><strong>Analysis failed.</strong><p>${escapeHtml(err.message)}</p></div>`;
+    } finally {
+      button.disabled = false;
+      button.textContent = 'Build Estimate Items';
+    }
+  };
+}
+
+function renderAiEstimateResult(result) {
+  const prefill = result.prefill || {};
+  const pricing = result.pricing || {};
+  const receipt = result.executionReceipt || {};
+  const executedAt = receipt.executedAtUtc ? new Date(receipt.executedAtUtc).toLocaleString() : 'Not supplied';
+  const tokenUsage = receipt.totalTokens == null
+    ? (result.usedAi ? 'Provider did not supply token usage' : 'Not applicable; no model ran')
+    : `${receipt.totalTokens} total (${receipt.promptTokens ?? '?'} prompt + ${receipt.completionTokens ?? '?'} completion)`;
+  const fields = [
+    ['Customer', prefill.customerName],
+    ['Phone', prefill.customerPhone],
+    ['Email', prefill.customerEmail],
+    ['Address', prefill.customerAddress],
+    ['Project', prefill.projectName],
+    ['Material', prefill.material],
+    ['Color', prefill.color],
+    ['Infill', prefill.infill],
+    ['Valid until', prefill.dueDate],
+    ['Material used', prefill.calcGrams ? `${prefill.calcGrams} grams` : 'Needs review'],
+    ['Material rate', formatMoney(prefill.calcGramRate)],
+    ['Print time', prefill.calcHours ? `${prefill.calcHours} hours` : 'Needs review'],
+    ['Machine rate', `${formatMoney(prefill.calcHourRate)}/hr`],
+    ['Design time', prefill.calcDesignHours ? `${prefill.calcDesignHours} hours` : 'None / needs review'],
+    ['Design rate', `${formatMoney(prefill.calcDesignRate)}/hr`],
+    ['Setup fee', formatMoney(prefill.calcSetupFee)],
+    ['Post-processing', formatMoney(prefill.calcPostFee)],
+    ['Difficulty', `${prefill.calcDifficulty || 1}x`],
+    ['Minimum', formatMoney(prefill.calcMinimum)],
+    ['Rush', `${prefill.docRushPercent || 0}%`],
+    ['Discount', formatMoney(prefill.docDiscount)],
+    ['Tax rate', `${prefill.docTaxRate || 0}%`]
+  ];
+  const lines = prefill.lineItems || [];
+  return `
+    ${aiTouchCard(
+      result.usedAi ? 'AI model' : 'Local rules',
+      `Draft prepared by ${result.provider || 'structured intake'}`,
+      `Source: ${result.sourceName || 'supplied intake sources'}.`,
+      'Populated this preview and added a provenance note to Project Notes. Nothing is saved until you save the estimate.',
+      'Review every field, item, price, tax, term, and question below before opening the draft.'
+    )}
+    <div class="card ai-execution-receipt">
+      <div class="card-header-lite"><h3>Execution Receipt</h3>${assistanceIndicator(receipt.engine || (result.usedAi ? 'AI model' : 'Local rules'), receipt.provider || result.provider || '')}</div>
+      <div class="ai-field-preview">
+        <div><span>Actually used model AI</span><strong>${result.usedAi ? 'Yes' : 'No'}</strong></div>
+        <div><span>Executed</span><strong>${escapeHtml(executedAt)}</strong></div>
+        <div><span>Provider</span><strong>${escapeHtml(receipt.provider || result.provider || 'Not supplied')}</strong></div>
+        <div><span>Model</span><strong>${escapeHtml(receipt.model || (result.usedAi ? 'Provider did not supply model name' : 'Not applicable'))}</strong></div>
+        <div><span>Response ID</span><strong>${escapeHtml(receipt.responseId || (result.usedAi ? 'Provider did not supply response ID' : 'Not applicable'))}</strong></div>
+        <div><span>Token usage</span><strong>${escapeHtml(tokenUsage)}</strong></div>
+      </div>
+      <p class="muted">${result.usedAi
+        ? 'This receipt is built from the completed model response. It is also copied into Project Notes when you fill the estimate.'
+        : 'This result was produced by fixed local code. The receipt confirms that a language model did not run.'}</p>
+    </div>
+    <div class="ai-draft-grid">
+      <div class="ai-field-preview">
+        ${fields.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || 'Needs review')}</strong></div>`).join('')}
+      </div>
+      <div class="ai-review-list">
+        <h4>Questions</h4>
+        ${(result.questions || []).length ? `<ul>${result.questions.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul>` : '<p class="muted">No follow-up questions returned.</p>'}
+        <h4>Warnings</h4>
+        ${(result.warnings || []).length ? `<ul>${result.warnings.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul>` : '<p class="muted">No warnings returned.</p>'}
+      </div>
+    </div>
+    <div class="table-wrap ai-line-preview"><table>
+      <thead><tr><th>Description</th><th>Details</th><th>Qty</th><th>Rate</th><th>Draft total</th></tr></thead>
+      <tbody>${lines.map(line => `<tr><td>${escapeHtml(line.description)}</td><td>${escapeHtml(line.details)}</td><td>${escapeHtml(line.quantity)}</td><td>${formatMoney(line.rate)}</td><td>${formatMoney(Number(line.quantity || 0) * Number(line.rate || 0))}</td></tr>`).join('')}</tbody>
+    </table></div>
+    <div class="workflow-list">
+      <div class="workflow-row"><div><span>Material cost</span><strong>${formatMoney(pricing.material)}</strong></div><p>${escapeHtml(`${prefill.calcGrams || 0}g × ${formatMoney(prefill.calcGramRate)}/g`)}</p></div>
+      <div class="workflow-row"><div><span>Machine + design</span><strong>${formatMoney(Number(pricing.machine || 0) + Number(pricing.design || 0))}</strong></div><p>${escapeHtml(`${prefill.calcHours || 0} machine hours; ${prefill.calcDesignHours || 0} design hours`)}</p></div>
+      <div class="workflow-row"><div><span>Setup + post + difficulty</span><strong>${formatMoney(Number(pricing.setup || 0) + Number(pricing.postProcessing || 0) + Number(pricing.difficultyFee || 0))}</strong></div><p>The app computed these amounts from the proposed calculator inputs.</p></div>
+      <div class="workflow-row"><div><span>Line subtotal</span><strong>${formatMoney(pricing.lineSubtotal)}</strong></div><p>Before document-level rush, discount, and tax.</p></div>
+      <div class="workflow-row"><div><span>Final quoted total</span><strong>${formatMoney(pricing.total)}</strong></div><p>Deterministically calculated by the app. Review before saving or sending.</p></div>
+    </div>
+    <div class="ai-result-actions">
+      <button id="openAiEstimateDraftBtn" class="primary-button" type="button">Fill Entire Estimate Builder</button>
+      <span class="muted">This fills builder fields, calculator inputs, terms, line items, and price breakdown. Nothing saves until you review and click Save.</span>
+    </div>
+    <details class="ai-json-preview"><summary>View structured JSON</summary><pre>${escapeHtml(JSON.stringify({ executionReceipt: receipt, prefill, pricing }, null, 2))}</pre></details>`;
+}
+
+async function renderAiReviewCenter(el) {
+  const [status, localReview, localAiStatus] = await Promise.all([
+    api('/api/ai/review/status'),
+    api('/api/ai/review'),
+    api('/api/ai/local/status').catch(() => null)
+  ]);
+  const review = appState.aiReviewModelResult || localReview;
+  const items = review.items || [];
+  const high = items.filter(x => x.priority === 'High').length;
+  const normal = items.filter(x => x.priority === 'Normal').length;
+  const areas = new Set(items.map(x => x.area)).size;
+  const generated = review.generatedAtUtc ? new Date(review.generatedAtUtc).toLocaleString() : 'just now';
+  el.innerHTML = `
+    <section class="workspace-hero">
+      <div>
+        <span class="eyebrow">AI Review Center</span>
+        <h2>Turn ledger gaps into a prioritized cleanup plan.</h2>
+        <p>This is a read-only review of active ledger data. It explains why something deserves attention and routes you to the right record area without changing anything.</p>
+      </div>
+      <div class="hero-actions">
+        <button id="modelAssistReviewBtn" class="primary-button">${localAiStatus?.modelReady ? 'Explain with Local AI' : 'Start Local AI to Explain'}</button>
+        <button class="ghost-button dark" onclick="showPage('localAi')">Local AI Controls</button>
+        <button class="primary-button" onclick="showPage('aiEstimate')">Draft an Estimate</button>
+        <button class="ghost-button dark" onclick="showPage('taxPrep')">Open Tax Prep</button>
+      </div>
+    </section>
+    ${aiTouchCard(
+      review.engine || status.engine,
+      'Business cleanup and prioritization',
+      (status.reads || []).join(', '),
+      status.safety,
+      status.useWhen
+    )}
+    <section class="kpi-grid">
+      ${kpi('High Priority', high, 'Items most likely to affect cash, proof, filing, or pricing.', high ? 'bad' : 'good', false)}
+      ${kpi('Normal Priority', normal, 'Useful cleanup that is less urgent.', normal ? 'warn' : 'good', false)}
+      ${kpi('Areas Touched', areas, 'Different ledger areas with at least one recommendation.', '', false)}
+      ${kpi('Read-Only', 'Yes', 'The review center does not save or edit records.', 'good', false)}
+    </section>
+    ${review.usedAi ? `
+      <section class="card local-ai-narrative">
+        <div class="card-header-lite"><h3>Local AI Explanation</h3>${assistanceIndicator('AI model', 'LM Studio / local only')}</div>
+        <p>${escapeHtml(review.modelSummary || 'The local model did not return a summary.')}</p>
+        <div class="grid two">
+          <div><h4>Suggested order</h4>${(review.modelRecommendedOrder || []).length ? `<ol>${review.modelRecommendedOrder.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ol>` : '<p class="muted">No ordering notes returned.</p>'}</div>
+          <div><h4>Questions to resolve</h4>${(review.modelQuestions || []).length ? `<ul>${review.modelQuestions.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul>` : '<p class="muted">No follow-up questions returned.</p>'}</div>
+        </div>
+      </section>` : ''}
+    <div class="page-head">
+      <div><h2>Recommended Review</h2><p>Generated ${escapeHtml(generated)}. Evidence is limited to a few examples so the list stays readable.</p></div>
+      <div class="actions"><button class="ghost-button" onclick="showPage('aiReview', { replace: true })">Refresh Review</button></div>
+    </div>
+    <section class="ai-review-center-list">
+      ${items.length ? items.map(renderAiReviewItem).join('') : emptyState('No review recommendations.', 'The current active ledger rows passed the review-center checks.')}
+    </section>
+    <div class="card">
+      <div class="card-header-lite"><h3>What Is AI Here?</h3><span class="badge warn">Transparent by design</span></div>
+      <div class="help-list">
+        <div class="help-item"><strong>Deterministic findings stay authoritative</strong><p>The review list comes from local repeatable checks. It does not depend on a model and remains available when Local AI is off.</p></div>
+        <div class="help-item"><strong>Optional local-model explanation</strong><p>Click Explain with Local AI to send only the already-generated review findings to your loaded LM Studio model. Nothing leaves this computer.</p></div>
+        <div class="help-item"><strong>No automatic writes</strong><p>The model can summarize and prioritize, but it cannot change, save, file, post, or send any ledger record.</p></div>
+      </div>
+    </div>`;
+
+  qs('#modelAssistReviewBtn').onclick = async () => {
+    const button = qs('#modelAssistReviewBtn');
+    if (!localAiStatus?.modelReady) {
+      await showPage('localAi');
+      return;
+    }
+    button.disabled = true;
+    button.textContent = 'Asking Local AI...';
+    try {
+      appState.aiReviewModelResult = await api('/api/ai/review/model', { method: 'POST', body: '{}' });
+      await renderAiReviewCenter(el);
+    } catch (err) {
+      toast(`Local AI review failed; the Local Rules review remains active: ${friendlyApiError(err.message)}`);
+      button.disabled = false;
+      button.textContent = 'Explain with Local AI';
+    }
+  };
+}
+
+async function renderLocalAi(el) {
+  const status = await api('/api/ai/local/status');
+  const models = status.availableModels || [];
+  const selected = status.selectedModelPath || '';
+  el.innerHTML = `
+    <section class="workspace-hero">
+      <div>
+        <span class="eyebrow">Local AI Power</span>
+        <h2>Start private model assistance only when you need it.</h2>
+        <p>The ledger controls the installed LM Studio server over loopback only. Customer and financial data stays on this computer. Local rules continue working while the model is off.</p>
+      </div>
+      <div class="hero-actions">
+        <button id="startLocalAiBtn" class="primary-button">Start Local AI</button>
+        <button id="stopLocalAiBtn" class="ghost-button dark">Stop Local AI</button>
+        <button id="refreshLocalAiBtn" class="ghost-button dark">Refresh Status</button>
+      </div>
+    </section>
+    <section class="local-ai-status-grid">
+      ${localAiStatusCard('LM Studio', status.lmsInstalled ? 'Installed' : 'Not found', status.lmsInstalled ? 'good' : 'bad', status.lmsPath || 'Install LM Studio and its lms command-line tool.')}
+      ${localAiStatusCard('Server', status.serverOnline ? 'On' : 'Off', status.serverOnline ? 'good' : 'warn', status.baseUrl)}
+      ${localAiStatusCard('Model', status.modelReady ? 'Ready' : 'Not loaded', status.modelReady ? 'good' : 'warn', (status.loadedModels || []).join(', ') || 'Choose a downloaded model below.')}
+      ${localAiStatusCard('Data boundary', 'Local only', 'good', 'Loopback-only. No hosted API token is required.')}
+    </section>
+    <div class="ai-status-strip">
+      <span id="localAiStateBadge" class="badge ${status.modelReady ? 'good' : status.serverOnline ? 'warn' : ''}">${escapeHtml(status.state)}</span>
+      ${assistanceIndicator(status.modelReady ? 'AI model' : 'Local rules', status.modelReady ? 'Current assisted-intake path' : 'Automatic fallback while Local AI is unavailable')}
+      <span id="localAiStateMessage">${escapeHtml(status.message || '')}</span>
+      <span>${escapeHtml(status.safety)}</span>
+    </div>
+    <div class="grid two">
+      <section class="card">
+        <div class="card-header-lite"><h3>Connection & Model</h3><span class="badge good">Loopback enforced</span></div>
+        <div class="local-ai-form">
+          <label><span>Local server URL</span><input id="localAiBaseUrl" value="${escapeHtml(status.baseUrl)}"><small>Only localhost, 127.0.0.1, or ::1 HTTP URLs are accepted.</small></label>
+          <label><span>Downloaded LM Studio model</span>
+            <select id="localAiModelPath">
+              <option value="">Start server without loading a model</option>
+              ${models.map(model => `<option value="${escapeHtml(model.fullPath)}" ${model.fullPath === selected ? 'selected' : ''}>${escapeHtml(model.name)} (${formatFileSize(model.bytes)})</option>`).join('')}
+            </select>
+            <small>${models.length} compatible GGUF model file${models.length === 1 ? '' : 's'} found under your LM Studio models folder.</small>
+          </label>
+          <label><span>Model API identifier</span><input id="localAiIdentifier" value="${escapeHtml(status.modelIdentifier)}"><small>The app loads the selected model under this private local name.</small></label>
+          <div class="grid two">
+            <label><span>Context length</span><input id="localAiContextLength" type="number" min="2048" max="131072" step="1024" value="${escapeHtml(status.contextLength)}"><small>Larger context uses more memory.</small></label>
+            <label><span>Unload after idle seconds</span><input id="localAiIdleSeconds" type="number" min="60" max="86400" step="60" value="${escapeHtml(status.idleUnloadSeconds)}"><small>Default 1800 = unload model after 30 idle minutes.</small></label>
+          </div>
+          <button id="saveLocalAiSettingsBtn" class="ghost-button">Save Local AI Settings</button>
+        </div>
+      </section>
+      <section class="card">
+        <div class="card-header-lite"><h3>What Local AI Can Do</h3><span class="badge">Explicit and labeled</span></div>
+        <div class="help-list">
+          <div class="help-item"><strong>Estimate Intake</strong><p>When a model is ready, mixed customer messages, documents, URLs, and pictures use LM Studio for structured estimate drafting. When off, local extraction rules take over.</p></div>
+          <div class="help-item"><strong>Review Center</strong><p>The local model can explain and prioritize deterministic cleanup findings only after you click Explain with Local AI.</p></div>
+          <div class="help-item"><strong>What it cannot do</strong><p>Local AI does not silently save records, send messages, file taxes, post transactions, delete data, or run automatically in the background.</p></div>
+          <div class="help-item"><strong>Why Start is deliberate</strong><p>Loading a model can consume substantial RAM/GPU. Stop unloads models and stops the local server when you are done.</p></div>
+        </div>
+      </section>
+    </div>
+    ${models.length ? '' : `<div class="callout warn"><strong>No selectable GGUF language models found.</strong><p>Download an LLM in LM Studio first. Image-generation models and mmproj files are not used for ledger assistance.</p></div>`}`;
+
+  qs('#saveLocalAiSettingsBtn').onclick = () => saveLocalAiSettings(false);
+  qs('#startLocalAiBtn').onclick = () => runLocalAiAction('start');
+  qs('#stopLocalAiBtn').onclick = () => runLocalAiAction('stop');
+  qs('#refreshLocalAiBtn').onclick = () => showPage('localAi', { replace: true });
+}
+
+function localAiStatusCard(label, value, badgeClass, detail) {
+  return `<article class="card local-ai-status-card"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong><p>${escapeHtml(detail)}</p><i class="badge ${badgeClass}">${escapeHtml(value)}</i></article>`;
+}
+
+function localAiSettingsPayload() {
+  return {
+    baseUrl: qs('#localAiBaseUrl').value,
+    modelPath: qs('#localAiModelPath').value || null,
+    modelIdentifier: qs('#localAiIdentifier').value,
+    contextLength: Number(qs('#localAiContextLength').value || 8192),
+    idleUnloadSeconds: Number(qs('#localAiIdleSeconds').value || 1800)
+  };
+}
+
+async function saveLocalAiSettings(showToast = true) {
+  const saved = await api('/api/ai/local/settings', { method: 'PUT', body: JSON.stringify(localAiSettingsPayload()) });
+  if (showToast) toast(`Local AI settings saved for ${saved.modelIdentifier}.`);
+  return saved;
+}
+
+async function runLocalAiAction(action) {
+  const button = qs(action === 'start' ? '#startLocalAiBtn' : '#stopLocalAiBtn');
+  button.disabled = true;
+  button.textContent = action === 'start' ? 'Starting LM Studio...' : 'Stopping Local AI...';
+  try {
+    if (action === 'start') await saveLocalAiSettings(false);
+    const result = await api(`/api/ai/local/${action}`, { method: 'POST', body: '{}' });
+    toast(result.message || `Local AI ${action} complete.`);
+    await refreshLocalAiHeaderStatus();
+    await showPage('localAi', { replace: true });
+  } catch (err) {
+    toast(`Local AI ${action} failed: ${friendlyApiError(err.message)}`);
+    button.disabled = false;
+    button.textContent = action === 'start' ? 'Start Local AI' : 'Stop Local AI';
+  }
+}
+
+async function refreshLocalAiHeaderStatus() {
+  const button = qs('#localAiHeaderStatus');
+  if (!button) return;
+  try {
+    const status = await api('/api/ai/local/status');
+    button.className = `ai-power-status ${status.modelReady ? 'ready' : status.serverOnline ? 'on' : 'off'}`;
+    button.querySelector('span:last-child').textContent = status.modelReady ? 'Local AI Ready' : status.serverOnline ? 'Local AI On' : 'Local AI Off';
+    button.title = status.message || 'Open Local AI controls';
+  } catch {
+    button.className = 'ai-power-status off';
+    button.querySelector('span:last-child').textContent = 'Local AI Unknown';
+  }
+}
+
+function formatFileSize(bytes) {
+  const n = Number(bytes || 0);
+  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)} GB`;
+  if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(0)} MB`;
+  return `${Math.max(1, Math.round(n / 1024))} KB`;
+}
+
+function friendlyApiError(message) {
+  try {
+    const parsed = JSON.parse(message);
+    return parsed.message || parsed.Message || message;
+  } catch {
+    return message;
+  }
+}
+
+function renderAiReviewItem(item) {
+  const priorityClass = item.priority === 'High' ? 'bad' : item.priority === 'Normal' ? 'warn' : 'good';
+  return `<article class="ai-review-center-item">
+    <div class="ai-review-center-head">
+      <div><span class="badge ${priorityClass}">${escapeHtml(item.priority)}</span><span class="badge">${escapeHtml(item.area)}</span>${assistanceIndicator(item.engine, item.engine)}</div>
+      <button class="primary-button" onclick="showPage('${escapeHtml(item.route)}')">Open ${escapeHtml(item.area)}</button>
+    </div>
+    <h3>${escapeHtml(item.title)}</h3>
+    <div class="ai-review-center-body">
+      <div><span>Why flagged</span><p>${escapeHtml(item.why)}</p></div>
+      <div><span>Recommended action</span><p>${escapeHtml(item.recommendedAction)}</p></div>
+      <div class="wide"><span>Examples / evidence</span><p>${escapeHtml(item.evidence)}</p></div>
+    </div>
+  </article>`;
 }
 
 async function renderGlobalSearch(el) {
@@ -2110,14 +3017,14 @@ async function renderMergedInvoiceTool(el, initialView = 'dashboard', newType = 
 
   const prefill = appState.invoiceToolPrefill;
   appState.invoiceToolPrefill = null;
-  const module = await import('/invoice-builder/js/app.js?v=14');
+  const module = await import('/invoice-builder/js/app.js?v=23');
   await module.init({ initialView, restoreSnapshot, newType, prefill });
 }
 
 async function startCustomerDocument(name, type) {
   appState.invoiceToolSnapshot = null;
   appState.invoiceToolPrefill = { customerName: name };
-  await showPage(type === 'INVOICE' ? 'invoices' : 'estimates');
+  await showPage(type === 'INVOICE' ? 'invoices' : 'estimates', { resetInvoiceTool: true });
 }
 
 async function openDocumentIntakeWithPrefill(relatedType, relatedNumber = '') {
@@ -2130,7 +3037,7 @@ function ensureMergedInvoiceStyles() {
     const link = document.createElement('link');
     link.id = 'invoiceBuilderCss';
     link.rel = 'stylesheet';
-    link.href = '/invoice-builder/css/app.css?v=20260530-ar-guide';
+    link.href = '/invoice-builder/css/app.css?v=20260609-responsive';
     document.head.appendChild(link);
   }
   document.getElementById('invoiceBuilderCss').disabled = false;
@@ -2140,7 +3047,7 @@ function ensureMergedInvoiceStyles() {
     style.textContent = `
       body #app { display: block; min-height: 0; }
       body #main { margin-left: 0; }
-      .invoice-tool-merged { display: block; min-height: calc(100vh - 112px); background: #f3f6fb; border: 1px solid #dbe3ef; border-radius: 14px; overflow: auto; }
+      .invoice-tool-merged { display: block; min-width: 0; max-width: 100%; min-height: calc(100vh - 112px); background: #f3f6fb; border: 1px solid #dbe3ef; border-radius: 14px; overflow: hidden; }
       .invoice-tool-merged #main { margin-left: 0 !important; min-height: 0; }
       .invoice-tool-merged .view-header, .invoice-tool-merged .view-body, .invoice-tool-merged .active-record-bar { padding-left: 16px; padding-right: 16px; }
       .invoice-tool-merged .view-header { padding-top: 12px; padding-bottom: 0; }
@@ -2156,7 +3063,12 @@ function ensureMergedInvoiceStyles() {
       .invoice-tool-merged #view-builder .view-title p { display: none; }
       .invoice-tool-merged .view { min-height: 0; }
       .invoice-tool-merged .invoice-preview-frame { background: #fff; }
-      @media (max-width: 760px) { .merged-invoice-bar { align-items: stretch; flex-direction: column; } .merged-tabs { justify-content: flex-start; } }
+      @media (max-width: 760px) {
+        .invoice-tool-merged { border-radius: 10px; }
+        .invoice-tool-merged .view-header, .invoice-tool-merged .view-body, .invoice-tool-merged .active-record-bar { padding-left: 10px; padding-right: 10px; }
+        .merged-invoice-bar { align-items: stretch; flex-direction: column; }
+        .merged-tabs { justify-content: flex-start; }
+      }
     `;
     document.head.appendChild(style);
   }
@@ -2760,7 +3672,8 @@ function invoicePrintCss() {
 }
 
 async function renderTaxPrep(el) {
-  const [dashboard, sales, expenses, bills, docs, assets, rewards, audit] = await Promise.all([
+  const taxYear = Number(appState.taxYear || new Date().getFullYear());
+  const [dashboard, allSales, allExpenses, bills, docs, allAssets, allRewards, audit, summary, profile, obligations, allMileage] = await Promise.all([
     api('/api/dashboard'),
     api('/api/sales'),
     api('/api/expenses'),
@@ -2768,51 +3681,117 @@ async function renderTaxPrep(el) {
     api('/api/audit-documents'),
     api('/api/assets'),
     api('/api/makerworld-rewards'),
-    api('/api/tax-audit')
+    api('/api/tax-audit'),
+    api(`/api/tax-summary?year=${taxYear}`),
+    api('/api/tax-profile'),
+    api(`/api/tax-calendar?year=${taxYear}`),
+    api('/api/mileage-logs')
   ]);
-  const k = dashboard.kpis;
+  const sales = allSales.filter(x => yearOf(x.saleDate) === taxYear);
+  const expenses = allExpenses.filter(x => yearOf(x.expenseDate) === taxYear);
+  const yearBills = bills.filter(x => yearOf(x.billDate || x.paymentDate) === taxYear);
+  const assets = allAssets.filter(x => yearOf(x.inServiceDate || x.purchaseDate) === taxYear);
+  const rewards = allRewards.filter(x => yearOf(x.rewardDate) === taxYear);
+  const mileage = allMileage.filter(x => yearOf(x.tripDate) === taxYear);
   const deductibleExpenses = expenses.filter(isTaxCountedExpense);
   const nonDeductibleExpenses = expenses.filter(x => !isTaxCountedExpense(x));
   const reviewExpenses = expenses.filter(x => equalsText(x.deductibleStatus, 'Review') || equalsText(x.taxBucket, 'Review') || x.needsReview);
   const assetExpenses = expenses.filter(x => equalsText(x.taxBucket, 'Asset'));
   const expensedAssets = assets.filter(isFullyExpensedAsset);
-  const makerWorldIncome = sum(rewards.filter(x => equalsText(x.incomeStatus, 'Yes - Count as income')), x => x.giftCardAmount);
-  const deductibleTotal = sum(deductibleExpenses, taxExpenseAmount) + sum(expensedAssets, taxAssetAmount);
-  const filingIncome = Number(k.grossReceipts || 0) + makerWorldIncome;
-  const taxEstimate = buildTaxEstimate(filingIncome, deductibleTotal, Number(k.salesTaxMemo || 0));
+  const makerWorldIncome = Number(summary.makerWorldIncome || 0);
+  const deductibleTotal = Number(summary.operatingExpenseDeductions || 0) + Number(summary.cogsMaterialExpenseDeductions || 0) + Number(summary.expensedAssets || 0) + Number(summary.mileageDeductionEstimate || 0) + Number(summary.parkingAndTolls || 0);
+  const filingIncome = Number(summary.grossReceipts || 0) + makerWorldIncome;
+  const taxEstimate = buildTaxEstimate(filingIncome, deductibleTotal, Number(summary.salesTaxMemo || 0));
   const openProofGaps = [
     ...sales.filter(x => x.needsReview || !x.sourceProof),
     ...expenses.filter(x => x.needsReview || !x.receiptProof),
-    ...bills.filter(x => x.needsReview || !x.sourceProof)
+    ...yearBills.filter(x => x.needsReview || !x.sourceProof)
   ];
   const expenseGroups = groupMoney(deductibleExpenses, 'category', taxExpenseAmount);
-  const billGroups = groupMoney(bills.filter(x => x.taxDeductible !== false), 'category', x => x.total ?? x.amount);
+  const billGroups = groupMoney(yearBills.filter(x => x.taxDeductible !== false), 'category', x => x.total ?? x.amount);
   el.innerHTML = `
     <section class="workspace-hero">
       <div>
         <span class="eyebrow">Tax Prep</span>
-        <h2>Export clean records before filing.</h2>
-        <p>This page is a filing-prep checklist and export hub. It is not tax advice, but it helps you collect the numbers and proof your accountant or tax software will ask for.</p>
+        <h2>Know what to track, what may be due, and what to export.</h2>
+        <p>This is a planning, recordkeeping, and accountant-handoff workspace for tax year ${taxYear}. It does not replace a tax professional or determine that a conditional filing applies.</p>
       </div>
       <div class="hero-actions">
-        <a class="primary-button" href="/api/export/sales">Export Sales</a>
-        <a class="ghost-button dark" href="/api/export/expenses">Export Expenses</a>
+        <a class="primary-button" href="/api/export/tax-package?year=${taxYear}">Download ${taxYear} Tax Package</a>
+        <a class="ghost-button dark" href="/api/export/tax-summary?year=${taxYear}">Export Summary</a>
+        <button class="ghost-button dark" onclick="showPage('taxObligations')">Track Filings & Payments</button>
       </div>
     </section>
+    <div class="tax-year-bar">
+      <label>Tax year <input type="number" min="2020" max="2200" value="${taxYear}" onchange="setTaxYear(this.value)"></label>
+      <span>Current date: ${escapeHtml(new Date().toLocaleDateString())}. Upcoming common dates shown below still depend on your registrations and tax situation.</span>
+    </div>
     <section class="kpi-grid">
-      ${kpi('Gross Receipts', k.grossReceipts, 'Gross receipts from included sales.', 'good')}
+      ${kpi('Gross Receipts', summary.grossReceipts, 'Gross receipts from reportable sales in the selected tax year.', 'good')}
       ${kpi('Deductible Expenses', deductibleTotal, 'Counted expenses plus assets marked expensed this year, adjusted for business-use percent.', deductibleTotal > 0 ? 'warn' : '')}
-      ${kpi('Sales Tax Memo', k.salesTaxMemo, 'Sales tax shown on orders/invoices. Marketplace tax may be handled by the marketplace.', 'warn')}
+      ${kpi('Working Net Profit', summary.workingNetProfit, 'Working recordkeeping estimate after entered costs and deductions. Confirm with a preparer.', summary.workingNetProfit >= 0 ? 'good' : 'warn')}
+      ${kpi('Sales Tax Memo', summary.salesTaxMemo, 'Sales tax shown on orders/invoices. Marketplace and seller-collected amounts must be separated.', 'warn')}
       ${kpi('MakerWorld Income Review', makerWorldIncome, 'Rewards marked Yes - Count as income. Review before filing.', makerWorldIncome > 0 ? 'warn' : '', true)}
-      ${kpi('Proof Gaps', openProofGaps.length, 'Rows missing proof or marked Needs Review.', openProofGaps.length ? 'bad' : 'good', false)}
+      ${kpi('Tax Review Items', summary.missingProofOrReviewCount, 'Rows, mileage, or obligations missing proof or still marked for review.', summary.missingProofOrReviewCount ? 'bad' : 'good', false)}
     </section>
+    ${renderTaxSetup(profile)}
+    ${renderTaxObligationOverview(obligations, taxYear)}
     ${renderTaxEstimate(taxEstimate)}
+    <div class="grid two">
+      <div class="card">
+        <div class="card-header-lite"><h3>Federal & NJ Threshold Watch</h3><span class="badge ${summary.scheduleSeThresholdReached ? 'warn' : 'good'}">${summary.scheduleSeThresholdReached ? '$400 SE threshold reached' : 'Below $400 working-profit threshold'}</span></div>
+        <div class="help-list">
+          <div class="help-item"><strong>Federal self-employment tax</strong><p>Schedule SE generally applies when net self-employment earnings are $400 or more. Your current working net-profit estimate is ${formatMoney(summary.workingNetProfit)}; a tax return may still be required for other reasons.</p></div>
+          <div class="help-item"><strong>Federal estimated payments</strong><p>Generally review 1040-ES when you expect to owe at least $1,000 after withholding and refundable credits. The app cannot know your household withholding or credits.</p></div>
+          <div class="help-item"><strong>NJ estimated payments</strong><p>Generally review NJ-1040-ES when estimated NJ tax is more than $400 beyond withholding and credits.</p></div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header-lite"><h3>Sales-Tax Handling</h3><span class="badge ${summary.salesTaxHandlingNeedsReview ? 'bad' : 'good'}">${summary.salesTaxHandlingNeedsReview} sale rows need confirmation</span></div>
+        <div class="help-list">
+          <div class="help-item"><strong>Seller-collected memo</strong><p>${formatMoney(summary.sellerCollectedSalesTax)} is explicitly marked Seller Collected.</p></div>
+          <div class="help-item"><strong>Marketplace memo</strong><p>${formatMoney(summary.marketplaceSalesTaxMemo)} is marketplace-handled or marketplace-review sales tax.</p></div>
+          <div class="help-item"><strong>NJ ST-50</strong><p>If registered to collect NJ sales tax, quarterly ST-50 returns are required even for a zero-sales quarter. Use the NJ sales-tax review export before filing.</p></div>
+        </div>
+        <div class="actions">
+          <a class="ghost-button" href="/api/export/nj-sales-tax?year=${taxYear}">Export NJ Sales-Tax Review</a>
+          <button class="ghost-button" onclick="showPage('sales')">Review Sales</button>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header-lite"><h3>Accountant / Tax Software Export Package</h3><span class="badge good">One ZIP</span></div>
+      <p>The ${taxYear} package includes a summary, obligations, sales, NJ sales-tax review, expenses, assets, mileage, rewards, and proof index. It is an organized handoff, not a completed return.</p>
+      <div class="actions">
+        <a class="primary-button" href="/api/export/tax-package?year=${taxYear}">Download ${taxYear} Tax Package</a>
+        <a class="ghost-button" href="/api/export/tax-sales?year=${taxYear}&paymentGroup=all">Export ${taxYear} Sales</a>
+        <button class="ghost-button" onclick="showPage('mileage')">Open Mileage Log (${mileage.length})</button>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-header-lite"><h3>Sales Tax Exports By Payment Channel</h3><span class="badge">${sales.length} sales rows</span></div>
+      <p>These exports include active Sales marked for dashboard/reporting. Older marketplace rows are classified as online from their platform; ambiguous direct payments stay in Unknown / Review.</p>
+      <div class="tax-export-grid">
+        ${taxPaymentExport('All Reportable', 'Every reportable paid sale.', 'all', taxYear)}
+        ${taxPaymentExport('Non-Cash', 'Digital transfers, cards, online marketplaces, checks, and other known non-cash payments.', 'noncash', taxYear)}
+        ${taxPaymentExport('Digital Transfer', 'Zelle, Venmo, Cash App, PayPal, ACH, and bank transfer.', 'digital', taxYear)}
+        ${taxPaymentExport('Credit / Debit Card', 'Credit card, debit card, Square, and Stripe payments.', 'card', taxYear)}
+        ${taxPaymentExport('Online Marketplace', 'Etsy, MakerWorld, Shopify, eBay, Amazon, website, and online marketplace sales.', 'online', taxYear)}
+        ${taxPaymentExport('Cash', 'Cash payments only.', 'cash', taxYear)}
+        ${taxPaymentExport('Other Non-Cash', 'Checks and any known non-cash method outside the named groups.', 'other', taxYear)}
+        ${taxPaymentExport('Unknown / Review', 'Direct sales where payment method still needs to be entered.', 'unknown', taxYear)}
+      </div>
+    </div>
     <div class="grid two">
       <div class="card">
         <div class="card-header-lite"><h3>Filing Checklist</h3><span class="badge">Do before filing</span></div>
         <div class="tax-checklist">
-          ${taxCheck('Export Sales CSV', 'Use for gross receipts, platform, tax memo, fees, shipping charged, COGS, and proof references.', '/api/export/sales')}
+          ${taxCheck('Download Tax Package ZIP', 'Best starting point for an accountant or tax software handoff.', `/api/export/tax-package?year=${taxYear}`)}
+          ${taxCheck('Export All Reportable Sales CSV', 'Use for gross receipts, payment method/channel, platform, tax memo, fees, shipping charged, COGS, and proof references.', `/api/export/tax-sales?year=${taxYear}&paymentGroup=all`)}
+          ${taxCheck('Export NJ Sales-Tax Review CSV', 'Separates seller-collected, marketplace, exempt, and review sales-tax handling.', `/api/export/nj-sales-tax?year=${taxYear}`)}
           ${taxCheck('Export Expenses CSV', 'Use for deductible business purchases: filament, shipping labels, packaging, software, tools, ads.', '/api/export/expenses')}
+          ${taxCheck('Export Mileage CSV', 'Business purpose, miles, parking/tolls, and supporting references.', '/api/export/mileage-logs')}
+          ${taxCheck('Export Tax Obligations CSV', 'Filing/payment statuses, amounts, confirmations, and proof.', '/api/export/tax-obligations')}
           ${taxCheck('Export Bills/AP CSV', 'Use if you track unpaid vendor obligations or accrual-style records.', '/api/export/bills')}
           ${taxCheck('Export Audit Docs CSV', 'Use as proof index: receipt PDFs, invoice PDFs, screenshots, and file paths.', '/api/export/audit-documents')}
           ${taxCheck('Download DB Backup', 'Keep a full SQLite backup before filing and after filing.', null, 'backupDb()')}
@@ -2821,12 +3800,12 @@ async function renderTaxPrep(el) {
       <div class="card">
         <div class="card-header-lite"><h3>Review Before Filing</h3><span class="badge warn">${openProofGaps.length} gaps</span></div>
         <div class="help-list">
-          <div class="help-item"><strong>Needs Review</strong><p>${dashboard.kpis.needsReviewCount} rows are marked Needs Review. Clear these or document why they are estimates.</p></div>
+          <div class="help-item"><strong>Needs Review</strong><p>${summary.missingProofOrReviewCount} selected-year rows or obligations need proof/review. Clear these or document why they remain estimates.</p></div>
           <div class="help-item"><strong>Missing Proof</strong><p>${openProofGaps.length} sales/expenses/bills are missing proof or need review.</p></div>
           <div class="help-item"><strong>Excluded / Non-Deductible</strong><p>${nonDeductibleExpenses.length} expenses are excluded because they are non-deductible, memo-only, assets, unchecked, or review-only.</p></div>
           <div class="help-item"><strong>Expense Review</strong><p>${reviewExpenses.length} expenses need category or deductibility review before filing.</p></div>
           <div class="help-item"><strong>Asset Review</strong><p>${assetExpenses.length} expenses are marked Asset, and ${assets.filter(x => x.needsReview || equalsText(x.taxTreatment, 'Review') || equalsText(x.taxTreatment, 'Depreciation')).length} asset rows need tax-treatment or depreciation review.</p></div>
-          <div class="help-item"><strong>Total Filing Prep Income</strong><p>${formatMoney(Number(k.grossReceipts || 0) + makerWorldIncome)} combines gross receipts and MakerWorld rewards marked as income. Sales-tax memo stays separate.</p></div>
+          <div class="help-item"><strong>Total Filing Prep Income</strong><p>${formatMoney(filingIncome)} combines selected-year gross receipts and MakerWorld rewards marked as income. Sales-tax memo stays separate.</p></div>
           <div class="help-item"><strong>Uploaded Proof</strong><p>${docs.length} audit documents are indexed.</p></div>
         </div>
       </div>
@@ -2837,19 +3816,26 @@ async function renderTaxPrep(el) {
         ${moneyGroupTable(expenseGroups)}
       </div>
       <div class="card">
-        <div class="card-header-lite"><h3>AP/Bills By Category</h3><span class="badge">${bills.length} rows</span></div>
+        <div class="card-header-lite"><h3>AP/Bills By Category</h3><span class="badge">${yearBills.length} rows</span></div>
         ${moneyGroupTable(billGroups)}
       </div>
     </div>
     <div class="card">
       <div class="card-header-lite"><h3>Calculation Audit</h3><span class="badge ${audit.summary.criticalIssues || audit.summary.highIssues ? 'bad' : audit.summary.mediumIssues ? 'warn' : 'good'}">${audit.issues.length} findings</span></div>
       <p>This checks for mismatched totals, paid invoices without sales, unpaid invoices with sales, tax-classification gaps, and asset/reward review items.</p>
+      ${aiTouchCard(
+        'Local rules',
+        'Tax-prep consistency check',
+        'Entered ledger totals, statuses, classifications, and record relationships.',
+        'Creates a read-only findings list. It does not change records and is not tax advice.',
+        'Before filing, exporting, or handing records to an accountant.'
+      )}
       ${audit.issues.length ? smallTable(audit.issues.slice(0, 12), ['severity','title','record','detail']) : emptyState('No calculation audit findings.', 'The current entered records pass the built-in consistency checks.')}
     </div>
     <div class="card">
-      <div class="card-header-lite"><h3>Sales Tax Memo</h3><span class="badge warn">${formatMoney(k.salesTaxMemo)}</span></div>
+      <div class="card-header-lite"><h3>Sales Tax Memo</h3><span class="badge warn">${formatMoney(summary.salesTaxMemo)}</span></div>
       <p>Use this as a memo/checking number, not as automatic tax filing advice. Etsy and other marketplaces may collect/remit marketplace sales tax. Direct invoices may be different. Verify with your accountant or tax software.</p>
-      ${smallTable(dashboard.monthly, ['month','grossReceipts','salesTaxMemo','estimatedCosts','estimatedNet','orders'])}
+      ${smallTable((dashboard.monthly || []).filter(x => String(x.month || '').startsWith(String(taxYear))), ['month','grossReceipts','salesTaxMemo','estimatedCosts','estimatedNet','orders'])}
     </div>`;
 }
 
@@ -2886,6 +3872,94 @@ function taxEstimateSettings() {
   } catch {
     return defaults;
   }
+}
+
+function yearOf(value) {
+  if (!value) return null;
+  const year = Number(String(value).substring(0, 4));
+  return Number.isFinite(year) ? year : null;
+}
+
+function setTaxYear(value) {
+  appState.taxYear = Math.min(2200, Math.max(2020, Number(value || new Date().getFullYear())));
+  showPage('taxPrep', { replace: true });
+}
+
+function taxProfileSelect(id, label, value, options, detail) {
+  return `<label class="tax-profile-field"><span>${escapeHtml(label)}</span><select id="${id}">${options.map(x => `<option value="${escapeHtml(x)}" ${x === value ? 'selected' : ''}>${escapeHtml(x)}</option>`).join('')}</select><small>${escapeHtml(detail)}</small></label>`;
+}
+
+function renderTaxSetup(profile) {
+  const months = ['','January','February','March','April','May','June','July','August','September','October','November','December'];
+  return `<section class="card tax-setup-card">
+    <div class="card-header-lite"><h3>Tax Setup: Confirm What Applies To EPATA</h3><span class="badge warn">Do this first</span></div>
+    <p>These answers control the checklist and expose questions to take to a preparer. “Not confirmed” is intentional; the app will not guess your legal or tax status.</p>
+    <div class="tax-profile-grid">
+      ${taxProfileSelect('taxEntityType', 'Entity / filing treatment', profile.entityType, ['Not confirmed','Single-member LLC / Schedule C','Partnership / multi-member LLC','S corporation','C corporation','Other'], 'Confirm how the LLC is treated for federal and NJ income tax.')}
+      ${taxProfileSelect('taxSalesTaxRegistration', 'NJ sales-tax registration', profile.njSalesTaxRegistration, ['Not confirmed','Registered','Not registered'], 'Registered sellers generally file quarterly ST-50 returns, including zero-sales quarters.')}
+      <label class="tax-profile-field"><span>NJ formation month</span><select id="taxFormationMonth">${months.map((x, i) => `<option value="${i || ''}" ${Number(profile.formationMonth || 0) === i ? 'selected' : ''}>${escapeHtml(x || 'Not confirmed')}</option>`).join('')}</select><small>NJ annual report is due in the formation/authorization month.</small></label>
+      ${taxProfileSelect('taxHasEmployees', 'Employees', profile.hasEmployees, commonOptions.yesNoUnknown, 'Employees create payroll, withholding, unemployment, and W-2 obligations.')}
+      ${taxProfileSelect('taxPaysContractors', 'Pays contractors', profile.paysContractors, commonOptions.yesNoUnknown, 'Contractor payments may create information-return requirements.')}
+      ${taxProfileSelect('taxUsesVehicle', 'Business vehicle use', profile.usesVehicle, commonOptions.yesNoUnknown, 'If yes, keep a timely mileage log and confirm deduction method.')}
+      ${taxProfileSelect('taxHomeOffice', 'Home-office review', profile.homeOffice, commonOptions.yesNoUnknown, 'Ask a preparer whether your workspace meets the applicable rules.')}
+      ${taxProfileSelect('taxInventoryMethod', 'Materials / inventory treatment', profile.inventoryMethod, ['Not confirmed','Supplies / expense','Inventory / COGS','Mixed / preparer review'], 'Confirm how filament, hardware, packaging, and finished goods should be treated.')}
+      <label class="tax-profile-field"><span>Business mileage rate</span><input id="taxMileageRate" type="number" min="0" step="0.001" value="${profile.businessMileageRate ?? ''}"><small>Enter only after verifying the correct rate/method for the tax year.</small></label>
+    </div>
+    <label class="tax-profile-notes"><span>Tax setup notes / questions for preparer</span><textarea id="taxProfileNotes">${escapeHtml(profile.notes || '')}</textarea></label>
+    <div class="actions">
+      <button class="primary-button" onclick="saveTaxProfile()">Save Tax Setup</button>
+      <a class="ghost-button" href="https://www.irs.gov/businesses/small-businesses-self-employed/self-employed-individuals-tax-center" target="_blank" rel="noopener">IRS Self-Employed Center</a>
+      <a class="ghost-button" href="https://business.nj.gov/pages/filings-and-accounting" target="_blank" rel="noopener">NJ Filing Guidance</a>
+    </div>
+  </section>`;
+}
+
+async function saveTaxProfile() {
+  const payload = {
+    entityType: qs('#taxEntityType').value,
+    state: 'New Jersey',
+    formationMonth: qs('#taxFormationMonth').value ? Number(qs('#taxFormationMonth').value) : null,
+    njSalesTaxRegistration: qs('#taxSalesTaxRegistration').value,
+    hasEmployees: qs('#taxHasEmployees').value,
+    paysContractors: qs('#taxPaysContractors').value,
+    usesVehicle: qs('#taxUsesVehicle').value,
+    homeOffice: qs('#taxHomeOffice').value,
+    inventoryMethod: qs('#taxInventoryMethod').value,
+    businessMileageRate: qs('#taxMileageRate').value ? Number(qs('#taxMileageRate').value) : null,
+    notes: qs('#taxProfileNotes').value
+  };
+  await api('/api/tax-profile', { method: 'PUT', body: JSON.stringify(payload) });
+  toast('Tax Setup saved.');
+  await showPage('taxPrep', { replace: true });
+}
+
+function renderTaxObligationOverview(obligations, taxYear) {
+  const today = new Date();
+  const active = obligations.filter(x => !equalsText(x.status, 'Filed / Paid') && !equalsText(x.status, 'Not Required'));
+  const overdue = active.filter(x => x.dueDate && new Date(`${String(x.dueDate).substring(0,10)}T23:59:59`) < today);
+  const upcoming = active.filter(x => !x.dueDate || new Date(`${String(x.dueDate).substring(0,10)}T23:59:59`) >= today).slice(0, 8);
+  return `<section class="card">
+    <div class="card-header-lite"><h3>${taxYear} Filing, Payment & Annual-Fee Tracker</h3><span class="badge ${overdue.length ? 'bad' : obligations.length ? 'warn' : 'good'}">${overdue.length} overdue / ${active.length} open</span></div>
+    <p>Generated obligations start as Review Applicability. Confirm each one, then track filed/paid date, amount, confirmation number, and proof.</p>
+    ${obligations.length ? `<div class="tax-obligation-overview">
+      ${[...overdue, ...upcoming].slice(0, 10).map(x => `<button class="tax-obligation-card ${x.dueDate && new Date(`${String(x.dueDate).substring(0,10)}T23:59:59`) < today ? 'overdue' : ''}" onclick="showPage('taxObligations')">
+        <span>${escapeHtml(x.jurisdiction)} · ${escapeHtml(x.period || 'Annual')}</span>
+        <strong>${escapeHtml(x.title)}</strong>
+        <small>${x.dueDate ? `Due ${escapeHtml(String(x.dueDate).substring(0,10))}` : 'Due date needs formation/setup details'} · ${escapeHtml(x.status)}</small>
+      </button>`).join('')}
+    </div>` : emptyState('No tax obligations generated yet.', 'Create the yearly checklist, then confirm which obligations apply.')}
+    <div class="actions">
+      <button class="primary-button" onclick="generateTaxCalendar(${taxYear})">${obligations.length ? 'Refresh / Add Missing Obligations' : `Create ${taxYear} Tax Checklist`}</button>
+      <button class="ghost-button" onclick="showPage('taxObligations')">Open Full Tracker</button>
+      <a class="ghost-button" href="/api/export/tax-obligations">Export Tracker</a>
+    </div>
+  </section>`;
+}
+
+async function generateTaxCalendar(year) {
+  const result = await api(`/api/tax-calendar/generate?year=${year}`, { method: 'POST' });
+  toast(`Tax checklist now has ${result.length} tracked obligations.`);
+  await showPage('taxPrep', { replace: true });
 }
 
 function syncBrowserHistory(page, options = {}) {
@@ -3010,6 +4084,9 @@ function taxCheck(title, detail, href, onclick) {
   const action = href ? `<a class="ghost-button" href="${href}">Export</a>` : `<button class="ghost-button" onclick="${onclick}">Backup</button>`;
   return `<div class="tax-check"><div><strong>${escapeHtml(title)}</strong><p>${escapeHtml(detail)}</p></div>${action}</div>`;
 }
+function taxPaymentExport(title, detail, group, year = appState.taxYear) {
+  return `<a class="tax-export-card" href="/api/export/tax-sales?year=${encodeURIComponent(year)}&paymentGroup=${encodeURIComponent(group)}"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(detail)}</span><b>Download CSV</b></a>`;
+}
 
 async function uploadDocuments() {
   const files = qs('#docFiles').files;
@@ -3044,6 +4121,7 @@ function renderUploadResult(result) {
   return `
     <div class="help-item">
       <strong>Uploaded and indexed ${result.count} document${result.count === 1 ? '' : 's'}.</strong>
+      ${assistanceIndicator('Automation', 'Upload created Audit Doc records')}
       <p>These are now Audit Docs. Next, either create the business record they prove, or edit the Audit Doc and add missing details.</p>
     </div>
     ${suggestions.length ? `<div class="assistant-suggestions">
@@ -3051,6 +4129,13 @@ function renderUploadResult(result) {
         <span class="eyebrow">Inbox → Ledger Assistant</span>
         <h3>Suggested next steps</h3>
         <p>These are review prompts only. Nothing posts to the ledger until you choose where it belongs.</p>
+        ${aiTouchCard(
+          'Local rules, not model AI',
+          'Document routing suggestion',
+          'Uploaded filename, selected related area/reference, and locally extracted text patterns.',
+          'Creates the Audit Doc from your upload, then only suggests a destination and prefill. It does not post the suggested ledger record.',
+          'A receipt, screenshot, PDF, or note arrives before you know which ledger should hold the business event.'
+        )}
       </div>
       ${suggestions.map(renderInboxSuggestion).join('')}
     </div>` : ''}
@@ -3097,8 +4182,10 @@ function renderInboxSuggestion(suggestion) {
   return `<div class="assistant-suggestion">
     <div>
       <span class="badge ${suggestion.confidence === 'Low' ? 'warn' : 'good'}">${escapeHtml(suggestion.lane)} · ${escapeHtml(suggestion.confidence)} confidence</span>
+      ${assistanceIndicator(suggestion.engine || 'Local rules', suggestion.engine || 'Local rules')}
       <strong>${escapeHtml(suggestion.title)}</strong>
       <p>${escapeHtml(suggestion.detail)}</p>
+      <p class="assistant-limit"><b>Touches:</b> ${escapeHtml(suggestion.touches || 'Uploaded proof metadata.')} <b>Does not:</b> ${escapeHtml(suggestion.doesNot || 'Save the suggested record.')}</p>
       ${extracted ? `<div class="assistant-extracted">${extracted}</div>` : ''}
       ${reasons}
       ${steps}
@@ -3218,21 +4305,80 @@ function renderHelp(el) {
     ['Only have a PDF/receipt right now', 'Document Intake first, then Quick Add if needed', 'Upload proof to create an Audit Doc. Then use Quick Add or Attach File on an existing row for the actual business event. Intake does not silently auto-post accounting records.']
   ];
   const tabs = [
-    ['Dashboard', 'Shows totals, charts, open AR/AP, review count, and action items. It is a view, not where you usually enter data.'],
-    ['Quick Add', 'Best starting point for new business events. Pick what happened and the app opens the right form.'],
-    ['Estimates', 'Customer-facing quote builder with calculator, line items, live PDF preview, and Customer Job sync.'],
-    ['Invoices', 'Customer-facing invoice builder with PDF preview. Saving updates AR; paid invoices update Direct Sales.'],
-    ['Calculator', 'Pricing calculator from the invoice tool. Use it to build a quote before pushing to an estimate.'],
-    ['Invoice Records', 'Saved estimates and invoices from the unified database.'],
-    ['Workflow', 'Visual map plus step-by-step “where do I enter this?” page. Use it whenever you feel unsure.'],
-    ['Document Intake', 'Upload proof files. It creates Audit Docs and stores files locally. It does not yet automatically decide accounting entries.'],
-    ['Sales', 'Money that came in or sales/orders that should count toward revenue when included in dashboard.'],
-    ['AR Invoices', 'Money customers owe you from direct invoices. This is not cash until paid.'],
+    ['Dashboard', 'Your cockpit. Review totals, charts, open AR/AP, proof gaps, and action items. Usually a view, not a data-entry page.'],
+    ['Quick Add', 'Fast entry for simple events: paid sale, unpaid invoice/AR, paid expense, AP bill, or manually-sent estimate.'],
+    ['Estimates', 'Customer-facing quote builder with calculator, line items, live PDF preview, and Customer Job sync. Estimates are not income.'],
+    ['Invoices', 'Customer-facing invoice builder with PDF preview. Saving an invoice updates AR; marking it paid updates Sales.'],
+    ['Calculator', 'Pricing calculator from the invoice tool. Use it to price a job before pushing numbers into an estimate or invoice.'],
+    ['Invoice Records', 'Saved estimate/invoice PDFs from the unified database. Open, duplicate, convert, archive, export, and review document records here.'],
+    ['Job Timeline', 'The story view. It chains estimates, jobs, invoices, payments, proof, and cleanup actions by customer/project.'],
+    ['AI Estimate Intake', 'Combine pasted requests, public product/source URLs, PDF or DOCX documents, product/reference pictures, and text files to create structured estimate items in an unsaved draft. Pricing rules come from AiEstimateInstructions.json.'],
+    ['AI Review Center', 'Read-only deterministic review with an optional, explicit LM Studio explanation and prioritization step.'],
+    ['Local AI Power', 'Choose a downloaded LM Studio model, start or stop the loopback-only server, and monitor whether the server and model are ready.'],
+    ['Document Intake', 'The inbox for proof files. Upload PDFs, receipts, screenshots, CSVs, and notes before linking them to a business record.'],
+    ['Sales', 'Money that came in. Etsy orders and paid direct invoices live here for revenue/tax reporting.'],
+    ['AR Ledger', 'Money customers owe you. This tracks unpaid or paid direct invoices as receivables. It is the invoice-money tracker.'],
     ['AP Bills', 'Money you owe vendors but have not paid yet.'],
-    ['Expenses', 'Money already paid out for supplies, shipping, software, tools, etc.'],
-    ['Customer Jobs', 'The project/work history. Use when tracking the work matters separately from payment.'],
-    ['Audit Docs', 'Proof index: PDFs, receipts, screenshots, order files, and file paths.'],
-    ['Actions', 'Cleanup list for missing fees, missing proof, follow-ups, and bookkeeping tasks.']
+    ['Expenses', 'Money already paid out for supplies, shipping, software, tools, ads, and other business costs.'],
+    ['Accounts', 'Cash/bank/payment accounts used for categorizing where money moved.'],
+    ['Customer Jobs', 'The work/project tracker. Jobs explain what you made or are making, separate from whether money arrived.'],
+    ['Customers', 'Customer directory. Click a customer to see their sales, AR, estimate/invoice PDFs, jobs, and proof.'],
+    ['Vendors', 'Vendor directory. Click a vendor to see related expenses, bills/AP, assets, and proof.'],
+    ['Products / Costing', 'Product catalog and costing defaults. Use it to prefill quote/invoice/calculator details while still allowing manual overrides.'],
+    ['Assets', 'Higher-value purchases like printers/tools that may need tax/depreciation review instead of simple expense treatment.'],
+    ['MakerWorld', 'MakerWorld income/reward tracking so it can be reviewed separately from ordinary sales.'],
+    ['Audit Docs', 'Proof index: PDFs, receipts, screenshots, order files, and local file paths. View, edit, review, or archive uploaded proof here.'],
+    ['Actions', 'Cleanup and follow-up list for missing fees, missing proof, tax review, customer follow-ups, and bookkeeping tasks.'],
+    ['Tax Prep', 'Filing prep hub. Export sales by payment channel, review gross receipts, deductible expenses, sales-tax memo, and proof gaps.'],
+    ['Tax Obligations', 'Durable tracker for possible/confirmed filings, quarterly payments, annual fees, due dates, confirmation numbers, and proof.'],
+    ['Mileage Log', 'Business-purpose trip log for miles, parking/tolls, route, and support. Confirm deduction method and rate before filing.'],
+    ['Import / Export', 'Database and CSV movement. Use this for exports, backups, and careful imports.'],
+    ['Admin / Data', 'Configuration and maintenance area for app settings, hard-coded lists, database checks, and safe data admin tasks.'],
+    ['Workflow', 'Step-by-step process guide for “where do I enter this?” decisions.'],
+    ['Ledger Map', 'Interactive visual explanation of why Sales, AR, jobs, proof, invoices, expenses, and actions are separate.'],
+    ['Help / Glossary', 'This page. Return here when you forget the app flow or need plain-language definitions.']
+  ];
+  const tourGroups = [
+    ['Command: start and create', [
+      ['dashboard', 'Dashboard', 'Check today', 'Look for alerts, charts, open AR/AP, tax prep gaps, and what needs attention.'],
+      ['quickAdd', 'Quick Add', 'Enter simple events', 'Use this when something happened and you need the correct ledger row quickly.'],
+      ['estimates', 'Estimates', 'Quote work', 'Create a customer-facing estimate PDF. It also creates/updates the quoted job.'],
+      ['invoices', 'Invoices', 'Bill customer', 'Create the invoice PDF. This updates AR so you can track what is owed.'],
+      ['pricingCalculator', 'Calculator', 'Price the job', 'Estimate material, time, profit, and line items before pushing to the document.'],
+      ['invoiceRecords', 'Invoice Records', 'Find documents', 'Open saved estimates/invoices, convert estimates, duplicate records, or export.'],
+      ['jobTimeline', 'Job Timeline', 'See the story', 'Review the full chain: estimate, job, invoice, payment, proof, and actions.'],
+      ['aiEstimate', 'AI Estimate Intake', 'Draft from mixed sources', 'Combine customer text, public source URLs, documents, and pictures; review the generated line items, then open an unsaved estimate draft.'],
+      ['documentIntake', 'Document Intake', 'Upload proof', 'Use this when the file comes first. Then link it to the record it proves.']
+    ]],
+    ['Books: money ledgers', [
+      ['sales', 'Sales', 'Money came in', 'Paid orders and paid invoices count here for revenue.'],
+      ['receivables', 'AR Ledger', 'Customer owes you', 'Invoices live here as money owed until paid.'],
+      ['bills', 'AP Bills', 'You owe vendor', 'Vendor bills belong here until paid.'],
+      ['expenses', 'Expenses', 'Money went out', 'Paid purchases, fees, supplies, ads, shipping labels, and software.'],
+      ['accounts', 'Accounts', 'Where money moved', 'Payment/bank/account references for reporting and cleanup.']
+    ]],
+    ['Operations: people and work', [
+      ['customerJobs', 'Customer Jobs', 'Track the work', 'Use this for make/design status and project history.'],
+      ['customers', 'Customers', 'Customer history', 'Click a customer to see their jobs, sales, AR, PDFs, and proof.'],
+      ['vendors', 'Vendors', 'Vendor history', 'Click a vendor to see expenses, bills, assets, and proof tied to them.'],
+      ['products', 'Products / Costing', 'Reuse pricing data', 'Store products and cost assumptions so quotes/invoices can prefill.'],
+      ['assets', 'Assets', 'Track big purchases', 'Printers/tools may need asset treatment and tax review.'],
+      ['makerworld', 'MakerWorld', 'Review rewards', 'Keep platform rewards/income visible and separate for review.']
+    ]],
+    ['Control: proof, review, and filing', [
+      ['aiReview', 'AI Review Center', 'Prioritize cleanup', 'See a read-only worklist with reasons, evidence, and links to the relevant ledger.'],
+      ['localAi', 'Local AI Power', 'Start private AI', 'Select a downloaded LM Studio model, start it only when needed, and monitor its local-only status.'],
+      ['auditDocs', 'Audit Docs', 'View proof files', 'Open uploaded PDFs/images/files and see which record they support.'],
+      ['actions', 'Actions', 'Finish cleanup', 'Tasks can be created by you or by the app when data needs review.'],
+      ['taxPrep', 'Tax Prep', 'Prepare filing exports', 'Review income, expenses, proof gaps, and export CSVs for filing.'],
+      ['taxObligations', 'Tax Obligations', 'Track filings and payments', 'Confirm what applies, then record due dates, amounts, confirmation numbers, and proof.'],
+      ['mileage', 'Mileage Log', 'Track business driving', 'Record business purpose and miles while details are fresh.'],
+      ['importExport', 'Import / Export', 'Move data safely', 'Use for CSV exports, backups, and careful imports.'],
+      ['admin', 'Admin / Data', 'Maintain settings', 'Manage app configuration and data maintenance.'],
+      ['workflowGuide', 'Workflow', 'Decision guide', 'Use when you know what happened but not where to enter it.'],
+      ['ledgerMap', 'Ledger Map', 'Understand why', 'Interactive map explaining what each ledger means and how they relate.'],
+      ['help', 'Help / Glossary', 'Reset your bearings', 'Come back here for this walkthrough and definitions.']
+    ]]
   ];
   el.innerHTML = `
     <section class="workspace-hero">
@@ -3247,8 +4393,44 @@ function renderHelp(el) {
         <button class="primary-button" onclick="showPage('quickAdd')">Start Quick Add</button>
         <button class="ghost-button dark" onclick="showPage('ledgerMap')">Open Ledger Map</button>
         <button class="ghost-button dark" onclick="showPage('workflowGuide')">Open Workflow Guide</button>
+        <button class="ghost-button dark" onclick="showPage('aiReview')">Open AI Review</button>
       </div>
     </section>
+
+    <div class="card">
+      <div class="card-header-lite"><h3>AI, Local Rules, and Automation</h3><span class="badge warn">Know what touched your data</span></div>
+      <p>The app labels three different kinds of assistance. AI interprets selected source content, local rules apply repeatable checks on this computer, and automation synchronizes records after an explicit save or payment action.</p>
+      ${assistanceLegend()}
+      <div class="ai-guide-grid">
+        ${aiTouchCard('AI model', 'AI Estimate Intake', 'Only sources you add to intake plus AiEstimateInstructions.json.', 'Returns a preview and unsaved draft with a provenance note. It never silently saves or sends.', 'A request is spread across messages, email, public source URLs, documents, pictures, or notes.')}
+        ${aiTouchCard('Local rules', 'Estimate fallback, AI Review Center, and Document Intake suggestions', 'Supplied estimate sources or active local ledger/proof metadata, depending on the feature.', 'Creates drafts, findings, or suggestions for review. It does not silently post ledger records.', 'You need a fast first pass, cleanup priorities, or help routing proof.')}
+        ${aiTouchCard('Automation', 'Ledger synchronization', 'A record you explicitly save or mark paid.', 'Updates related Job, AR, Sale, or Audit Doc records according to fixed app rules.', 'You save an estimate/invoice, record payment, or upload proof.')}
+      </div>
+      <p class="muted">The full static reference is <code>AI_FEATURES.md</code>. Editable estimate pricing and fee rules are in <code>AiEstimateInstructions.json</code>.</p>
+    </div>
+
+    <div class="card nav-tour-card">
+      <div class="card-header-lite"><h3>Chained Tab Walkthrough</h3><span class="badge">Click any step</span></div>
+      <p class="muted">Read left to right. The first row is the normal quote/order flow; the other rows are where the same data is reviewed, linked, cleaned up, and exported.</p>
+      <div class="nav-tour">
+        ${tourGroups.map(([groupName, items]) => `
+          <section class="nav-tour-lane" aria-label="${escapeHtml(groupName)}">
+            <div class="nav-tour-lane-title">${escapeHtml(groupName)}</div>
+            <div class="nav-tour-chain">
+              ${items.map(([page, label, action, detail], index) => `
+                <button type="button" class="nav-tour-step" onclick="showPage('${escapeHtml(page)}')" title="${escapeHtml(detail)}">
+                  <span class="tour-index">${index + 1}</span>
+                  <strong>${escapeHtml(label)}</strong>
+                  <em>${escapeHtml(action)}</em>
+                  <small>${escapeHtml(detail)}</small>
+                </button>
+                ${index < items.length - 1 ? '<span class="nav-tour-arrow" aria-hidden="true">→</span>' : ''}
+              `).join('')}
+            </div>
+          </section>
+        `).join('')}
+      </div>
+    </div>
 
     <div class="grid two">
       <div class="card">
@@ -3382,6 +4564,7 @@ async function backupDb() {
 
 qs('#backupBtn').onclick = backupDb;
 qs('#appBackBtn').onclick = goBack;
+initializeSidebar();
 bindTooltips();
 qs('#globalSearch').oninput = () => {
   clearTimeout(appState.globalSearchTimer);
@@ -3392,9 +4575,16 @@ qs('#modalCancel').onclick = e => { e.preventDefault(); closeModal(); };
 qs('#modalBackdrop').onclick = closeModal;
 qs('#modalSave').onclick = e => { e.preventDefault(); saveModal(); };
 
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    closeModal();
+    closeMobileSidebar();
+  }
+});
 
 renderNav();
+refreshLocalAiHeaderStatus();
+appState.localAiHeaderTimer = setInterval(refreshLocalAiHeaderStatus, 15000);
 api('/api/app-info').then(info => {
   if (info?.isTest) qs('#testModeBanner')?.classList.remove('hidden');
 }).catch(() => {});

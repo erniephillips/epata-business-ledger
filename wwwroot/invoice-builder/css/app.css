@@ -576,12 +576,47 @@ table.data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .data-table .actions { display: flex; gap: 6px; justify-content: flex-end; }
 .data-table .doc-number { font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
 .data-table .muted   { color: var(--muted); font-size: 12px; }
+.record-link {
+  border: 0;
+  background: transparent;
+  color: var(--blue);
+  padding: 0;
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+}
+.record-link:hover { text-decoration: underline; }
+.records-pager {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 6px 0;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.records-pager-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.records-page-size {
+  min-height: 30px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--radius-sm);
+  background: #fff;
+  color: var(--ink);
+  padding: 4px 8px;
+}
 
 /* ── Line Items Table ──────────────────────────────────────────── */
 .lineitems-wrap {
   border: 1.5px solid var(--line-2);
   border-radius: var(--radius);
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
   margin-bottom: 12px;
 }
 table.li-table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -1333,6 +1368,9 @@ table.li-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 }
 .autosave-indicator.saving { color: #fcd34d; }
 .autosave-indicator.saved  { color: #86efac; }
+.autosave-indicator.assistant-draft { color: #fff; font-weight: 800; }
+.autosave-indicator.assistant-ai { background: rgba(124,58,237,.72); }
+.autosave-indicator.assistant-rules { background: rgba(217,119,6,.72); }
 .autosave-dot { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .autosave-indicator.saving .autosave-dot { animation: blink 0.7s infinite; }
 
@@ -1365,7 +1403,7 @@ select.status-select { font-weight: 600; }
 /* ══════════════════════════════════════════════════════════════
    RESPONSIVE
    ══════════════════════════════════════════════════════════════ */
-@media (max-width: 1280px) {
+@media (max-width: 1500px) {
   .quote-primer,
   .formula-library,
   .records-guide,
@@ -1406,9 +1444,17 @@ select.status-select { font-weight: 600; }
   .view-header,
   .view-body,
   .active-record-bar {
-    padding-left: 18px;
-    padding-right: 18px;
+    padding-left: 12px;
+    padding-right: 12px;
   }
+  .view-actions {
+    width: 100%;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 3px;
+  }
+  .view-actions > * { flex: 0 0 auto; }
+  .card-body { padding: 14px; }
   .form-row,
   .form-row-3,
   .calc-row,
@@ -1426,8 +1472,11 @@ select.status-select { font-weight: 600; }
   }
   .invoice-preview-stage {
     min-height: 560px;
-    padding: 12px;
+    max-width: 100%;
+    padding: 8px;
   }
+  .invoice-preview-frame { min-width: 640px; }
+  table.li-table { min-width: 720px; }
   .difficulty-grid {
     grid-template-columns: 1fr 1fr;
   }
@@ -1461,6 +1510,16 @@ select.status-select { font-weight: 600; }
   .difficulty-grid {
     grid-template-columns: 1fr;
   }
+  .view-header,
+  .view-body,
+  .active-record-bar {
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+  .card-header { padding: 12px; }
+  .card-body { padding: 12px; }
+  .invoice-preview-frame { min-width: 560px; }
+  .summary-lines { padding-left: 12px; padding-right: 12px; }
   .result-total-value {
     font-size: 34px;
   }

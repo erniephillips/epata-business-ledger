@@ -4,6 +4,7 @@ import { money } from './utils.js';
 
 const ASSET_ROOT = '/invoice-builder/img/invoice';
 const REVIEW_URL = 'https://share.google/ME4Y7hOEFEg9ZoFRw';
+const AI_USE_DISCLOSURE = 'AI-assisted tools may be used during design, development, or production; all final deliverables are reviewed and approved by EPATA LLC.';
 
 export async function generatePdf(data, preview = false) {
   const html = renderInvoiceHtml(data, { autoPrint: !preview });
@@ -151,6 +152,7 @@ export function renderInvoiceHtml(input, options = {}) {
               <div class="panel-label">Terms &amp; Notes</div>
               <div class="panel-body">
                 ${bulletList(d.termsNotes, 'd-flex flex-column gap-3')}
+                <div class="ai-use-disclosure">${esc(AI_USE_DISCLOSURE)}</div>
               </div>
             </section>
           </div>
@@ -658,6 +660,16 @@ function invoiceStyles() {
     .small-panel ul {
       padding-left: 16px;
       margin-bottom: 0;
+    }
+
+    .ai-use-disclosure {
+      margin-top: 12px;
+      padding-top: 9px;
+      border-top: 1px solid #c8d3e5;
+      color: #34445f;
+      font-size: 10px;
+      line-height: 1.35;
+      font-style: italic;
     }
 
     .signature-line {

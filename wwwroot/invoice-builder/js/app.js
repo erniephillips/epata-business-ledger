@@ -12,12 +12,15 @@ import { initCalculator, calculate, getCalcState,
          applyConfigDefaults, syncDifficultyButtons } from './calculator.js?v=3';
 import { initBuilder, addLineItem, removeLineItem,
          getLineItems, updateTotals, captureState,
-         restoreState, getFormData, newDocument } from './builder.js?v=3';
+         restoreState, getFormData, newDocument } from './builder.js?v=5';
 import { initRecords, refreshRecords, loadRecord,
          duplicateRecord, deleteRecord, exportCsv,
          getRecords, convertEstimateToInvoice,
-         restoreRecord }                          from './records.js?v=9';
-import { generatePdf, renderInvoiceHtml }         from './pdf.js?v=2';
+         restoreRecord }                          from './records.js?v=10';
+import { generatePdf, renderInvoiceHtml }         from './pdf.js?v=3';
+import { initInputValidation, normalizeDocumentInputs, normalizeSettingsInputs,
+         validateCalculatorInputs, validateDocumentInputs,
+         validateSettingsInputs } from './validation.js?v=2';
 
 // ── State ─────────────────────────────────────────────
 let activeRecordId  = null;
@@ -43,6 +46,7 @@ export async function init(initialView = 'dashboard') {
   window._restoreRecord  = (id) => onRestoreRecord(id);
   window._copyText       = copyText;
   window._invoiceToolSnapshot = createDocumentSnapshot;
+  window._invoiceToolShowView = showView;
 
   // Override the shim — expose addLineItem globally for onclick handlers
   window.addLineItem     = addLineItem;
@@ -73,6 +77,7 @@ export async function init(initialView = 'dashboard') {
   // Builder & calculator init
   initBuilder();
   initCalculator();
+  initInputValidation();
   wireLiveCalculationUpdates();
   const builderView = el('view-builder');
   builderView?.addEventListener('input', debounce(refreshInvoicePreview, 150));
@@ -236,6 +241,7 @@ function onDocumentLoaded(doc) {
       docRushPercent:   doc.rushAmount && doc.subtotal ? Math.round((doc.rushAmount / doc.subtotal) * 100) : 0,
       docTaxRate:       doc.calcTaxRate ?? 0,
       amountPaid:       doc.amountPaid ?? 0,
+      paymentMethod:    doc.paymentMethod || 'Unknown / Review',
       pricingGuide:     doc.pricingGuide,
       termsNotes:       doc.termsNotes,
       standardTurnaround: doc.standardTurnaround,
@@ -257,6 +263,7 @@ function onDocumentLoaded(doc) {
     rush: doc.calcRush, discount: doc.calcDiscount,
     taxRate: doc.calcTaxRate,
   });
+  normalizeDocumentInputs();
   syncDifficultyButtons();
 
   activeRecordId = doc.id;
@@ -282,17 +289,78 @@ function startCleanDocument(type = 'ESTIMATE', number = '') {
 function applyDocumentPrefill(prefill = null) {
   if (!prefill) return;
   const fields = {
+    docType: prefill.docType || '',
+    docNumber: prefill.docNumber || '',
+    docDate: prefill.docDate || '',
+    dueDate: prefill.dueDate || '',
+    docStatus: prefill.docStatus || prefill.status || '',
     preparedFor: prefill.preparedFor || prefill.customerName || '',
     customerName: prefill.customerName || '',
     customerPhone: prefill.customerPhone || '',
     customerAddress: prefill.customerAddress || '',
     customerEmail: prefill.customerEmail || '',
     projectName: prefill.projectName || '',
-    projectDescription: prefill.projectDescription || ''
+    material: prefill.material || '',
+    color: prefill.color || '',
+    infill: prefill.infill || '',
+    projectDescription: prefill.projectDescription || '',
+    projectNotes: prefill.projectNotes || '',
+    pageSize: prefill.pageSize || '',
+    docDiscount: prefill.docDiscount ?? prefill.discountAmount ?? '',
+    docRushPercent: prefill.docRushPercent ?? '',
+    docTaxRate: prefill.docTaxRate ?? prefill.calcTaxRate ?? '',
+    amountPaid: prefill.amountPaid ?? '',
+    paymentMethod: prefill.paymentMethod || '',
+    pricingGuide: prefill.pricingGuide || '',
+    termsNotes: prefill.termsNotes || '',
+    standardTurnaround: prefill.standardTurnaround || '',
+    rushTurnaround: prefill.rushTurnaround || ''
   };
   Object.entries(fields).forEach(([id, value]) => {
-    if (value) setVal(id, value);
+    if (value !== null && value !== undefined && value !== '') setVal(id, value);
   });
+  if (prefill.docType) {
+    const docType = el('docType');
+    docType?.dispatchEvent(new Event('change'));
+  }
+  if (Array.isArray(prefill.lineItems) && prefill.lineItems.length) {
+    const tbody = el('lineItemsBody');
+    if (tbody) tbody.innerHTML = '';
+    prefill.lineItems.forEach(item => addLineItem({
+      description: item.description || item.desc || '',
+      details: item.details || '',
+      qty: item.quantity ?? item.qty ?? 1,
+      rate: item.rate ?? item.amount ?? 0,
+      source: 'assistant'
+    }));
+  }
+  restoreCalcState({
+    grams: prefill.calcGrams ?? 0,
+    hours: prefill.calcHours ?? 0,
+    designHours: prefill.calcDesignHours ?? 0,
+    setupFee: prefill.calcSetupFee ?? 0,
+    postFee: prefill.calcPostFee ?? 0,
+    gramRate: prefill.calcGramRate ?? appConfig.calcGramRate ?? 0.05,
+    hourRate: prefill.calcHourRate ?? appConfig.calcHourRate ?? 3,
+    designRate: prefill.calcDesignRate ?? appConfig.calcDesignRate ?? 25,
+    minimum: prefill.calcMinimum ?? appConfig.calcMinimum ?? 15,
+    difficulty: prefill.calcDifficulty ?? 1,
+    rush: prefill.calcRush ?? prefill.docRushPercent ?? 0,
+    discount: prefill.calcDiscount ?? prefill.docDiscount ?? 0,
+    taxRate: prefill.calcTaxRate ?? prefill.docTaxRate ?? 0,
+  });
+  normalizeDocumentInputs();
+  syncDifficultyButtons();
+  updateTotals();
+  showAssistanceDraftIndicator(prefill);
+}
+
+function showAssistanceDraftIndicator(prefill) {
+  const indicator = el('autosaveIndicator');
+  if (!indicator || !prefill?.assistanceSource) return;
+  const ai = String(prefill.assistanceSource).toUpperCase().includes('AI MODEL');
+  indicator.className = `autosave-indicator assistant-draft ${ai ? 'assistant-ai' : 'assistant-rules'}`;
+  indicator.innerHTML = `<span class="autosave-dot"></span>${ai ? 'AI MODEL DRAFT' : 'LOCAL RULES DRAFT'} · review before saving`;
 }
 
 function createDocumentSnapshot() {
@@ -336,6 +404,7 @@ function restoreDocumentSnapshot(snapshot) {
       docRushPercent: doc.subtotal ? Math.round(((doc.rushAmount || 0) / doc.subtotal) * 100) : 0,
       docTaxRate: doc.calcTaxRate ?? 0,
       amountPaid: doc.amountPaid ?? 0,
+      paymentMethod: doc.paymentMethod || 'Unknown / Review',
       pricingGuide: doc.pricingGuide,
       termsNotes: doc.termsNotes,
       standardTurnaround: doc.standardTurnaround,
@@ -349,6 +418,7 @@ function restoreDocumentSnapshot(snapshot) {
     })),
   });
   restoreCalcState(snapshot.calcState || {});
+  normalizeDocumentInputs();
   syncDifficultyButtons();
   activeRecordId = snapshot.activeRecordId || null;
   updateActiveBar();
@@ -357,6 +427,15 @@ function restoreDocumentSnapshot(snapshot) {
 }
 
 async function saveRecord(forceNew = false) {
+  const validation = validateDocumentInputs();
+  if (!validation.valid) {
+    showView(validation.view);
+    validation.element?.focus();
+    validation.element?.reportValidity();
+    toast(validation.message, 'error', 5000);
+    return null;
+  }
+
   if (saveInFlight) {
     toast(`Still saving ${textVal('docNumber') || 'document'}...`, 'info', 1600);
     return saveInFlight;
@@ -539,7 +618,7 @@ function setAutoSaveStatus(state) {
 async function onGeneratePdf(preview = false) {
   try {
     // Preview is read-only. Download saves first so the exported PDF is tracked.
-    if (!preview && apiReady) await saveRecord(false);
+    if (!preview && apiReady && !await saveRecord(false)) return;
 
     const formData = getFormData();
     const data = { ...formData, ...appConfig, brandColor: appConfig.brandColor || '#17468f' };
@@ -552,6 +631,15 @@ async function onGeneratePdf(preview = false) {
 
 // ── Calculator → Builder push ─────────────────────────
 function onPushToBuilder() {
+  const validation = validateCalculatorInputs();
+  if (!validation.valid) {
+    showView('calculator');
+    validation.element?.focus();
+    validation.element?.reportValidity();
+    toast(validation.message, 'error', 5000);
+    return;
+  }
+
   const calc = calculate();
   const selectedProduct = productLookups.find(p => (p.name || '').toLowerCase() === textVal('projectName').toLowerCase());
   pushToBuilder(calc, getLineItems, addLineItem, {
@@ -637,9 +725,19 @@ function applyConfigToSettings(cfg) {
     sCalcPostFee: cfg.calcPostFee, sCalcMinimum: cfg.calcMinimum,
   };
   Object.entries(map).forEach(([id, v]) => { if (el(id) && v != null) el(id).value = v; });
+  normalizeSettingsInputs();
 }
 
 async function saveSettings() {
+  const validation = validateSettingsInputs();
+  if (!validation.valid) {
+    showView('settings');
+    validation.element?.focus();
+    validation.element?.reportValidity();
+    toast(validation.message, 'error', 5000);
+    return null;
+  }
+
   const body = {
     businessName: textVal('businessName'), businessLocation: textVal('businessLocation'),
     businessEmail: textVal('businessEmail'), businessPhone: textVal('businessPhone'),

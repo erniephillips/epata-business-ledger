@@ -4,11 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>EPATA Business Ledger</title>
-  <link rel="stylesheet" href="/css/site.css?v=20260530-app-back">
+  <link rel="stylesheet" href="/css/site.css?v=20260609-assistance-source">
 </head>
 <body>
   <div id="testModeBanner" class="test-mode-banner hidden">⚠ TEST MODE — separate test database. Changes here do NOT affect your real data.</div>
   <header class="topbar">
+    <button id="sidebarToggle" class="sidebar-toggle" type="button" aria-controls="primarySidebar" aria-expanded="true" title="Collapse menu">
+      <span class="sidebar-toggle-icon" aria-hidden="true">←</span>
+      <span class="sidebar-toggle-label">Menu</span>
+    </button>
     <button id="appBackBtn" class="back-button hidden" title="Go back to the previous app page">← Back</button>
     <div class="brand">
       <div class="logo-mark">E</div>
@@ -22,13 +26,17 @@
       <input id="globalSearch" type="search" placeholder="Search every ledger area...">
     </div>
     <div class="header-actions">
+      <button id="localAiHeaderStatus" class="ai-power-status off" type="button" onclick="showPage('localAi')" title="Open Local AI controls">
+        <span class="ai-power-dot" aria-hidden="true"></span>
+        <span>Local AI Off</span>
+      </button>
       <button class="ghost-button" onclick="showPage('estimates')" title="Create estimates and invoices in this unified app.">Estimates / Invoices</button>
       <button id="backupBtn" class="primary-button" title="Downloads a copy of the local SQLite database file into your browser downloads.">Backup DB</button>
     </div>
   </header>
 
   <main class="shell">
-    <aside class="sidebar">
+    <aside id="primarySidebar" class="sidebar">
       <nav id="nav"></nav>
       <div class="sidebar-card">
         <strong>Local SQLite</strong>
@@ -40,6 +48,7 @@
       <div id="app"></div>
     </section>
   </main>
+  <button id="sidebarScrim" class="sidebar-scrim" type="button" aria-label="Close menu" tabindex="-1"></button>
 
   <div id="modalBackdrop" class="modal-backdrop hidden" role="presentation"></div>
   <section id="modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
@@ -60,6 +69,6 @@
   <div id="toast" class="toast hidden"></div>
   <div id="tooltip" class="floating-tooltip hidden" role="tooltip"></div>
 
-  <script src="/js/app.js?v=20260530-app-back"></script>
+  <script src="/js/app.js?v=20260609-assistance-source"></script>
 </body>
 </html>
