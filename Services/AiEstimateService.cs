@@ -20,6 +20,8 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
     public const int MaxTotalUploadBytes = 75 * 1024 * 1024;
     public const int MaxSourceUrls = 20;
     public const int MaxImages = 10;
+    public const int MaxModelSourceCharacters = 32_000;
+    private const int MaxModelOutputTokens = 4_096;
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -69,6 +71,7 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
                 maxTotalUploadMegabytes = MaxTotalUploadBytes / 1024 / 1024,
                 maxSourceUrls = MaxSourceUrls,
                 maxCombinedTextCharacters = MaxCombinedTextCharacters,
+                maxModelSourceCharacters = MaxModelSourceCharacters,
                 maxExtractedCharactersPerFile = AiSourceDocumentTextExtractor.MaxExtractedCharactersPerFile
             },
             visionRequiresConfiguredAi = true,
@@ -97,18 +100,33 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
         {
             try
             {
-                var aiResult = await CallConfiguredProviderAsync(prepared.Text, request.SourceName, prepared.Images, instructions, builderFields, products, connection.ChatEndpoint, connection.Model, connection.UseApiKey, cancellationToken);
+                var modelSource = BuildModelSource(prepared.Text);
+                var aiResult = await CallConfiguredProviderAsync(modelSource.Text, request.SourceName, prepared.Images, instructions, builderFields, products, connection.ChatEndpoint, connection.Model, connection.UseApiKey, cancellationToken);
                 aiResult.Provider = connection.Provider;
                 aiResult.UsedAi = true;
                 aiResult.ExecutionReceipt.Provider = connection.Provider;
+                aiResult.ExecutionReceipt.SourceCharacters = prepared.Text.Length;
+                aiResult.ExecutionReceipt.ModelInputCharacters = modelSource.Text.Length;
+                aiResult.ExecutionReceipt.SourceWasCondensed = modelSource.WasCondensed;
                 aiResult.InstructionsPath = InstructionsPath;
+                ApplySourcePlanningAssumptions(aiResult, prepared.Text, instructions);
                 NormalizeResult(aiResult, request.SourceName, instructions);
+                AddSourceBudgetWarning(aiResult, prepared.Text);
                 aiResult.Warnings.InsertRange(0, prepared.Warnings);
+                if (modelSource.WasCondensed)
+                {
+                    aiResult.Warnings.Insert(0, $"The source packet contained {prepared.Text.Length:N0} characters. The app selected the most quote-relevant {modelSource.Text.Length:N0} characters for the model to stay within its context window.");
+                }
                 return aiResult;
             }
             catch (Exception ex)
             {
                 var fallback = BuildLocalDraft(prepared.Text, request.SourceName, prepared.Images, instructions, products);
+                fallback.ExecutionReceipt.SourceCharacters = prepared.Text.Length;
+                fallback.ExecutionReceipt.ModelInputCharacters = 0;
+                ApplySourcePlanningAssumptions(fallback, prepared.Text, instructions);
+                NormalizeResult(fallback, request.SourceName, instructions);
+                AddSourceBudgetWarning(fallback, prepared.Text);
                 fallback.Warnings.InsertRange(0, prepared.Warnings);
                 fallback.Warnings.Insert(0, $"Configured AI call failed, so local rules were used: {ex.Message}");
                 return fallback;
@@ -116,6 +134,11 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
         }
 
         var local = BuildLocalDraft(prepared.Text, request.SourceName, prepared.Images, instructions, products);
+        local.ExecutionReceipt.SourceCharacters = prepared.Text.Length;
+        local.ExecutionReceipt.ModelInputCharacters = 0;
+        ApplySourcePlanningAssumptions(local, prepared.Text, instructions);
+        NormalizeResult(local, request.SourceName, instructions);
+        AddSourceBudgetWarning(local, prepared.Text);
         local.Warnings.InsertRange(0, prepared.Warnings);
         return local;
     }
@@ -185,11 +208,7 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
         var warnings = new List<string>(request.SourceWarnings ?? []);
         if (!string.IsNullOrWhiteSpace(request.SourceText)) parts.Add(request.SourceText.Trim());
 
-        var pastedUrls = Regex.Matches(request.SourceText ?? string.Empty, @"https://[^\s<>""']+", RegexOptions.IgnoreCase)
-            .Select(match => match.Value.TrimEnd('.', ',', ')', ']', '}'))
-            .ToList();
         var allUrls = (request.SourceUrls ?? [])
-            .Concat(pastedUrls)
             .Where(x => !string.IsNullOrWhiteSpace(x))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -243,6 +262,40 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
         }
 
         return new PreparedAiSources(string.Join("\n\n", parts), images, warnings);
+    }
+
+    private static PreparedModelSource BuildModelSource(string source)
+    {
+        var cleaned = Regex.Replace(source, @"[^\S\r\n]+", " ").Trim();
+        if (cleaned.Length <= MaxModelSourceCharacters)
+        {
+            return new PreparedModelSource(cleaned, false);
+        }
+
+        var relevantPattern = new Regex(
+            @"(?i)(?:\$\s*\d|\b\d+\s*(?:x|×|pieces?|pcs?|units?|copies|grams?|g\b|hours?|hrs?|mm|cm|inches?|colors?|colours?|days?|weeks?)\b|quote|estimate|budget|price|cost|design|artwork|logo|proof|prototype|sample|print|production|quantity|material|filament|pla|petg|abs|asa|tpu|resin|color|colour|deadline|turnaround|deliver|size|thick|dimension|cleanup|sand|packag|approved|approve|agreed)",
+            RegexOptions.Compiled);
+        var chunks = Regex.Split(cleaned, @"(?<=[.!?])\s+|\r?\n+")
+            .Select(chunk => chunk.Trim())
+            .Where(chunk => chunk.Length >= 3)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var selected = new List<string>
+        {
+            "SOURCE PACKET WAS CONDENSED FOR MODEL CONTEXT. Use these quote-relevant excerpts and disclose assumptions."
+        };
+        selected.AddRange(chunks.Where(chunk => relevantPattern.IsMatch(chunk)));
+        selected.AddRange(chunks.Take(12));
+        selected.AddRange(chunks.TakeLast(12));
+
+        var builder = new StringBuilder(MaxModelSourceCharacters);
+        foreach (var chunk in selected.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (builder.Length + chunk.Length + 2 > MaxModelSourceCharacters) continue;
+            builder.AppendLine(chunk).AppendLine();
+        }
+        return new PreparedModelSource(builder.ToString().Trim(), true);
     }
 
     private async Task<string> FetchSourcePageTextAsync(Uri initialUri, CancellationToken cancellationToken)
@@ -386,6 +439,11 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
         bool useApiKey,
         CancellationToken cancellationToken)
     {
+        var relevantProducts = products
+            .Where(product => (!string.IsNullOrWhiteSpace(product.Name) && source.Contains(product.Name, StringComparison.OrdinalIgnoreCase))
+                || (!string.IsNullOrWhiteSpace(product.Sku) && source.Contains(product.Sku, StringComparison.OrdinalIgnoreCase)))
+            .Take(25)
+            .ToList();
         var schema = """
             Return JSON with this exact top-level structure:
             {
@@ -438,21 +496,34 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
         var systemPrompt = $"""
             You prepare review-first estimate drafts for EPATA LLC.
             Never claim the estimate is final. Never invent missing customer requirements.
+            A customer name is optional and never blocks preparing a useful estimate.
+            Your primary task is to identify the actual job, make disclosed planning assumptions, and return a granular draft quote. Do not collapse a detailed job to the minimum merely because slicer output or a customer name is missing.
             Create a separate line item for each distinct requested/listed product or service.
+            Break complex jobs into customer-facing phases such as design/artwork, prototype/sample, production setup and color changes, production run, cleanup/post-processing, and packaging when those phases apply.
+            Treat explicitly discussed or accepted amounts as separate line items. Use line-item rates as the actual customer-facing draft quote. Calculator inputs are the underlying cost basis and may be lower than the quoted line-item total.
+            Every line-item amount must equal quantity multiplied by rate. Use quantity 1 for one-time phase fees. Use the actual number of grams with the per-gram rate for material rows, and actual machine/design hours with hourly rates for time rows.
+            Fill calcGrams, calcHours, calcDesignHours, calcSetupFee, calcPostFee, and all calculator rates for the entire quoted quantity. Do not leave them at 0 when a defensible planning assumption is possible.
+            Do not double-charge an accepted fixed design/proof price with a second hourly design line item. Keep design hours in calculator inputs as cost-basis evidence, but quote the accepted fixed design amount once.
+            For applicable bulk production, include the editable prototypeSampleFee, multicolorSetupFee, bulkHandlingPerUnit, and postProcessingHourly rates from the instructions. Raw filament and machine cost alone are not a complete customer quote.
+            Do not bundle a prototype/sample fee into a setup line when the prototype/sample is already a separate line item. Each fee must appear exactly once.
+            When the sources describe roughly 300 slightly oversized 1.2 mm guitar-pick-like pieces, use at least 300 total grams before adding a disclosed multicolor waste allowance.
             Use supplied source-page metadata, uploaded documents, and uploaded pictures as source material. Pictures can identify likely products and features, but uncertain details must become questions or warnings.
             Use only the rules and prices in the editable instructions below.
             When the requested item matches the saved product catalog, treat its stored material, grams, print hours, rates, packaging cost, design minutes, and target price as the preferred pricing basis. Use target price as the minimum floor, not as an extra fee.
             Fill every applicable field in the HTML estimate builder contract below.
             Pay special attention to material, total grams for the quoted quantity, material cost per gram, print hours, machine rate, design time, setup, post-processing, difficulty, minimum, rush, discount, and tax.
-            The application, not you, performs the final money calculation. Supply honest calculator inputs. Use 0 and add a question when a cost input cannot be supported.
-            Do not make line-item rates disagree with the calculator inputs. When calculator inputs are present, the application will replace line items with a deterministic calculator breakdown.
+            The application, not you, performs the final money calculation. Supply honest calculator inputs.
+            When exact slicer data is missing, estimate reasonable total grams, machine hours, design hours, setup, and post-processing from the stated quantity, dimensions/thickness, material, color count, complexity, and production method. Clearly disclose each planning assumption in line-item details, project notes, warnings, or questions.
+            Use 0 only when no defensible planning assumption can be made. Missing customer identity is never a reason to use 0 or the minimum.
+            Keep projectDescription under 500 characters, projectNotes under 900 characters, each line-item description under 100 characters, each line-item details field under 300 characters, and each question/warning under 220 characters.
+            Do not repeat or summarize the full conversation. Return at most 10 useful line items, 8 questions, and 8 warnings.
             {schema}
 
             HTML ESTIMATE BUILDER FIELD IDS PRESENT:
             {JsonSerializer.Serialize(builderFields, JsonOptions)}
 
             SAVED PRODUCT / COST CATALOG:
-            {JsonSerializer.Serialize(products, JsonOptions)}
+            {JsonSerializer.Serialize(relevantProducts, JsonOptions)}
 
             EDITABLE INSTRUCTIONS:
             {JsonSerializer.Serialize(instructions, JsonOptions)}
@@ -470,8 +541,9 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
         {
             model,
             temperature = 0.1,
-            max_tokens = 4096,
-            response_format = new { type = useApiKey ? "json_object" : "text" },
+            max_tokens = MaxModelOutputTokens,
+            reasoning_effort = "none",
+            response_format = BuildEstimateResponseFormat(useApiKey),
             messages = new object[]
             {
                 new { role = "system", content = systemPrompt },
@@ -498,11 +570,16 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
         }
 
         using var envelope = JsonDocument.Parse(responseText);
-        var content = envelope.RootElement
+        var responseMessage = envelope.RootElement
             .GetProperty("choices")[0]
-            .GetProperty("message")
-            .GetProperty("content")
-            .GetString();
+            .GetProperty("message");
+        var content = responseMessage.GetProperty("content").GetString();
+        if (string.IsNullOrWhiteSpace(content)
+            && responseMessage.TryGetProperty("reasoning_content", out var reasoningContent)
+            && reasoningContent.ValueKind == JsonValueKind.String)
+        {
+            content = reasoningContent.GetString();
+        }
         if (string.IsNullOrWhiteSpace(content))
         {
             throw new InvalidOperationException("AI provider returned no structured estimate content.");
@@ -512,6 +589,88 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
             ?? throw new InvalidOperationException("AI provider response could not be parsed as an estimate draft.");
         result.ExecutionReceipt = BuildModelExecutionReceipt(envelope.RootElement, model);
         return result;
+    }
+
+    private static object BuildEstimateResponseFormat(bool useApiKey)
+    {
+        if (useApiKey) return new { type = "json_object" };
+        var text = new { type = "string" };
+        var shortText = new { type = "string", maxLength = 300 };
+        var number = new { type = "number" };
+        var lineItem = new
+        {
+            type = "object",
+            properties = new
+            {
+                description = new { type = "string", maxLength = 100 },
+                details = shortText,
+                quantity = number,
+                rate = number
+            },
+            required = new[] { "description", "details", "quantity", "rate" },
+            additionalProperties = false
+        };
+        var prefill = new
+        {
+            type = "object",
+            properties = new
+            {
+                customerName = text,
+                customerPhone = text,
+                customerEmail = text,
+                customerAddress = text,
+                projectName = text,
+                material = text,
+                color = text,
+                infill = text,
+                projectDescription = new { type = "string", maxLength = 500 },
+                projectNotes = new { type = "string", maxLength = 900 },
+                calcGrams = number,
+                calcHours = number,
+                calcDesignHours = number,
+                calcSetupFee = number,
+                calcPostFee = number,
+                calcGramRate = number,
+                calcHourRate = number,
+                calcDesignRate = number,
+                calcMinimum = number,
+                calcDifficulty = number,
+                calcRush = number,
+                calcDiscount = number,
+                calcTaxRate = number,
+                lineItems = new { type = "array", items = lineItem, minItems = 1, maxItems = 10 }
+            },
+            required = new[]
+            {
+                "customerName", "customerPhone", "customerEmail", "customerAddress",
+                "projectName", "material", "color", "infill", "projectDescription", "projectNotes",
+                "calcGrams", "calcHours", "calcDesignHours", "calcSetupFee", "calcPostFee",
+                "calcGramRate", "calcHourRate", "calcDesignRate", "calcMinimum", "calcDifficulty",
+                "calcRush", "calcDiscount", "calcTaxRate", "lineItems"
+            },
+            additionalProperties = true
+        };
+        return new
+        {
+            type = "json_schema",
+            json_schema = new
+            {
+                name = "epata_estimate_draft",
+                strict = false,
+                schema = new
+                {
+                    type = "object",
+                    properties = new
+                    {
+                        prefill,
+                        questions = new { type = "array", items = shortText, maxItems = 8 },
+                        warnings = new { type = "array", items = shortText, maxItems = 8 }
+                    },
+                    required = new[] { "prefill", "questions", "warnings" },
+                    additionalProperties = false
+                }
+            }
+        };
     }
 
     private static AiExecutionReceipt BuildModelExecutionReceipt(JsonElement envelope, string requestedModel)
@@ -850,6 +1009,15 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
             line.Quantity = Math.Max(0, line.Quantity);
             line.Rate = Math.Max(0, line.Rate);
         }
+        var preservesGranularQuote = result.UsedAi || result.UsedSourcePlanning;
+        if (preservesGranularQuote && NormalizeGranularPhaseRates(prefill, instructions))
+        {
+            result.Warnings.Add("The app applied editable prototype, multicolor setup, and bulk-handling rates exactly once and removed any hidden difficulty multiplier.");
+        }
+        if (preservesGranularQuote && ReconcileCalculatorWithGranularLineItems(prefill))
+        {
+            result.Warnings.Add("The app reconciled calculator grams, hours, setup, design, and post-processing values to the granular AI line items before calculating the quote.");
+        }
 
         var hasCalculatorInputs = prefill.CalcGrams > 0
             || prefill.CalcHours > 0
@@ -858,8 +1026,26 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
             || prefill.CalcPostFee > 0;
         if (hasCalculatorInputs)
         {
-            result.Pricing = BuildCalculatorPricing(prefill);
-            prefill.LineItems = BuildCalculatorLineItems(prefill, result.Pricing);
+            var calculatorPricing = BuildCalculatorPricing(prefill);
+            var granularQuoteTotal = prefill.LineItems.Sum(x => Math.Max(0, x.Quantity) * Math.Max(0, x.Rate));
+            var hasGranularAiQuote = preservesGranularQuote
+                && prefill.LineItems.Count >= 2
+                && prefill.LineItems.Count(x => x.Rate > 0) >= 2
+                && granularQuoteTotal > 0;
+            if (hasGranularAiQuote)
+            {
+                result.Pricing = BuildLineItemPricing(prefill, calculatorPricing);
+                result.Warnings.Add("Granular AI line items drive the draft quote total. Calculator grams, hours, and rates are retained as the underlying cost basis for review.");
+                if (result.Pricing.LineSubtotal < calculatorPricing.LineSubtotal)
+                {
+                    result.Warnings.Add($"The granular quote subtotal {result.Pricing.LineSubtotal:C} is below its calculator cost basis {calculatorPricing.LineSubtotal:C}. Increase or correct the line items before sending.");
+                }
+            }
+            else
+            {
+                result.Pricing = calculatorPricing;
+                prefill.LineItems = BuildCalculatorLineItems(prefill, result.Pricing);
+            }
         }
         else
         {
@@ -884,7 +1070,7 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
         {
             var provenance = $"{assistanceLabel}: Draft prepared by {result.Provider} from {result.SourceName}. Assistance populated fields and line items; review customer details, quantities, prices, taxes, and terms before saving.";
             var pricingBasis = result.Pricing.UsedCalculatorInputs
-                ? $"PRICING BASIS: {prefill.CalcGrams:0.##}g at {prefill.CalcGramRate:C}/g; {prefill.CalcHours:0.##} machine hours at {prefill.CalcHourRate:C}/hr; {prefill.CalcDesignHours:0.##} design hours at {prefill.CalcDesignRate:C}/hr; setup {prefill.CalcSetupFee:C}; post-processing {prefill.CalcPostFee:C}; difficulty {prefill.CalcDifficulty:0.##}x; minimum {prefill.CalcMinimum:C}. App-calculated quote total: {result.Pricing.Total:C}."
+                ? $"PRICING BASIS: {result.Pricing.PricingMode}. {prefill.CalcGrams:0.##}g at {prefill.CalcGramRate:C}/g; {prefill.CalcHours:0.##} machine hours at {prefill.CalcHourRate:C}/hr; {prefill.CalcDesignHours:0.##} design hours at {prefill.CalcDesignRate:C}/hr; setup {prefill.CalcSetupFee:C}; post-processing {prefill.CalcPostFee:C}; difficulty {prefill.CalcDifficulty:0.##}x; minimum {prefill.CalcMinimum:C}. App-calculated quote total: {result.Pricing.Total:C}."
                 : $"PRICING BASIS: Item or keyword rates were used because calculator cost inputs were not available. App-calculated quote total: {result.Pricing.Total:C}.";
             var executionReceipt = result.UsedAi
                 ? $"AI EXECUTION RECEIPT: {result.ExecutionReceipt.ExecutedAtUtc:u}; provider {result.ExecutionReceipt.Provider}; model {result.ExecutionReceipt.Model ?? "not supplied"}; response ID {result.ExecutionReceipt.ResponseId ?? "not supplied"}; tokens {result.ExecutionReceipt.TotalTokens?.ToString() ?? "not supplied"}."
@@ -892,6 +1078,230 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
             prefill.ProjectNotes = string.Join(Environment.NewLine + Environment.NewLine,
                 new[] { prefill.ProjectNotes, provenance, executionReceipt, pricingBasis }.Where(x => !string.IsNullOrWhiteSpace(x)));
         }
+    }
+
+    private static bool NormalizeGranularPhaseRates(AiEstimatePrefill prefill, AiEstimateInstructions instructions)
+    {
+        if (prefill.LineItems.Count < 2) return false;
+        var changed = false;
+        var prototype = FindLine(prefill.LineItems, "prototype", "sample print");
+        var setup = FindLine(prefill.LineItems, "multicolor setup", "production setup", "color change", "colour change");
+        var bulkHandling = FindLine(prefill.LineItems, "bulk handling");
+        var postProcessing = FindLine(prefill.LineItems, "post-processing", "post processing", "cleanup", "finishing");
+
+        var prototypeRate = instructions.Rates.GetValueOrDefault("prototypeSampleFee");
+        if (prototype is not null && prototypeRate > 0)
+        {
+            changed |= SetIfDifferent(prototype.Quantity, 1, value => prototype.Quantity = value);
+            changed |= SetIfDifferent(prototype.Rate, prototypeRate, value => prototype.Rate = value);
+            prototype.Details = AppendDetailOnce(prototype.Details, "Uses editable prototypeSampleFee.");
+        }
+
+        var multicolorSetupRate = instructions.Rates.GetValueOrDefault("multicolorSetupFee");
+        if (setup is not null && multicolorSetupRate > 0)
+        {
+            changed |= SetIfDifferent(setup.Quantity, 1, value => setup.Quantity = value);
+            changed |= SetIfDifferent(setup.Rate, multicolorSetupRate, value => setup.Rate = value);
+            setup.Details = "Multicolor production setup, file slicing, plate layout, and color-change preparation. Uses editable multicolorSetupFee.";
+        }
+
+        var bulkHandlingRate = instructions.Rates.GetValueOrDefault("bulkHandlingPerUnit");
+        if (bulkHandling is not null && bulkHandlingRate > 0)
+        {
+            changed |= SetIfDifferent(bulkHandling.Rate, bulkHandlingRate, value => bulkHandling.Rate = value);
+            bulkHandling.Details = AppendDetailOnce(bulkHandling.Details, "Uses editable bulkHandlingPerUnit.");
+        }
+
+        var postProcessingRate = instructions.Rates.GetValueOrDefault("postProcessingHourly");
+        if (postProcessing is not null && postProcessingRate > 0)
+        {
+            changed |= SetIfDifferent(postProcessing.Quantity, 1, value => postProcessing.Quantity = value);
+            changed |= SetIfDifferent(postProcessing.Rate, postProcessingRate, value => postProcessing.Rate = value);
+            postProcessing.Details = AppendDetailOnce(postProcessing.Details, "Uses editable postProcessingHourly.");
+        }
+
+        if (!prefill.LineItems.Any(line => line.Description.Contains("difficulty", StringComparison.OrdinalIgnoreCase)))
+        {
+            changed |= SetIfDifferent(prefill.CalcDifficulty, 1, value => prefill.CalcDifficulty = value);
+        }
+        return changed;
+    }
+
+    private static string AppendDetailOnce(string? details, string addition)
+    {
+        if ((details ?? string.Empty).Contains(addition, StringComparison.OrdinalIgnoreCase)) return Trim(details, 300);
+        return Trim(string.Join(" ", new[] { details, addition }.Where(value => !string.IsNullOrWhiteSpace(value))), 300);
+    }
+
+    private static bool ReconcileCalculatorWithGranularLineItems(AiEstimatePrefill prefill)
+    {
+        if (prefill.LineItems.Count < 2) return false;
+        var changed = false;
+        var material = FindLine(prefill.LineItems, "material");
+        if (material is { Quantity: > 0, Rate: > 0 })
+        {
+            changed |= SetIfDifferent(prefill.CalcGrams, material.Quantity, value => prefill.CalcGrams = value);
+            changed |= SetIfDifferent(prefill.CalcGramRate, material.Rate, value => prefill.CalcGramRate = value);
+        }
+
+        var machine = FindLine(prefill.LineItems, "machine time", "print time");
+        if (machine is { Quantity: > 0, Rate: > 0 })
+        {
+            changed |= SetIfDifferent(prefill.CalcHours, machine.Quantity, value => prefill.CalcHours = value);
+            changed |= SetIfDifferent(prefill.CalcHourRate, machine.Rate, value => prefill.CalcHourRate = value);
+        }
+
+        var design = FindLine(prefill.LineItems, "design", "artwork", "modeling", "modelling");
+        if (design is { Quantity: > 0, Rate: > 0 } && prefill.CalcDesignRate > 0)
+        {
+            var designAmount = design.Quantity * design.Rate;
+            changed |= SetIfDifferent(prefill.CalcDesignHours, designAmount / prefill.CalcDesignRate, value => prefill.CalcDesignHours = value);
+        }
+
+        var setup = FindLine(prefill.LineItems, "setup");
+        if (setup is { Quantity: > 0, Rate: > 0 })
+        {
+            changed |= SetIfDifferent(prefill.CalcSetupFee, setup.Quantity * setup.Rate, value => prefill.CalcSetupFee = value);
+        }
+
+        var post = FindLine(prefill.LineItems, "post-processing", "post processing", "cleanup", "finishing");
+        if (post is { Quantity: > 0, Rate: > 0 })
+        {
+            changed |= SetIfDifferent(prefill.CalcPostFee, post.Quantity * post.Rate, value => prefill.CalcPostFee = value);
+        }
+        return changed;
+    }
+
+    private static void ApplySourcePlanningAssumptions(AiEstimateDraftResult result, string source, AiEstimateInstructions instructions)
+    {
+        if (!Regex.IsMatch(source, @"(?i)\bguitar\s+pic(?:k)?s?\b")) return;
+        var quantity = ExtractBulkQuantity(source);
+        if (quantity < 25) return;
+
+        result.UsedSourcePlanning = true;
+        result.Prefill ??= new AiEstimatePrefill();
+        result.Prefill.LineItems ??= [];
+        var prefill = result.Prefill;
+        prefill.LineItems.RemoveAll(line => line.Rate == instructions.Defaults.MinimumOrder
+            && (line.Description.Contains("SOURCE FILE", StringComparison.OrdinalIgnoreCase)
+                || line.Description.Equals("Gmail", StringComparison.OrdinalIgnoreCase)
+                || line.Description.Contains("Custom 3D print / design service", StringComparison.OrdinalIgnoreCase)));
+        if (string.IsNullOrWhiteSpace(prefill.ProjectName)
+            || prefill.ProjectName.Contains("SOURCE FILE", StringComparison.OrdinalIgnoreCase)
+            || prefill.ProjectName.Equals("Gmail", StringComparison.OrdinalIgnoreCase))
+        {
+            prefill.ProjectName = $"Custom Guitar Pick Design & Production ({quantity:0} pcs)";
+        }
+        if (string.IsNullOrWhiteSpace(prefill.ProjectDescription)
+            || prefill.ProjectDescription.Contains("SOURCE FILE:", StringComparison.OrdinalIgnoreCase))
+        {
+            prefill.ProjectDescription = $"Planning estimate for design, prototype approval, and production of {quantity:0} custom promotional guitar picks.";
+        }
+        var gramsPerUnit = instructions.Rates.GetValueOrDefault("flatPromoPieceGramsPerUnit", 1.5m);
+        var wastePercent = instructions.Rates.GetValueOrDefault("multicolorWastePercent", 25m);
+        var hoursPer100 = instructions.Rates.GetValueOrDefault("flatPromoPieceMachineHoursPer100", 40m);
+        var totalGrams = Money(quantity * gramsPerUnit * (1 + wastePercent / 100m));
+        var totalHours = Money(quantity / 100m * hoursPer100);
+        var gramRate = instructions.Rates.GetValueOrDefault("materialPerGram", 0.05m);
+        var hourRate = instructions.Rates.GetValueOrDefault("machineHourly", 3m);
+
+        prefill.CalcGrams = totalGrams;
+        prefill.CalcHours = totalHours;
+        prefill.CalcGramRate = gramRate;
+        prefill.CalcHourRate = hourRate;
+        UpsertPlanningLine(prefill.LineItems, ["material"], "Production material",
+            $"{quantity:0} flat promotional picks at {gramsPerUnit:0.##}g each plus {wastePercent:0.##}% multicolor waste allowance.", totalGrams, gramRate);
+        UpsertPlanningLine(prefill.LineItems, ["machine time", "print time"], "Production machine time",
+            $"{hoursPer100:0.##} editable machine hours per 100 pieces for {quantity:0} pieces.", totalHours, hourRate);
+
+        var designFee = ExtractExplicitDesignFee(source);
+        if (designFee > 0)
+        {
+            UpsertPlanningLine(prefill.LineItems, ["design", "artwork", "logo", "proof"], "Logo/artwork design & proof",
+                "Fixed design/proof amount explicitly discussed in the source packet.", 1, designFee);
+            var designRate = instructions.Rates.GetValueOrDefault("designHourly", 25m);
+            if (designRate > 0)
+            {
+                prefill.CalcDesignRate = designRate;
+                prefill.CalcDesignHours = Money(designFee / designRate);
+            }
+        }
+
+        var prototypeRate = instructions.Rates.GetValueOrDefault("prototypeSampleFee");
+        if (prototypeRate > 0 && source.Contains("sample", StringComparison.OrdinalIgnoreCase))
+        {
+            UpsertPlanningLine(prefill.LineItems, ["prototype", "sample print"], "Prototype sample print",
+                "One sample for design, color, and printability approval before the bulk run.", 1, prototypeRate);
+        }
+
+        var setupRate = instructions.Rates.GetValueOrDefault("multicolorSetupFee");
+        if (setupRate > 0 && Regex.IsMatch(source, @"(?i)\b(?:4|four|5|five|multi)[ -]?colou?rs?\b"))
+        {
+            prefill.CalcSetupFee = setupRate;
+            UpsertPlanningLine(prefill.LineItems, ["production setup", "multicolor setup", "color change", "colour change"], "Multicolor production setup",
+                "File slicing, plate layout, calibration, and multicolor setup using editable multicolorSetupFee.", 1, setupRate);
+        }
+
+        var bulkRate = instructions.Rates.GetValueOrDefault("bulkHandlingPerUnit");
+        if (bulkRate > 0)
+        {
+            UpsertPlanningLine(prefill.LineItems, ["bulk handling"], "Bulk handling / production management",
+                "Per-unit production management and handling using editable bulkHandlingPerUnit.", quantity, bulkRate);
+        }
+        result.Warnings.Add($"The app applied editable flat-promotional-part planning assumptions for {quantity:0} guitar picks: {totalGrams:0.##}g and {totalHours:0.##} machine hours. Update AiEstimateInstructions.json as real slicer data becomes available.");
+    }
+
+    private static decimal ExtractBulkQuantity(string source)
+    {
+        return Regex.Matches(source, @"(?i)\b(?<value>\d{2,5})\b(?:\s+[\w/-]+){0,4}\s*(?:[- ]?\s*(?:pieces?|pcs?|units?|copies|picks?|pics?))\b")
+            .Select(match => decimal.TryParse(match.Groups["value"].Value, out var value) ? value : 0)
+            .Where(value => value is >= 25 and <= 10_000)
+            .DefaultIfEmpty(0)
+            .Max();
+    }
+
+    private static decimal ExtractExplicitDesignFee(string source)
+    {
+        var value = FirstMatch(source,
+            @"(?i)\$\s*(?<value>\d+(?:\.\d{1,2})?)\s*(?:for\s+the\s+)?(?:logo|design|artwork|proof)",
+            @"(?i)(?:logo|design|artwork|proof)[^$\r\n]{0,50}\$\s*(?<value>\d+(?:\.\d{1,2})?)");
+        return decimal.TryParse(value, out var amount) ? amount : 0;
+    }
+
+    private static void UpsertPlanningLine(List<AiEstimateLineItem> lines, string[] matchTerms, string description, string details, decimal quantity, decimal rate)
+    {
+        var line = FindLine(lines, matchTerms);
+        if (line is null)
+        {
+            line = new AiEstimateLineItem();
+            lines.Add(line);
+        }
+        line.Description = description;
+        line.Details = details;
+        line.Quantity = quantity;
+        line.Rate = rate;
+    }
+
+    private static AiEstimateLineItem? FindLine(IEnumerable<AiEstimateLineItem> lines, params string[] terms) => lines
+        .FirstOrDefault(line => terms.Any(term => line.Description.Contains(term, StringComparison.OrdinalIgnoreCase)));
+
+    private static bool SetIfDifferent(decimal current, decimal value, Action<decimal> setter)
+    {
+        value = Math.Max(0, value);
+        if (Math.Abs(current - value) < 0.001m) return false;
+        setter(value);
+        return true;
+    }
+
+    private static void AddSourceBudgetWarning(AiEstimateDraftResult result, string source)
+    {
+        var budget = DecimalMatch(source,
+            @"(?i)\b(?:budget|hoping\s+to\s+spend|want(?:ed)?\s+to\s+spend|spend|up\s+to|max(?:imum)?)\D{0,30}\$?\s*(?<value>\d{2,6}(?:\.\d{1,2})?)");
+        if (budget <= 0) return;
+        var difference = result.Pricing.Total - budget;
+        result.Warnings.Add(difference > 0
+            ? $"The draft total {result.Pricing.Total:C} is {difference:C} above the customer's stated {budget:C} budget. Review scope, production assumptions, or options before sending."
+            : $"The draft total {result.Pricing.Total:C} is within the customer's stated {budget:C} budget by {Math.Abs(difference):C}. Review assumptions before sending.");
     }
 
     private static AiEstimatePricingSummary BuildCalculatorPricing(AiEstimatePrefill prefill)
@@ -912,6 +1322,7 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
         var tax = taxable * (prefill.CalcTaxRate / 100m);
         return new AiEstimatePricingSummary
         {
+            PricingMode = "Calculator-generated quote",
             UsedCalculatorInputs = true,
             RequiresPricingReview = true,
             Setup = Money(setup),
@@ -956,16 +1367,24 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
         });
     }
 
-    private static AiEstimatePricingSummary BuildLineItemPricing(AiEstimatePrefill prefill)
+    private static AiEstimatePricingSummary BuildLineItemPricing(AiEstimatePrefill prefill, AiEstimatePricingSummary? calculatorCostBasis = null)
     {
         var lineSubtotal = prefill.LineItems.Sum(x => Math.Max(0, x.Quantity) * Math.Max(0, x.Rate));
         var rushAmount = lineSubtotal * (prefill.DocRushPercent / 100m);
-        var taxable = Math.Max(0, lineSubtotal + rushAmount - prefill.DocDiscount);
+        var taxable = Math.Max(prefill.CalcMinimum, lineSubtotal + rushAmount - prefill.DocDiscount);
         var tax = taxable * (prefill.DocTaxRate / 100m);
         return new AiEstimatePricingSummary
         {
-            UsedCalculatorInputs = false,
+            PricingMode = calculatorCostBasis is null ? "Granular quote line items" : "Granular quote line items with calculator cost basis",
+            UsedCalculatorInputs = calculatorCostBasis is not null,
             RequiresPricingReview = true,
+            Setup = calculatorCostBasis?.Setup ?? 0,
+            Material = calculatorCostBasis?.Material ?? 0,
+            Machine = calculatorCostBasis?.Machine ?? 0,
+            Design = calculatorCostBasis?.Design ?? 0,
+            PostProcessing = calculatorCostBasis?.PostProcessing ?? 0,
+            DifficultyFee = calculatorCostBasis?.DifficultyFee ?? 0,
+            MinimumAdjustment = calculatorCostBasis?.MinimumAdjustment ?? 0,
             LineSubtotal = Money(lineSubtotal),
             RushAmount = Money(rushAmount),
             Discount = Money(prefill.DocDiscount),
@@ -1075,6 +1494,7 @@ public sealed class AiKeywordPrice
 }
 
 sealed record PreparedAiSources(string Text, List<AiEstimateImageInput> Images, List<string> Warnings);
+sealed record PreparedModelSource(string Text, bool WasCondensed);
 sealed record ResolvedAiConnection(string ChatEndpoint, string Model, string Provider, bool UseApiKey);
 sealed record AiProductPricingContext(
     string Name,

@@ -356,6 +356,16 @@ try {
     Assert-True ($aiDraft.executionReceipt.usedAi -eq $false) 'AI estimate fallback execution receipt incorrectly claimed model AI use.'
     Assert-True ($aiDraft.executionReceipt.totalTokens -eq $null) 'AI estimate fallback execution receipt incorrectly reported model tokens.'
     Assert-True ($aiDraft.prefill.projectNotes -like '*LOCAL RULES RECEIPT:*') 'AI estimate fallback did not preserve its execution receipt in Project Notes.'
+    $bulkPickDraft = Invoke-Json POST '/api/ai/estimate-draft' @{
+        sourceName = 'bulk-guitar-pick-request.txt'
+        sourceText = 'Please quote 300 custom guitar picks, slightly oversized at 1.2mm, with a four color cartoon. The $200 design/proof phase is approved. Make a sample first. I was hoping to spend $700.'
+    }
+    Assert-True ($bulkPickDraft.usedAi -eq $false) 'Bulk-pick local fallback incorrectly claimed model AI use.'
+    Assert-Close ([decimal]$bulkPickDraft.prefill.calcGrams) 562.5 0.01 'Bulk-pick editable material planning assumption'
+    Assert-Close ([decimal]$bulkPickDraft.prefill.calcHours) 120 0.01 'Bulk-pick editable machine-time planning assumption'
+    Assert-True (@($bulkPickDraft.prefill.lineItems | Where-Object { $_.description -like '*Bulk handling*' }).Count -eq 1) 'Bulk-pick planning did not include configured bulk handling.'
+    Assert-True ($bulkPickDraft.prefill.projectName -like '*Guitar Pick*') 'Bulk-pick planning did not identify the actual job.'
+    Assert-True (@($bulkPickDraft.warnings | Where-Object { $_ -like '*stated*budget*' }).Count -eq 1) 'Bulk-pick planning did not compare the draft with the stated budget.'
     $aiPricedDraft = Invoke-Json POST '/api/ai/estimate-draft' @{
         sourceName = 'acceptance-priced-request.txt'
         sourceText = "Customer: Price Check Customer`nSubject: PETG enclosure`nUse black PETG. Material: 120 grams. Print time: 6 hours. Design time: 1 hour. Setup fee: `$5. Post-processing: `$4. Material rate: `$0.05 per gram. Machine rate: `$3. Design rate: `$25. Minimum: `$15. Rush: 25%. Discount: `$2. Tax: 6.625%."
@@ -376,6 +386,166 @@ try {
     Assert-Close ([decimal]$aiCatalogDraft.prefill.calcGrams) 100 0.01 'AI estimate saved product grams'
     Assert-Close ([decimal]$aiCatalogDraft.pricing.total) 40 0.01 'AI estimate saved product target-price floor'
     Assert-True (@($aiCatalogDraft.warnings | Where-Object { $_ -like '*Saved product costing was applied*' }).Count -eq 1) 'AI estimate did not disclose saved product costing use.'
+    Write-Step 'Checking AI Operations workflows'
+    $duplicateProduct = Invoke-Json POST '/api/products' @{
+        name = 'Acceptance Catalog Widget Duplicate'
+        sku = 'AI-CATALOG-001'
+        category = 'Acceptance Product'
+        material = 'PETG'
+        needsReview = $true
+    }
+    $reconciliation = Invoke-Json GET '/api/ai/operations/reconciliation'
+    Assert-True ($reconciliation.receipt.usedAi -eq $false) 'Duplicate checker must remain deterministic by default.'
+    Assert-True (@($reconciliation.findings | Where-Object { $_.kind -eq 'Exact duplicate' -and $_.title -like '*SKU*' }).Count -ge 1) 'Duplicate checker did not find the deliberately duplicated Product SKU.'
+    $actionPreview = Invoke-Json GET '/api/action-items/automation-preview'
+    Assert-True ($actionPreview.receipt.usedAi -eq $false) 'Action sync preview incorrectly claimed model AI use.'
+    Assert-True ($actionPreview.readyToCreateCount -gt 0) 'Action sync preview did not identify any verified findings ready to create.'
+    Assert-True (@($actionPreview.candidates | Where-Object { $_.source -like '*Reconciliation*' }).Count -ge 1) 'Action sync preview did not include reconciliation findings.'
+    Assert-True (@($actionPreview.candidates | Where-Object { $_.area -eq 'Actions' }).Count -eq 0) 'Action sync preview included the recursive open-actions finding.'
+    $actionSync = Invoke-Json POST '/api/action-items/sync-findings' @{}
+    Assert-True ($actionSync.createdCount -gt 0) 'Action finding sync did not create any Action Items.'
+    Assert-True (@($actionSync.created | Where-Object { $_.notes -like '*AUTOMATION KEY:*' }).Count -eq $actionSync.createdCount) 'Generated Action Items did not preserve stable automation keys.'
+    $actionSyncRepeat = Invoke-Json POST '/api/action-items/sync-findings' @{}
+    Assert-True ($actionSyncRepeat.createdCount -eq 0) 'Repeating action finding sync created duplicate open tasks.'
+    Assert-True ($actionSyncRepeat.skippedExistingCount -ge $actionSync.createdCount) 'Repeated action finding sync did not report existing open generated tasks.'
+
+    $marketplaceDraft = Invoke-RestMethod -Method Post -Uri "$base/api/ai/operations/marketplace-order-import" -Form @{
+        sourceName = 'acceptance-etsy-order.txt'
+        sourceText = @'
+Etsy Order # 4999000111
+Order date: June 10, 2026
+Ship to
+Acceptance Etsy Buyer
+123 Acceptance Test Lane
+TESTVILLE, NJ 07001
+United States
+Scheduled to ship by June 12, 2026
+Buyer Acceptance Etsy Buyer (acceptance.etsy@example.test)
+Item: Acceptance PETG Widget Set
+Quantity: 2
+Item total: $40.00
+Shipping: $6.00
+Sales tax: $3.00
+Order total: $49.00
+Tracking number: 9400111899000000000000
+'@
+        sourceUrls = ''
+    }
+    Assert-True ($marketplaceDraft.sale.platform -eq 'Etsy') 'Paid marketplace importer did not identify Etsy.'
+    Assert-True ($marketplaceDraft.sale.orderNumber -eq '4999000111') 'Paid marketplace importer did not extract the order number.'
+    Assert-True (([datetime]$marketplaceDraft.sale.saleDate).ToString('yyyy-MM-dd') -eq '2026-06-10') 'Paid marketplace importer did not extract the Sale Date.'
+    Assert-True (@($marketplaceDraft.detectedOrderNumbers).Count -eq 1) 'Paid marketplace importer did not report the detected order number.'
+    Assert-True ($marketplaceDraft.customer.name -eq 'Acceptance Etsy Buyer') 'Paid marketplace importer did not extract the customer contact name.'
+    Assert-True ($marketplaceDraft.customer.email -eq 'acceptance.etsy@example.test') 'Paid marketplace importer did not extract the customer email.'
+    Assert-True ($marketplaceDraft.customer.address1 -eq '123 Acceptance Test Lane') 'Paid marketplace importer did not extract the customer street address.'
+    Assert-True ($marketplaceDraft.customer.city -eq 'Testville') 'Paid marketplace importer did not extract the customer city.'
+    Assert-True ($marketplaceDraft.customer.state -eq 'NJ') 'Paid marketplace importer did not extract the customer state.'
+    Assert-True ($marketplaceDraft.customer.postalCode -eq '07001') 'Paid marketplace importer did not extract the customer ZIP.'
+    Assert-Close ([decimal]$marketplaceDraft.sale.customerPaid) 49 0.01 'Paid marketplace importer customer paid'
+    Assert-True ($marketplaceDraft.possibleDuplicateSales.Count -eq 0) 'New marketplace order was incorrectly marked duplicate.'
+    $interleavedMarketplaceDraft = Invoke-RestMethod -Method Post -Uri "$base/api/ai/operations/marketplace-order-import" -Form @{
+        sourceName = 'acceptance-interleaved-etsy-pdf-text.txt'
+        sourceText = 'Etsy Ship to 1 item Acceptance Column Buyer 987 Column Test Rd Product title 1 x $10.00 COLUMNTOWN, NJ 07002 More product text United States Scheduled to ship by Jun 12, 2026 From EPATA 12 Seller Ave SELLERTOWN, NJ 07003 United States Order #4999000333 Order date Jun 10, 2026 Buyer Acceptance Column Buyer (columnbuyer)'
+        sourceUrls = ''
+    }
+    Assert-True ($interleavedMarketplaceDraft.customer.name -eq 'Acceptance Column Buyer') 'Paid marketplace importer did not extract the ship-to name from interleaved Etsy PDF text.'
+    Assert-True ($interleavedMarketplaceDraft.customer.address1 -eq '987 Column Test Rd') 'Paid marketplace importer did not extract the street from interleaved Etsy PDF text.'
+    Assert-True ($interleavedMarketplaceDraft.customer.city -eq 'Columntown') 'Paid marketplace importer did not extract the city from interleaved Etsy PDF text.'
+    Assert-True ($interleavedMarketplaceDraft.customer.etsyUsername -eq 'columnbuyer') 'Paid marketplace importer did not extract the Etsy username from interleaved Etsy PDF text.'
+    $missingDateSale = $marketplaceDraft.sale | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+    $missingDateSale.saleDate = $null
+    $missingDateSave = Invoke-WebRequest -Method Post -Uri "$base/api/ai/operations/marketplace-order-import/save" -Form @{
+        saleJson = ($missingDateSale | ConvertTo-Json -Depth 12)
+        jobJson = ($marketplaceDraft.job | ConvertTo-Json -Depth 12)
+        createJob = 'false'
+        detectedOrderNumbersJson = (ConvertTo-Json -InputObject @($marketplaceDraft.detectedOrderNumbers) -Compress)
+    } -SkipHttpErrorCheck
+    Assert-True ($missingDateSave.StatusCode -eq 400) 'Paid marketplace save accepted a missing Sale Date.'
+
+    $mixedMarketplaceDraft = Invoke-RestMethod -Method Post -Uri "$base/api/ai/operations/marketplace-order-import" -Form @{
+        sourceName = 'acceptance-mixed-etsy-orders.txt'
+        sourceText = @'
+Etsy Order # 4999000111
+Order date Jun 7, 2026
+Order total: $49.00
+
+Etsy Order # 4999000222
+Order date Jun 10, 2026
+Order total: $61.87
+'@
+        sourceUrls = ''
+    }
+    Assert-True (@($mixedMarketplaceDraft.detectedOrderNumbers).Count -eq 2) 'Paid marketplace importer did not detect multiple order numbers in one batch.'
+    $mixedMarketplaceSave = Invoke-WebRequest -Method Post -Uri "$base/api/ai/operations/marketplace-order-import/save" -Form @{
+        saleJson = ($marketplaceDraft.sale | ConvertTo-Json -Depth 12)
+        jobJson = ($marketplaceDraft.job | ConvertTo-Json -Depth 12)
+        createJob = 'false'
+        detectedOrderNumbersJson = (ConvertTo-Json -InputObject @($mixedMarketplaceDraft.detectedOrderNumbers) -Compress)
+    } -SkipHttpErrorCheck
+    Assert-True ($mixedMarketplaceSave.StatusCode -eq 400) 'Paid marketplace save accepted a batch containing multiple orders.'
+
+    $arCountBeforeMarketplaceSave = @((Invoke-Json GET '/api/receivable-invoices')).Count
+    $invoiceDocCountBeforeMarketplaceSave = @((Invoke-Json GET '/api/invoice-documents')).Count
+    Set-Content -LiteralPath $uploadProbe -Value 'Acceptance marketplace order proof' -NoNewline
+    $marketplaceSave = Invoke-RestMethod -Method Post -Uri "$base/api/ai/operations/marketplace-order-import/save" -Form @{
+        saleJson = ($marketplaceDraft.sale | ConvertTo-Json -Depth 12)
+        jobJson = ($marketplaceDraft.job | ConvertTo-Json -Depth 12)
+        customerJson = ($marketplaceDraft.customer | ConvertTo-Json -Depth 12)
+        createJob = 'true'
+        saveCustomerContact = 'true'
+        detectedOrderNumbersJson = (ConvertTo-Json -InputObject @($marketplaceDraft.detectedOrderNumbers) -Compress)
+        files = Get-Item -LiteralPath $uploadProbe
+    }
+    Assert-True ($marketplaceSave.sale.id -gt 0) 'Paid marketplace save did not create a Sale.'
+    Assert-True ($marketplaceSave.job.id -gt 0) 'Paid marketplace save did not create the optional completed Job.'
+    Assert-True ($marketplaceSave.customer.id -gt 0) 'Paid marketplace save did not create the customer business card.'
+    Assert-True ($marketplaceSave.customer.address1 -eq '123 Acceptance Test Lane') 'Saved customer business card lost the shipping address.'
+    Assert-True (@($marketplaceSave.auditDocuments).Count -eq 1) 'Paid marketplace save did not link uploaded proof.'
+    Assert-True (@((Invoke-Json GET '/api/receivable-invoices')).Count -eq $arCountBeforeMarketplaceSave) 'Paid marketplace save incorrectly created AR.'
+    Assert-True (@((Invoke-Json GET '/api/invoice-documents')).Count -eq $invoiceDocCountBeforeMarketplaceSave) 'Paid marketplace save incorrectly created an estimate/invoice document.'
+    $marketplaceDuplicate = Invoke-RestMethod -Method Post -Uri "$base/api/ai/operations/marketplace-order-import" -Form @{
+        sourceName = 'acceptance-etsy-duplicate.txt'
+        sourceText = 'Etsy Order # 4999000111 Item: Acceptance PETG Widget Set Order total: $49.00'
+        sourceUrls = ''
+    }
+    Assert-True (@($marketplaceDuplicate.possibleDuplicateSales).Count -eq 1) 'Paid marketplace importer did not detect an existing Etsy order.'
+    Invoke-Json DELETE "/api/sales/$($marketplaceSave.sale.id)" | Out-Null
+    Invoke-Json DELETE "/api/customer-jobs/$($marketplaceSave.job.id)" | Out-Null
+    Invoke-Json DELETE "/api/parties/$($marketplaceSave.customer.id)" | Out-Null
+    Invoke-Json DELETE "/api/audit-documents/$($marketplaceSave.auditDocuments[0].id)" | Out-Null
+
+    $productImport = Invoke-RestMethod -Method Post -Uri "$base/api/ai/operations/product-import" -Form @{
+        sourceName = 'acceptance-product-source.txt'
+        sourceText = 'Acceptance Imported Bracket. Black PETG replacement bracket.'
+        sourceUrls = ''
+    }
+    Assert-True ($productImport.product.name -like '*Acceptance Imported Bracket*') 'Product importer did not build a Product draft from pasted source text.'
+    Assert-True ($productImport.product.material -eq 'PETG') 'Product importer did not extract material.'
+    Assert-True ($productImport.product.needsReview -eq $true) 'Product importer draft must require review.'
+
+    $jobPlan = Invoke-Json POST '/api/ai/operations/job-plan' @{ sourceText = 'Build 10 black PETG brackets, get prototype approval, then package and invoice.' }
+    Assert-True (@($jobPlan.tasks).Count -ge 5) 'Job planner did not return a practical multi-step plan.'
+    $jobPlanActions = Invoke-Json POST '/api/ai/operations/job-plan/actions' @{ jobName = $jobPlan.jobName; tasks = $jobPlan.tasks }
+    Assert-True (@($jobPlanActions).Count -ge 5) 'Confirmed Job Planner did not create its Action Items.'
+    Assert-True (@($jobPlanActions | Where-Object { $_.notes -like '*AUTOMATION KEY: job-plan*' }).Count -eq @($jobPlanActions).Count) 'Job Planner Action Items did not preserve deduplication keys.'
+    $jobPlanActionsRepeat = Invoke-Json POST '/api/ai/operations/job-plan/actions' @{ jobName = $jobPlan.jobName; tasks = $jobPlan.tasks }
+    Assert-True (@($jobPlanActionsRepeat).Count -eq 0) 'Repeating a confirmed Job Planner plan created duplicate open tasks.'
+
+    $slicerRead = Invoke-RestMethod -Method Post -Uri "$base/api/ai/operations/slicer-read" -Form @{
+        sourceName = 'acceptance-slicer.txt'
+        sourceText = 'Material: PETG. Filament used 184.6g. Print time 8h 42m. 2 plates. Quantity 4.'
+        sourceUrls = ''
+    }
+    Assert-Close ([decimal]$slicerRead.slicer.grams) 184.6 0.01 'Slicer reader grams'
+    Assert-Close ([decimal]$slicerRead.slicer.printHours) 8.7 0.01 'Slicer reader hours'
+
+    $listing = Invoke-Json POST '/api/ai/operations/listing' @{ productId = $catalogProduct.id; platform = 'MakerWorld'; extraInstructions = 'Keep it concise.' }
+    Assert-True (-not [string]::IsNullOrWhiteSpace($listing.listing.title)) 'Listing writer did not return a title.'
+    Assert-True (-not [string]::IsNullOrWhiteSpace($listing.listing.description)) 'Listing writer did not return a description.'
+
+    $ledgerAnswer = Invoke-Json POST '/api/ai/operations/ask-ledger' @{ query = 'Acceptance Catalog Widget' }
+    Assert-True (@($ledgerAnswer.results).Count -ge 1) 'Ask the Ledger did not return the matching Product.'
+    Invoke-Json DELETE "/api/products/$($duplicateProduct.id)" | Out-Null
     Invoke-Json DELETE "/api/products/$($catalogProduct.id)" | Out-Null
     $aiMixedDraft = Invoke-AiEstimateUpload
     Assert-True (@($aiMixedDraft.prefill.lineItems).Count -ge 3) 'Mixed-source AI estimate intake did not create separate pasted-text and picture items.'
@@ -425,6 +595,76 @@ try {
     Assert-CrudRoundTrip 'tax-obligations' @{ taxYear=2026; title='Acceptance tax obligation'; jurisdiction='Federal'; obligationType='Estimated Income Tax'; formName='1040-ES'; period='Q2'; dueDate='2026-06-15'; status='Review Applicability'; estimatedAmount=-20; amountPaid=-10; appliesIf='Acceptance'; needsReview=$true; notes='acceptance' } 'status' 'Filed / Paid' | Out-Null
     Assert-CrudRoundTrip 'mileage-logs' @{ tripDate='2026-05-30'; vehicle='Acceptance Vehicle'; startLocation='Home'; endLocation='Post Office'; businessPurpose='Ship customer order'; businessMiles=-12; parkingAndTolls=-2; proofReference='calendar'; notes='acceptance' } 'notes' 'updated mileage' | Out-Null
     Assert-CrudRoundTrip 'settings' @{ key='AcceptanceSetting'; value='One'; notes='acceptance' } 'value' 'Two' | Out-Null
+
+    Write-Step 'Checking customer communication timeline and printer queue'
+    $communication = Assert-CrudRoundTrip 'customer-communications' @{
+        occurredAt='2026-06-10T09:30:00'
+        customerName='Acceptance Customer'
+        direction='Incoming'
+        channel='Email'
+        subject='Acceptance Queue Approval'
+        summary='Customer approved the black PETG production run.'
+        relatedJobNumber='JOB-QUEUE-ACC'
+        relatedInvoiceNumber='INV-QUEUE-ACC'
+        followUpDate='2026-06-11'
+        followUpStatus='Open'
+        sourceProof='acceptance-email.eml'
+        notes='acceptance'
+    } 'notes' 'updated communication'
+    Assert-True ($communication.followUpStatus -eq 'Open') 'Communication follow-up status was not preserved.'
+
+    $queueJob = Invoke-Json POST '/api/customer-jobs' @{
+        jobDate='2026-06-10'
+        customerName='Acceptance Customer'
+        platform='Direct'
+        jobNumber='JOB-QUEUE-ACC'
+        relatedInvoiceNumber='INV-QUEUE-ACC'
+        jobName='Acceptance Queue Job'
+        jobType='Print'
+        status='Open'
+        productName='Acceptance Queue Part'
+        material='PETG'
+        color='Black'
+    }
+    $queueItem = Invoke-Json POST '/api/printer-queue-items' @{
+        queueDate='2026-06-10'
+        priority='High'
+        status='Printing'
+        printerName='Acceptance P1S'
+        customerJobId=$queueJob.id
+        customerName='Acceptance Customer'
+        jobName='Acceptance Queue Job'
+        relatedInvoiceNumber='INV-QUEUE-ACC'
+        productName='Acceptance Queue Part'
+        material='PETG'
+        color='Black'
+        quantity=0
+        plateCount=0
+        estimatedHours=-2
+        progressPercent=-5
+    }
+    Assert-True ($queueItem.quantity -eq 1 -and $queueItem.plateCount -eq 1) 'Printer queue did not normalize quantity and plate count.'
+    Assert-True ($queueItem.progressPercent -ge 1 -and $queueItem.startedAt) 'Printing queue item did not set progress/start time.'
+    $queueJobPrinting = Invoke-Json GET "/api/customer-jobs/$($queueJob.id)"
+    Assert-True ($queueJobPrinting.status -eq 'In Progress') 'Printing queue item did not update its linked Customer Job.'
+
+    $queueItem.status = 'Completed'
+    $queueItem.actualHours = 1.5
+    $queueCompleted = Invoke-Json PUT "/api/printer-queue-items/$($queueItem.id)" $queueItem
+    Assert-True ($queueCompleted.progressPercent -eq 100 -and $queueCompleted.completedAt) 'Completed queue item did not set 100% and completion time.'
+    $queueJobCompleted = Invoke-Json GET "/api/customer-jobs/$($queueJob.id)"
+    Assert-True ($queueJobCompleted.status -eq 'Completed') 'Completed queue item did not update its linked Customer Job.'
+
+    $queueCompleted.status = 'Needs Attention'
+    $queueCompleted.needsReview = $true
+    $queueAttention = Invoke-Json PUT "/api/printer-queue-items/$($queueItem.id)" $queueCompleted
+    Assert-True ($queueAttention.status -eq 'Needs Attention') 'Printer queue attention status did not persist.'
+    $operationsReview = Invoke-Json GET '/api/ai/review'
+    Assert-True (@($operationsReview.items | Where-Object { $_.title -eq 'Customer communication follow-ups are due' }).Count -eq 1) 'AI review did not flag due customer communication follow-ups.'
+    Assert-True (@($operationsReview.items | Where-Object { $_.title -eq 'Printer queue items need attention' }).Count -eq 1) 'AI review did not flag printer queue items needing attention.'
+    $operationsTimeline = Invoke-Json GET '/api/job-timeline?q=Acceptance%20Queue'
+    Assert-True (@($operationsTimeline.timelines.events | Where-Object { $_.kind -eq 'Communication' }).Count -ge 1) 'Job Timeline did not include customer communication events.'
+    Assert-True (@($operationsTimeline.timelines.events | Where-Object { $_.kind -eq 'Printer Queue' }).Count -ge 1) 'Job Timeline did not include printer queue events.'
 
     Write-Step 'Checking proof/document intake upload'
     $upload = Upload-ProofFile
@@ -501,7 +741,7 @@ try {
     Assert-True ($legacy.success -eq $false) 'Legacy import without old app should fail gracefully, not claim success.'
 
     Write-Step 'Checking exports and backups'
-    foreach ($entity in @('parties', 'sales', 'customer-jobs', 'receivable-invoices', 'bills', 'expenses', 'products', 'assets', 'makerworld-rewards', 'audit-documents', 'business-accounts', 'action-items', 'tax-obligations', 'mileage-logs')) {
+    foreach ($entity in @('parties', 'sales', 'customer-jobs', 'customer-communications', 'printer-queue-items', 'receivable-invoices', 'bills', 'expenses', 'products', 'assets', 'makerworld-rewards', 'audit-documents', 'business-accounts', 'action-items', 'tax-obligations', 'mileage-logs')) {
         $csv = Invoke-Raw GET "/api/export/$entity"
         Assert-True ($csv.StatusCode -eq 200) "CSV export failed for $entity."
         Assert-True ($csv.Content.Length -gt 10) "CSV export for $entity looked empty."
@@ -533,6 +773,17 @@ try {
     $dashboard = Invoke-Json GET '/api/dashboard'
     Assert-True ($dashboard.kpis.grossReceipts -gt 0) 'Dashboard gross receipts should reflect acceptance sales.'
     Assert-True ($dashboard.kpis.estimatedNet -ne $null) 'Dashboard estimatedNet missing.'
+    foreach ($key in @('grossReceipts','estimatedNet','openReceivables','openPayables','customerPaid','salesTaxMemo','knownCosts','needsReview')) {
+        Assert-True ($null -ne $dashboard.breakdowns.$key) "Dashboard breakdown $key is missing."
+    }
+    Assert-Close ([decimal]$dashboard.breakdowns.grossReceipts.total) ([decimal]$dashboard.kpis.grossReceipts) 0.01 'Dashboard gross receipts breakdown total'
+    Assert-Close ([decimal]$dashboard.breakdowns.estimatedNet.total) ([decimal]$dashboard.kpis.estimatedNet) 0.01 'Dashboard estimated net breakdown total'
+    Assert-Close ([decimal]$dashboard.breakdowns.openReceivables.total) ([decimal]$dashboard.kpis.openReceivables) 0.01 'Dashboard open AR breakdown total'
+    Assert-Close ([decimal]$dashboard.breakdowns.openPayables.total) ([decimal]$dashboard.kpis.openPayables) 0.01 'Dashboard open AP breakdown total'
+    Assert-Close ([decimal]$dashboard.breakdowns.customerPaid.total) ([decimal]$dashboard.kpis.customerPaid) 0.01 'Dashboard customer paid breakdown total'
+    Assert-Close ([decimal]$dashboard.breakdowns.salesTaxMemo.total) ([decimal]$dashboard.kpis.salesTaxMemo) 0.01 'Dashboard sales-tax memo breakdown total'
+    Assert-Close ([decimal]$dashboard.breakdowns.knownCosts.total) ([decimal]$dashboard.kpis.sellingCosts + [decimal]$dashboard.kpis.directExpenses) 0.01 'Dashboard known-costs breakdown total'
+    Assert-True ([decimal]$dashboard.breakdowns.needsReview.total -eq [decimal]$dashboard.kpis.needsReviewCount) 'Dashboard Needs Review breakdown total does not match KPI.'
     $taxAudit = Invoke-Json GET '/api/tax-audit'
     Assert-True ($null -ne $taxAudit.summary) 'Tax audit summary missing.'
     $highTaxIssues = @($taxAudit.issues | Where-Object { $_.severity -eq 'High' })

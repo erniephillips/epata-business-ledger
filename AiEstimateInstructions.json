@@ -21,7 +21,15 @@
     "materialPerGram": 0.05,
     "setupFee": 5.00,
     "postProcessingFee": 5.00,
-    "rushPercent": 25.00
+    "rushPercent": 25.00,
+    "prototypeSampleFee": 25.00,
+    "multicolorSetupFee": 35.00,
+    "bulkHandlingPerUnit": 0.75,
+    "postProcessingHourly": 25.00,
+    "wasteAllowancePercent": 25.00,
+    "flatPromoPieceGramsPerUnit": 1.50,
+    "flatPromoPieceMachineHoursPer100": 40.00,
+    "multicolorWastePercent": 25.00
   },
   "keywordPrices": [
     {
@@ -54,6 +62,17 @@
     "All AI-generated prices and fields must be reviewed before the estimate is saved or sent."
     ,"When estimating material usage, use total grams for the quoted quantity and include a reasonable waste/support allowance only when supported by the source or clearly disclosed."
     ,"When estimating machine or design time, disclose uncertainty in projectNotes and add a question if slicer or design-time information is missing."
+    ,"A missing customer name never blocks a job estimate. Leave the name blank, estimate the work, and add it as a follow-up question."
+    ,"When slicer data is unavailable, create a usable planning estimate from disclosed conservative assumptions instead of collapsing a detailed job to the minimum."
+    ,"For bulk repeated parts, estimate total grams and machine hours from quantity, approximate size or thickness, material, color count, waste, batch layout, and cleanup requirements."
+    ,"Break complex work into customer-facing phases such as design/artwork, prototype/sample, production setup/color changes, production run, cleanup/post-processing, and packaging."
+    ,"Treat explicitly discussed or accepted prices as separate quote line items. Treat a customer budget as context, not the automatic quote price."
+    ,"Use quantity 1 for one-time design, prototype, or setup fees. For material and time rows, quantity and rate must use matching units so quantity multiplied by rate equals the line amount."
+    ,"For standard or slightly oversized 1.2 mm guitar-pick-like flat pieces, a planning estimate of roughly 1-3 grams per finished piece before disclosed multicolor waste is more reasonable than a large solid-part estimate."
+    ,"Do not quote both an accepted fixed design/proof fee and a second hourly design charge for the same work. Keep design hours as cost-basis evidence when a fixed design fee drives the customer quote."
+    ,"For applicable bulk multicolor jobs, include prototypeSampleFee, multicolorSetupFee, bulkHandlingPerUnit, and postProcessingHourly rather than quoting only raw filament and machine time."
+    ,"Do not bundle a prototype/sample fee into a setup line when the prototype/sample is already listed separately. Each configured phase fee must appear exactly once."
+    ,"For bulk flat promotional parts such as guitar picks, use flatPromoPieceGramsPerUnit, flatPromoPieceMachineHoursPer100, and multicolorWastePercent as the repeatable planning basis until real slicer data replaces those assumptions."
   ],
   "aiInstructions": [
     "Extract customer and project details from pasted messages, email chains, uploaded documents, public source-page metadata, and uploaded pictures.",
@@ -62,6 +81,6 @@
     "Return structured fields only. Do not include commentary outside the JSON response.",
     "Use concise customer-facing project descriptions and keep uncertainty in projectNotes, warnings, and questions.",
     "Use the editable rates and keyword prices in this file. Never silently invent a custom fee.",
-    "Fill the complete HTML builder field contract, including calculator inputs. The application recomputes all money and replaces calculator-backed line items with its deterministic breakdown."
+    "Fill the complete HTML builder field contract, including calculator inputs. The application recomputes all money while preserving useful granular customer-facing line items."
   ]
 }

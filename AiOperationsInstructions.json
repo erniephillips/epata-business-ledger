@@ -1,0 +1,30 @@
+{
+  "brandName": "EPATA 3D Prints",
+  "defaultProductCategory": "3D Printed Product",
+  "defaultMaterialCostPerGram": 0.05,
+  "defaultMachineRatePerHour": 3.00,
+  "defaultPackagingCost": 1.00,
+  "productImportRules": [
+    "Extract only facts supported by the supplied page, documents, pictures, or pasted notes.",
+    "Leave unknown grams, print hours, packaging, design time, and target price at zero and ask for review.",
+    "Preserve the source URL and source names in product notes.",
+    "Treat MakerWorld, Etsy, and any other public product page as source material, not as authority for internal costs."
+  ],
+  "jobPlanStages": [
+    "Confirm requirements and missing measurements",
+    "Prepare or verify design files",
+    "Slice and verify cost assumptions",
+    "Produce a prototype or proof when appropriate",
+    "Get customer approval before the full run",
+    "Run production",
+    "Perform cleanup and quality control",
+    "Package, deliver, or ship",
+    "Invoice and confirm payment"
+  ],
+  "listingRules": [
+    "Do not claim certifications, compatibility, safety, durability, or performance that the source does not support.",
+    "Write clear titles and descriptions for the selected platform.",
+    "Call out personalization choices, included quantity, material, dimensions, and limitations when known.",
+    "Avoid keyword stuffing and keep every tag relevant."
+  ]
+}

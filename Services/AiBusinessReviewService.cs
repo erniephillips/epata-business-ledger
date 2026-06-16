@@ -32,6 +32,8 @@ public sealed class AiBusinessReviewService(AppDbContext db, LocalAiService loca
         var actions = await db.ActionItems.AsNoTracking().Where(x => !x.IsArchived && !x.Status.Equals("Done")).ToListAsync();
         var taxObligations = await db.TaxObligations.AsNoTracking().Where(x => !x.IsArchived).ToListAsync();
         var mileage = await db.MileageLogs.AsNoTracking().Where(x => !x.IsArchived).ToListAsync();
+        var communications = await db.CustomerCommunications.AsNoTracking().Where(x => !x.IsArchived).ToListAsync();
+        var printerQueue = await db.PrinterQueueItems.AsNoTracking().Where(x => !x.IsArchived).ToListAsync();
 
         AddGroup(
             items,
@@ -197,6 +199,29 @@ public sealed class AiBusinessReviewService(AppDbContext db, LocalAiService loca
             "Complete the business purpose, miles, and support while details are available.",
             "mileage",
             x => $"{x.TripDate:yyyy-MM-dd}: {x.BusinessPurpose}");
+
+        AddGroup(
+            items,
+            communications.Where(x => x.FollowUpStatus.Equals("Open", StringComparison.OrdinalIgnoreCase)
+                && (!x.FollowUpDate.HasValue || x.FollowUpDate.Value.Date <= today)),
+            "High",
+            "Customer",
+            "Customer communication follow-ups are due",
+            "These conversations still need a response or check-in, and the follow-up date is missing or due.",
+            "Reply, record the outcome, then mark the communication follow-up Done.",
+            "communications",
+            x => $"{x.CustomerName}: {x.Subject ?? x.Summary}");
+
+        AddGroup(
+            items,
+            printerQueue.Where(x => x.NeedsReview || x.Status.Equals("Needs Attention", StringComparison.OrdinalIgnoreCase)),
+            "High",
+            "Operations",
+            "Printer queue items need attention",
+            "These production items are explicitly flagged or have a problem status.",
+            "Review the printer, slicer settings, material, failure notes, and next production step.",
+            "printerQueue",
+            x => $"{x.PrinterName ?? "Unassigned printer"}: {x.JobName}");
 
         var priorityOrder = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
         {

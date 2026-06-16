@@ -7,13 +7,24 @@ const appState = {
   invoiceToolPrefill: null,
   aiEstimateDraft: null,
   aiReviewModelResult: null,
+  aiReconciliationModelResult: null,
+  aiMarketplaceOrderDraft: null,
+  aiProductImportDraft: null,
+  aiJobPlanDraft: null,
+  aiSlicerDraft: null,
+  aiListingDraft: null,
   localAiHeaderTimer: null,
   documentIntakePrefill: null,
   timelineQuery: '',
   timelineCustomer: '',
   timelineSort: 'lastActivityDesc',
   timelineTimer: null,
+  communicationQuery: '',
+  communicationCustomer: '',
+  printerQueueRows: [],
+  printerQueueJobs: [],
   taxYear: new Date().getFullYear(),
+  dashboardBreakdowns: {},
   pageHistory: [],
   suppressPopState: false
 };
@@ -21,7 +32,8 @@ const appState = {
 const sidebarPreferenceKey = 'epataSidebarCollapsed';
 
 const moneyFields = new Set(['itemSales','shippingCharged','salesTaxCollected','customerPaid','platformFees','shippingLabelCost','refunds','estimatedCogs','subtotal','discount','rushFee','salesTax','invoiceTotal','amountPaid','balanceDue','amount','total','openingBalance','currentBalance','cost','giftCardAmount','quoteAmount','invoiceAmount','targetPrice','grams','materialCostPerGram','printHours','machineRatePerHour','packagingCost','designMinutes','rewardValue','pointsValue','notYetExpensed','netBeforeCogs','estNetAfterCogs','estimatedAmount','parkingAndTolls']);
-const dateFields = new Set(['saleDate','shipByDate','invoiceDate','dueDate','billDate','paymentDate','expenseDate','purchaseDate','warrantyEndDate','rewardDate','documentDate','jobDate','tripDate','paidOrFiledDate','createdAtUtc','updatedAtUtc','createdAt','updatedAt','lastActivity']);
+const dateFields = new Set(['saleDate','shipByDate','invoiceDate','dueDate','billDate','paymentDate','expenseDate','purchaseDate','warrantyEndDate','rewardDate','documentDate','jobDate','tripDate','paidOrFiledDate','occurredAt','followUpDate','queueDate','scheduledStart','startedAt','estimatedFinish','completedAt','createdAtUtc','updatedAtUtc','createdAt','updatedAt','lastActivity']);
+const dateTimeFields = new Set(['occurredAt','scheduledStart','startedAt','estimatedFinish','completedAt']);
 
 const commonOptions = {
   platform: ['Direct','Etsy','MakerWorld','Local','Other'],
@@ -338,16 +350,74 @@ const configs = {
     route: 'action-items',
     title: 'Action Items',
     nav: 'Actions',
-    purpose: 'Cleanup and follow-up list. Open means review it, Waiting means parked until you have the missing info, and Done means it is resolved.',
-    columns: ['priority','dueDate','area','title','status','relatedRecord'],
+    purpose: 'Human follow-up list for manual reminders, confirmed Job Planner tasks, and verified review/reconciliation findings. Nothing is silently added.',
+    columns: ['priority','dueDate','area','title','status','origin','relatedRecord'],
     fields: [
       f('title','Title','text','What needs to be done.'),
-      f('area','Area','select','Which area this belongs to.', ['General','Sales','Invoice','AP','Expense','Product','Tax','Audit']),
+      f('area','Area','select','Which area this belongs to.', ['General','Sales','AR','Invoice','AP','Expense','Product','Customer','Operations','Tax','Audit','Proof']),
       f('priority','Priority','select','How important this is.', commonOptions.priority),
       f('dueDate','Due Date','date','Optional due date.'),
       f('status','Status','select','Current status.', commonOptions.actionStatus),
       f('relatedRecord','Related Record','text','Order #, invoice #, customer name, etc.'),
       f('notes','Notes','textarea','Details and next step.', null, 'full')
+    ]
+  },
+  communications: {
+    route: 'customer-communications',
+    title: 'Customer Communications',
+    nav: 'Communications',
+    purpose: 'Keep the customer conversation attached to the work: messages, calls, approvals, questions, promises, and follow-ups.',
+    columns: ['occurredAt','customerName','direction','channel','subject','followUpStatus','followUpDate','needsReview'],
+    fields: [
+      f('occurredAt','When','datetime-local','When the message, call, or conversation happened.'),
+      f('customerName','Customer Name','text','Who the conversation was with.'),
+      f('direction','Direction','select','Whether it came in, went out, or is an internal note.', ['Incoming','Outgoing','Internal']),
+      f('channel','Channel','select','Where the conversation happened.', ['Email','Text Message','Phone','Etsy Message','In Person','Social Media','Other']),
+      f('subject','Subject','text','Short label for the conversation.'),
+      f('customerJobId','Linked Customer Job ID','number','Optional Customer Job database ID. The customer page and queue can help locate it.'),
+      f('relatedJobNumber','Related Job #','text','Internal job number, if available.'),
+      f('relatedOrderNumber','Related Order #','text','Etsy or marketplace order number, if available.'),
+      f('relatedInvoiceNumber','Related Invoice #','text','Estimate/invoice number, if available.'),
+      f('followUpStatus','Follow-Up Status','select','Use Open when you owe the customer or yourself a response.', ['None','Open','Done']),
+      f('followUpDate','Follow-Up Date','date','When the next response or check-in is due.'),
+      f('sourceProof','Source / Proof','text','Email file, screenshot, message export, or other supporting reference.'),
+      f('needsReview','Needs Review','checkbox','Flag unclear requirements, approval, pricing, or promises.'),
+      f('summary','Conversation Summary','textarea','What was asked, promised, approved, rejected, or decided.', null, 'full'),
+      f('notes','Internal Notes','textarea','Private context and next steps.', null, 'full')
+    ]
+  },
+  printerQueue: {
+    route: 'printer-queue-items',
+    title: 'Printer Queue',
+    nav: 'Printer Queue',
+    purpose: 'Schedule and track what each printer should run, what is printing now, and what needs attention.',
+    columns: ['priority','status','printerName','jobName','customerName','material','quantity','estimatedHours','progressPercent','estimatedFinish','failureCount'],
+    fields: [
+      f('queueDate','Queued Date','date','When this production item entered the queue.'),
+      f('priority','Priority','select','Production priority.', commonOptions.priority),
+      f('status','Status','select','Where this print stands.', ['Queued','Ready','Printing','Paused','Needs Attention','Completed','Cancelled']),
+      f('printerName','Printer','text','Printer assignment, such as Bambu P1S.'),
+      f('customerJobId','Linked Customer Job ID','number','Optional Customer Job database ID. Queue status can update the linked job.'),
+      f('customerName','Customer Name','text','Customer tied to the work.'),
+      f('jobName','Job Name','text','Plain-English production task.'),
+      f('relatedOrderNumber','Related Order #','text','Etsy or marketplace order number.'),
+      f('relatedInvoiceNumber','Related Invoice #','text','Estimate or invoice number.'),
+      f('productName','Product / Part','text','What is being printed.'),
+      f('material','Material','text','PLA, PETG, ABS, ASA, TPU, etc.'),
+      f('color','Color','text','Required filament color.'),
+      f('quantity','Quantity','number','Number of finished units.'),
+      f('plateCount','Plate Count','number','Number of build plates/runs expected.'),
+      f('estimatedHours','Estimated Hours','number','Expected printer time.'),
+      f('actualHours','Actual Hours','number','Actual printer time after completion.'),
+      f('progressPercent','Progress %','number','Current completion percentage.'),
+      f('scheduledStart','Scheduled Start','datetime-local','Planned printer start time.'),
+      f('startedAt','Actual Start','datetime-local','When printing actually began.'),
+      f('estimatedFinish','Estimated Finish','datetime-local','Expected finish time.'),
+      f('completedAt','Completed At','datetime-local','When the print completed.'),
+      f('failureCount','Failed Attempts','number','Number of failed attempts or reprints.'),
+      f('sourceProof','Source / Proof','text','Slicer report, photo, or job reference.'),
+      f('needsReview','Needs Review','checkbox','Flag unclear settings, materials, fit, or failures.'),
+      f('notes','Production Notes','textarea','Plate setup, nozzle, orientation, QC, packaging, or failure notes.', null, 'full')
     ]
   },
   taxObligations: {
@@ -409,6 +479,7 @@ const navGroups = [
       ['invoiceRecords','Invoice Records','folder'],
       ['jobTimeline','Job Timeline','clock'],
       ['aiEstimate','AI Estimate Intake','sparkles'],
+      ['aiOperations','AI Operations','wand-sparkles'],
       ['documentIntake','Document Intake','upload']
     ]
   },
@@ -426,6 +497,8 @@ const navGroups = [
     label: 'Operations',
     items: [
       ['customerJobs',configs.customerJobs.nav,'briefcase'],
+      ['communications',configs.communications.nav,'user'],
+      ['printerQueue',configs.printerQueue.nav,'printer'],
       ['customers','Customers','user'],
       ['vendors','Vendors','truck'],
       ['products',configs.products.nav,'boxes'],
@@ -672,8 +745,12 @@ async function showPage(page, options = {}) {
     else if (page === 'pricingCalculator') await renderMergedInvoiceTool(el, 'calculator', '', appState.invoiceToolSnapshot);
     else if (page === 'invoiceRecords') await renderMergedInvoiceTool(el, 'records', '', appState.invoiceToolSnapshot);
     else if (page === 'jobTimeline') await renderJobTimeline(el);
+    else if (page === 'communications') await renderCommunicationTimeline(el);
+    else if (page === 'printerQueue') await renderPrinterQueue(el);
     else if (page === 'aiEstimate') await renderAiEstimateIntake(el);
+    else if (page === 'aiOperations') await renderAiOperations(el);
     else if (page === 'aiReview') await renderAiReviewCenter(el);
+    else if (page === 'actions') await renderActionCenter(el);
     else if (page === 'localAi') await renderLocalAi(el);
     else if (page === 'customers') await renderRelationshipDirectory(el, 'customer');
     else if (page === 'vendors') await renderRelationshipDirectory(el, 'vendor');
@@ -718,6 +795,7 @@ function milestonePulse(net) {
 async function renderDashboard(el) {
   const [data, appInfo] = await Promise.all([api('/api/dashboard'), api('/api/app-info').catch(() => null)]);
   const k = data.kpis;
+  appState.dashboardBreakdowns = data.breakdowns || {};
   const monthlyMax = Math.max(...(data.monthly || []).map(x => Number(x.grossReceipts || 0)), 1);
   el.innerHTML = `
     <section class="workspace-hero">
@@ -730,6 +808,7 @@ async function renderDashboard(el) {
         <button class="primary-button" onclick="showPage('quickAdd')">Add Transaction</button>
         <button class="ghost-button dark" onclick="showPage('documentIntake')">Upload Proof</button>
         <button class="ghost-button dark" onclick="showPage('aiReview')">Open AI Review</button>
+        <button class="ghost-button dark" onclick="showPage('aiOperations')">AI Operations</button>
       </div>
     </section>
     <div class="page-head">
@@ -744,14 +823,14 @@ async function renderDashboard(el) {
       </div>
     </div>
     <section class="kpi-grid">
-      ${kpi('Gross Receipts', k.grossReceipts, 'Item sales + shipping charged, before platform fees and COGS.', 'good')}
-      ${kpi('Estimated Net', k.estimatedNet, 'Gross receipts minus entered fees, label costs, COGS, and expenses.', k.estimatedNet >= 0 ? 'good' : 'bad')}
-      ${kpi('Open AR', k.openReceivables, 'Customer invoice balances still owed to you.', k.openReceivables > 0 ? 'warn' : 'good')}
-      ${kpi('Open AP', k.openPayables, 'Bills you still owe vendors.', k.openPayables > 0 ? 'warn' : 'good')}
-      ${kpi('Customer Paid', k.customerPaid, 'Total customer-paid amounts including tax memo.', '')}
-      ${kpi('Sales Tax Memo', k.salesTaxMemo, 'Tax shown on orders/invoices. Etsy usually handles marketplace tax, but keep the memo.', 'warn')}
-      ${kpi('Known Costs', k.sellingCosts + k.directExpenses, 'Platform fees, shipping labels, COGS, and expenses you entered.', '')}
-      ${kpi('Needs Review', k.needsReviewCount, 'Rows missing costs, proof, or confirmation.', k.needsReviewCount > 0 ? 'warn' : 'good', false)}
+      ${kpi('Gross Receipts', k.grossReceipts, 'Item sales + shipping charged, before platform fees and COGS.', 'good', true, 'grossReceipts')}
+      ${kpi('Estimated Net', k.estimatedNet, 'Gross receipts minus entered fees, label costs, COGS, and expenses.', k.estimatedNet >= 0 ? 'good' : 'bad', true, 'estimatedNet')}
+      ${kpi('Open AR', k.openReceivables, 'Customer invoice balances still owed to you.', k.openReceivables > 0 ? 'warn' : 'good', true, 'openReceivables')}
+      ${kpi('Open AP', k.openPayables, 'Bills you still owe vendors.', k.openPayables > 0 ? 'warn' : 'good', true, 'openPayables')}
+      ${kpi('Customer Paid', k.customerPaid, 'Total customer-paid amounts including tax memo.', '', true, 'customerPaid')}
+      ${kpi('Sales Tax Memo', k.salesTaxMemo, 'Tax shown on orders/invoices. Etsy usually handles marketplace tax, but keep the memo.', 'warn', true, 'salesTaxMemo')}
+      ${kpi('Known Costs', k.sellingCosts + k.directExpenses, 'Platform fees, shipping labels, COGS, and expenses you entered.', '', true, 'knownCosts')}
+      ${kpi('Needs Review', k.needsReviewCount, 'Rows missing costs, proof, or confirmation.', k.needsReviewCount > 0 ? 'warn' : 'good', false, 'needsReview')}
     </section>
     <section class="insight-grid">
       ${insight('Cash Focus', k.openReceivables > 0 ? `${formatMoney(k.openReceivables)} still needs collected from customers.` : 'No open customer invoice balance in the current ledger.', 'Open AR is the fastest place to improve cash flow.')}
@@ -809,9 +888,9 @@ async function renderDashboard(el) {
           <span class="badge warn">${k.needsReviewCount} review</span>
         </div>
         <div class="control-stack">
-          ${controlItem('Collect', k.openReceivables > 0 ? formatMoney(k.openReceivables) : 'Clear', 'Customer balances waiting on payment.', k.openReceivables > 0 ? 'warn' : 'good')}
-          ${controlItem('Pay', k.openPayables > 0 ? formatMoney(k.openPayables) : 'Clear', 'Vendor bills still open.', k.openPayables > 0 ? 'warn' : 'good')}
-          ${controlItem('Verify', `${k.needsReviewCount} rows`, 'Rows that need proof, cost, or status review.', k.needsReviewCount > 0 ? 'warn' : 'good')}
+          ${controlItem('Collect', k.openReceivables > 0 ? formatMoney(k.openReceivables) : 'Clear', 'Customer balances waiting on payment.', k.openReceivables > 0 ? 'warn' : 'good', 'openReceivables')}
+          ${controlItem('Pay', k.openPayables > 0 ? formatMoney(k.openPayables) : 'Clear', 'Vendor bills still open.', k.openPayables > 0 ? 'warn' : 'good', 'openPayables')}
+          ${controlItem('Verify', `${k.needsReviewCount} rows`, 'Rows that need proof, cost, or status review.', k.needsReviewCount > 0 ? 'warn' : 'good', 'needsReview')}
           ${controlItem('Back Up', 'SQLite DB', 'Use the backup button before big edits.', '')}
         </div>
       </div>
@@ -838,8 +917,11 @@ async function renderDashboard(el) {
     </div>`;
 }
 
-function kpi(label, value, tip, cls = '', money = true) {
-  return `<div class="kpi ${cls}"><span>${label} <span class="tip" data-tip="${escapeHtml(tip)}">?</span></span><strong>${money ? formatMoney(value) : escapeHtml(value)}</strong></div>`;
+function kpi(label, value, tip, cls = '', money = true, breakdownKey = '') {
+  const content = `<span>${label} <span class="tip" data-tip="${escapeHtml(tip)}">?</span></span><strong>${money ? formatMoney(value) : escapeHtml(value)}</strong>`;
+  return breakdownKey
+    ? `<button class="kpi kpi-button ${cls}" type="button" onclick="openDashboardBreakdown('${escapeAttr(breakdownKey)}')" aria-label="${escapeAttr(`${label}: ${money ? formatMoney(value) : value}. Open breakdown.`)}">${content}</button>`
+    : `<div class="kpi ${cls}">${content}</div>`;
 }
 function insight(title, value, detail) {
   return `<div class="insight"><h3>${escapeHtml(title)}</h3><strong>${escapeHtml(value)}</strong><p>${escapeHtml(detail)}</p></div>`;
@@ -847,8 +929,11 @@ function insight(title, value, detail) {
 function metricBar(label, value, pct, cls = '') {
   return `<div class="metric-bar ${cls}"><div><strong>${escapeHtml(label)}</strong><span>${escapeHtml(value)}</span></div><div class="bar-track"><i style="width:${Math.max(4, Math.min(100, pct))}%"></i></div></div>`;
 }
-function controlItem(label, value, detail, cls = '') {
-  return `<div class="control-item ${cls}"><div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div><p>${escapeHtml(detail)}</p></div>`;
+function controlItem(label, value, detail, cls = '', breakdownKey = '') {
+  const content = `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div><p>${escapeHtml(detail)}</p>`;
+  return breakdownKey
+    ? `<button class="control-item control-item-button ${cls}" type="button" onclick="openDashboardBreakdown('${escapeAttr(breakdownKey)}')">${content}</button>`
+    : `<div class="control-item ${cls}">${content}</div>`;
 }
 function emptyState(title, detail) {
   return `<div class="empty-state"><div class="empty-icon">◇</div><div class="empty-title">${escapeHtml(title)}</div><div class="empty-desc">${escapeHtml(detail)}</div></div>`;
@@ -974,6 +1059,8 @@ function navIcon(name) {
     'calculator': '<rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8 7h8M8 11h2M12 11h2M16 11h0M8 15h2M12 15h2M16 15h0M8 18h6"/>',
     'folder': '<path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
     'clock': '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    'sparkles': '<path d="M12 3l1.4 4.1L17.5 8.5l-4.1 1.4L12 14l-1.4-4.1-4.1-1.4 4.1-1.4z"/><path d="M18 14l.8 2.2L21 17l-2.2.8L18 20l-.8-2.2L15 17l2.2-.8z"/>',
+    'wand-sparkles': '<path d="M4 20l11-11M13 5l2-2M17 9l3-1M16 4l1-3M9 13l2 2-5 5-2-2z"/><path d="M19 14l.7 1.8 1.8.7-1.8.7L19 19l-.7-1.8-1.8-.7 1.8-.7z"/>',
     'upload': '<path d="M12 16V4"/><path d="M7 9l5-5 5 5"/><path d="M5 20h14"/>',
     'dollar-sign': '<path d="M12 2v20M17 6.5C15.5 5.4 13.4 5 11.7 5 9.2 5 7.5 6.2 7.5 8s1.5 2.8 4.5 3.5 4.5 1.6 4.5 3.7S14.8 19 12 19c-2 0-4-.6-5.5-1.7"/>',
     'arrow-down-circle': '<circle cx="12" cy="12" r="9"/><path d="M12 7v10M8 13l4 4 4-4"/>',
@@ -1019,7 +1106,7 @@ async function renderJobTimeline(el) {
     <div class="page-head">
       <div>
         <h2>Job Timeline</h2>
-        <p>One place to see the full path of an estimate, invoice, sale, proof file, customer job, and open action.</p>
+        <p>One place to see the full path of customer communications, estimates, production queue, jobs, invoices, sales, proof files, and open actions.</p>
       </div>
       <div class="actions">
         <button class="primary-button" onclick="showPage('estimates')">New Estimate</button>
@@ -1135,6 +1222,7 @@ function renderTimelineCard(group, index = 0) {
       <div class="timeline-flow">
         ${timelineStage('Estimate', events.some(e => e.kind === 'ESTIMATE' || e.kind === 'Job' && (e.status || '').includes('Quoted')), 'Quote/approve')}
         ${timelineStage('Job', events.some(e => e.kind === 'Job'), 'Make/design')}
+        ${timelineStage('Production', events.some(e => e.kind === 'Printer Queue'), 'Printer queue')}
         ${timelineStage('Invoice', events.some(e => e.kind === 'INVOICE' || e.kind === 'AR Invoice'), 'Bill customer')}
         ${timelineStage('Paid', events.some(e => e.kind === 'Sale' || Number(group.paid || 0) > 0), 'Money in')}
         ${timelineStage('Proof', events.some(e => e.kind === 'Proof'), 'Files attached')}
@@ -1181,6 +1269,189 @@ function renderTimelineEvent(event) {
     <em>${event.amount !== null && event.amount !== undefined ? formatMoney(event.amount) : escapeHtml(event.status || '')}</em>
   </button>`;
 }
+
+async function renderCommunicationTimeline(el) {
+  const rows = await api('/api/customer-communications');
+  const query = String(appState.communicationQuery || '').toLowerCase();
+  const customer = appState.communicationCustomer || '';
+  const filtered = rows
+    .filter(row => !customer || sameName(row.customerName, customer))
+    .filter(row => !query || JSON.stringify(row).toLowerCase().includes(query))
+    .sort((a, b) => new Date(b.occurredAt || b.updatedAtUtc || 0) - new Date(a.occurredAt || a.updatedAtUtc || 0));
+  const customers = [...new Set(rows.map(row => row.customerName).filter(Boolean))].sort();
+  const openFollowUps = rows.filter(row => row.followUpStatus === 'Open');
+  const overdue = openFollowUps.filter(row => row.followUpDate && new Date(`${String(row.followUpDate).substring(0, 10)}T23:59:59`) < new Date());
+  const incoming = rows.filter(row => row.direction === 'Incoming').length;
+
+  el.innerHTML = `
+    <section class="workspace-hero">
+      <div>
+        <span class="eyebrow">Customer Communication Timeline</span>
+        <h2>Keep requests, approvals, promises, and follow-ups with the customer record.</h2>
+        <p>Log the important parts of emails, texts, calls, Etsy messages, and in-person conversations. Link them to a job, order, or invoice so the full story also appears in Job Timeline.</p>
+      </div>
+      <div class="hero-actions">
+        <button class="primary-button" onclick="quickOpen('communications','communication')">Log Communication</button>
+        <button class="ghost-button dark" onclick="showPage('jobTimeline')">Open Job Timeline</button>
+        <a class="ghost-button dark" href="/api/export/customer-communications">Export CSV</a>
+      </div>
+    </section>
+    <section class="kpi-grid">
+      ${kpi('Logged Conversations', rows.length, 'Important customer messages, calls, and notes.', '', false)}
+      ${kpi('Open Follow-Ups', openFollowUps.length, 'Conversations that still need a response or check-in.', openFollowUps.length ? 'warn' : 'good', false)}
+      ${kpi('Overdue Follow-Ups', overdue.length, 'Open follow-ups whose due date has passed.', overdue.length ? 'bad' : 'good', false)}
+      ${kpi('Incoming Messages', incoming, 'Requests or replies received from customers.', '', false)}
+    </section>
+    <section class="timeline-command">
+      <div class="timeline-search">
+        <label class="timeline-filter wide"><span>Search</span><input id="communicationSearch" type="search" placeholder="Customer, subject, requirement, approval, order, invoice..." value="${escapeHtml(appState.communicationQuery || '')}"></label>
+        <label class="timeline-filter"><span>Customer</span><select id="communicationCustomer"><option value="">All customers</option>${customers.map(name => `<option value="${escapeHtml(name)}"${name === customer ? ' selected' : ''}>${escapeHtml(name)}</option>`).join('')}</select></label>
+        <div class="timeline-filter-actions"><button class="ghost-button timeline-clear" id="communicationClear" type="button">Clear</button></div>
+      </div>
+    </section>
+    <section class="communication-timeline">
+      ${filtered.length ? filtered.map(renderCommunicationCard).join('') : emptyState('No matching customer communications.', 'Log an email, text, call, Etsy message, or internal customer note.')}
+    </section>`;
+
+  qs('#communicationSearch').oninput = event => {
+    appState.communicationQuery = event.target.value.trim();
+    renderCommunicationTimeline(el);
+  };
+  qs('#communicationCustomer').onchange = event => {
+    appState.communicationCustomer = event.target.value;
+    renderCommunicationTimeline(el);
+  };
+  qs('#communicationClear').onclick = () => {
+    appState.communicationQuery = '';
+    appState.communicationCustomer = '';
+    renderCommunicationTimeline(el);
+  };
+}
+
+function renderCommunicationCard(row) {
+  const when = formatTimelineDateTime(row.occurredAt || row.updatedAtUtc);
+  const followUpOpen = row.followUpStatus === 'Open';
+  const overdue = followUpOpen && row.followUpDate && new Date(`${String(row.followUpDate).substring(0, 10)}T23:59:59`) < new Date();
+  const reference = [row.relatedJobNumber, row.relatedOrderNumber, row.relatedInvoiceNumber].filter(Boolean).join(' · ');
+  return `<article class="communication-card ${overdue ? 'overdue' : ''}">
+    <div class="communication-rail"><span>${escapeHtml(row.direction || 'Note')}</span><i></i></div>
+    <div class="communication-main">
+      <div class="card-header-lite">
+        <div><h3>${escapeHtml(row.subject || `${row.channel || 'Communication'} with ${row.customerName}`)}</h3><p class="muted">${escapeHtml(row.customerName)} · ${escapeHtml(row.channel || '')} · <span title="${escapeHtml(when.full)}">${escapeHtml(when.relative || when.exact)}</span></p></div>
+        <div class="actions">${badgeFor(row.direction || 'Note', row.needsReview)}${followUpOpen ? `<span class="badge ${overdue ? 'bad' : 'warn'}">${overdue ? 'Follow-up overdue' : 'Follow-up open'}</span>` : ''}<button class="ghost-button" onclick="openCommunication(${Number(row.id)})">Edit</button></div>
+      </div>
+      <p class="communication-summary">${escapeHtml(row.summary || '')}</p>
+      ${reference ? `<small class="communication-reference">Linked: ${escapeHtml(reference)}</small>` : ''}
+      ${row.followUpDate ? `<small class="communication-reference">Follow-up: ${escapeHtml(formatShortDate(row.followUpDate))} · ${escapeHtml(row.followUpStatus)}</small>` : ''}
+    </div>
+  </article>`;
+}
+
+window.openCommunication = async id => {
+  const rows = await api('/api/customer-communications');
+  const row = rows.find(item => Number(item.id) === Number(id));
+  if (row) openModal(configs.communications, row);
+};
+
+async function renderPrinterQueue(el) {
+  const [rows, jobs] = await Promise.all([api('/api/printer-queue-items'), api('/api/customer-jobs')]);
+  appState.printerQueueRows = rows;
+  appState.printerQueueJobs = jobs;
+  const activeJobs = jobs.filter(job => !['Paid','Completed','Cancelled'].includes(job.status));
+  const active = rows.filter(row => !['Completed','Cancelled'].includes(row.status));
+  const printing = rows.filter(row => row.status === 'Printing');
+  const attention = rows.filter(row => row.status === 'Needs Attention' || row.status === 'Paused');
+  const queuedHours = active.reduce((total, row) => total + Number(row.estimatedHours || 0), 0);
+  const columns = [
+    ['Queued', rows.filter(row => row.status === 'Queued')],
+    ['Ready', rows.filter(row => row.status === 'Ready')],
+    ['Printing', printing],
+    ['Paused / Attention', attention],
+    ['Completed', rows.filter(row => row.status === 'Completed').slice(0, 12)]
+  ];
+
+  el.innerHTML = `
+    <section class="workspace-hero">
+      <div>
+        <span class="eyebrow">Printer Queue Management</span>
+        <h2>Know what prints next, what is running, and what needs intervention.</h2>
+        <p>Assign jobs to printers, schedule starts, track progress and failures, and compare estimated versus actual printer time. Printing and Completed statuses keep linked Customer Jobs aligned.</p>
+      </div>
+      <div class="hero-actions">
+        <button class="primary-button" onclick="quickOpen('printerQueue','queue')">Add Queue Item</button>
+        <button class="ghost-button dark" onclick="showPage('customerJobs')">Open Customer Jobs</button>
+        <a class="ghost-button dark" href="/api/export/printer-queue-items">Export CSV</a>
+      </div>
+    </section>
+    <section class="kpi-grid">
+      ${kpi('Active Queue', active.length, 'Queued, ready, printing, paused, and attention items.', active.length ? 'warn' : 'good', false)}
+      ${kpi('Printing Now', printing.length, 'Items currently marked Printing.', printing.length ? 'good' : '', false)}
+      ${kpi('Needs Attention', attention.length, 'Paused or problem prints requiring action.', attention.length ? 'bad' : 'good', false)}
+      ${kpi('Queued Printer Hours', queuedHours.toFixed(1), 'Estimated hours across active production items.', '', false)}
+    </section>
+    <section class="card queue-from-job">
+      <div class="card-header-lite"><div><h3>Queue an Existing Customer Job</h3><p class="muted">Prefills the production item from the selected job; nothing else changes until you save it.</p></div><span class="badge">${activeJobs.length} active jobs</span></div>
+      <div class="assistant-suggestion">
+        <select id="printerQueueJobSelect" class="search"><option value="">Choose active Customer Job</option>${activeJobs.map(job => `<option value="${job.id}">${escapeHtml(`${job.customerName}: ${job.jobName} (${job.status})`)}</option>`).join('')}</select>
+        <button class="primary-button" onclick="queueSelectedCustomerJob()">Add Selected Job to Queue</button>
+      </div>
+    </section>
+    <section class="printer-board">
+      ${columns.map(([status, items]) => `<section class="printer-board-column">
+        <div class="printer-board-column-head"><h3>${escapeHtml(status)}</h3><span class="badge">${items.length}</span></div>
+        <div class="printer-board-cards">${items.length ? items.map(renderPrinterQueueCard).join('') : '<p class="muted">Nothing here.</p>'}</div>
+      </section>`).join('')}
+    </section>`;
+}
+
+function renderPrinterQueueCard(row) {
+  const progress = Math.max(0, Math.min(100, Number(row.progressPercent || 0)));
+  const buttons = row.status === 'Printing'
+    ? `<button class="ghost-button" onclick="updatePrinterQueueStatus(${Number(row.id)},'Paused')">Pause</button><button class="primary-button" onclick="updatePrinterQueueStatus(${Number(row.id)},'Completed')">Complete</button>`
+    : row.status === 'Completed' || row.status === 'Cancelled'
+      ? ''
+      : `<button class="ghost-button" onclick="updatePrinterQueueStatus(${Number(row.id)},'Ready')">Ready</button><button class="primary-button" onclick="updatePrinterQueueStatus(${Number(row.id)},'Printing')">Start</button>`;
+  return `<article class="printer-queue-card ${row.status === 'Needs Attention' ? 'attention' : ''}">
+    <div class="printer-queue-card-head"><span class="badge ${row.priority === 'High' ? 'bad' : row.priority === 'Normal' ? 'warn' : ''}">${escapeHtml(row.priority)}</span><button class="table-link" onclick="openPrinterQueueItem(${Number(row.id)})">Edit</button></div>
+    <h4>${escapeHtml(row.jobName || 'Unnamed print')}</h4>
+    <p>${escapeHtml(row.customerName || 'No customer')} · ${escapeHtml(row.printerName || 'Unassigned printer')}</p>
+    <div class="queue-progress"><i style="width:${progress}%"></i></div>
+    <small>${progress.toFixed(0)}% · ${Number(row.estimatedHours || 0).toFixed(1)}h est. · ${Number(row.quantity || 1)} unit${Number(row.quantity || 1) === 1 ? '' : 's'}</small>
+    <small>${escapeHtml([row.material, row.color].filter(Boolean).join(' / ') || 'Material not assigned')}${row.failureCount ? ` · ${Number(row.failureCount)} failed attempt${Number(row.failureCount) === 1 ? '' : 's'}` : ''}</small>
+    ${row.estimatedFinish ? `<small>Finish: ${escapeHtml(formatTimelineDateTime(row.estimatedFinish).exact)}</small>` : ''}
+    <div class="actions">${buttons}</div>
+  </article>`;
+}
+
+window.queueSelectedCustomerJob = () => {
+  const id = Number(qs('#printerQueueJobSelect')?.value || 0);
+  const job = appState.printerQueueJobs.find(item => Number(item.id) === id);
+  if (!job) return toast('Choose a Customer Job first.');
+  quickOpen('printerQueue', 'queue', {
+    customerJobId: job.id,
+    customerName: job.customerName,
+    jobName: job.jobName,
+    relatedOrderNumber: job.relatedOrderNumber,
+    relatedInvoiceNumber: job.relatedInvoiceNumber,
+    productName: job.productName,
+    material: job.material,
+    color: job.color,
+    notes: job.description
+  });
+};
+
+window.openPrinterQueueItem = id => {
+  const row = appState.printerQueueRows.find(item => Number(item.id) === Number(id));
+  if (row) openModal(configs.printerQueue, row);
+};
+
+window.updatePrinterQueueStatus = async (id, status) => {
+  const row = appState.printerQueueRows.find(item => Number(item.id) === Number(id));
+  if (!row) return;
+  await api(`/api/printer-queue-items/${id}`, { method: 'PUT', body: JSON.stringify({ ...row, status }) });
+  toast(`Production item marked ${status}.`);
+  await showPage('printerQueue', { replace: true });
+};
 
 function formatTimelineDateTime(value) {
   if (!value) return { relative: '', exact: '', full: '' };
@@ -1256,6 +1527,8 @@ async function renderEntity(el, config) {
         <p>${config.purpose}</p>
       </div>
       <div class="actions">
+        ${config.route === 'products' ? '<button class="ghost-button" onclick="showPage(\'aiOperations\'); setTimeout(()=>document.getElementById(\'aiProductImportCard\')?.scrollIntoView({behavior:\'smooth\'}),120)">AI Product Tools</button>' : ''}
+        ${config.route === 'customer-jobs' ? '<button class="ghost-button" onclick="showPage(\'aiOperations\'); setTimeout(()=>document.getElementById(\'aiJobPlannerCard\')?.scrollIntoView({behavior:\'smooth\'}),120)">AI Job Planner</button>' : ''}
         <button class="primary-button" id="addRowBtn">Add New</button>
         <button class="ghost-button" id="reviewQueueBtn">Review Queue</button>
         <a class="ghost-button" href="/api/export/${config.route}" title="Export this table to a CSV file you can open in Excel.">Export CSV</a>
@@ -1290,24 +1563,144 @@ async function renderEntity(el, config) {
   renderEntityTable(config, rows, '');
 }
 
+async function renderActionCenter(el) {
+  const [rawRows, preview] = await Promise.all([
+    api('/api/action-items'),
+    api('/api/action-items/automation-preview')
+  ]);
+  const rows = rawRows.map(row => ({ ...row, origin: actionItemOrigin(row) }));
+  const open = rows.filter(row => row.status !== 'Done').length;
+  const high = rows.filter(row => row.status !== 'Done' && row.priority === 'High').length;
+  const waiting = rows.filter(row => row.status === 'Waiting').length;
+  const ready = Number(preview.readyToCreateCount || 0);
+  const candidates = preview.candidates || [];
+
+  el.innerHTML = `
+    <section class="workspace-hero">
+      <div>
+        <span class="eyebrow">Action Control Center</span>
+        <h2>Turn verified problems into work you can finish.</h2>
+        <p>Action Items are human follow-ups. Add one yourself, confirm a Job Planner task, or explicitly sync repeatable review and reconciliation findings. No scan or AI model silently creates tasks.</p>
+      </div>
+      <div class="hero-actions">
+        <button class="primary-button" onclick="syncVerifiedFindingsToActions()">Sync Verified Findings</button>
+        <button class="ghost-button dark" onclick="showPage('aiReview')">Open Review Center</button>
+        <button class="ghost-button dark" onclick="showPage('aiOperations'); setTimeout(()=>document.getElementById('aiReconciliationCard')?.scrollIntoView({behavior:'smooth'}),120)">Duplicate Check</button>
+      </div>
+    </section>
+    <section class="kpi-grid">
+      ${kpi('Open / Waiting', open, 'All active tasks that still need a person.', open ? 'warn' : 'good', false)}
+      ${kpi('High Priority', high, 'Active tasks marked High.', high ? 'bad' : 'good', false)}
+      ${kpi('Waiting', waiting, 'Tasks parked until information or another event arrives.', waiting ? 'warn' : 'good', false)}
+      ${kpi('Verified Findings Ready', ready, 'New grouped findings that can become tasks after you confirm Sync.', ready ? 'bad' : 'good', false)}
+    </section>
+    <section class="grid three">
+      <article class="card"><div class="card-header-lite"><h3>Manual</h3>${assistanceIndicator('Manual')}</div><p>You click Add New and write a reminder. Use this for follow-ups or work the scans cannot infer.</p></article>
+      <article class="card"><div class="card-header-lite"><h3>Job Planner</h3>${assistanceIndicator('Automation', 'Job Planner after confirmation')}</div><p>A local-rules or AI-assisted job plan stays a draft until you click Create These Action Items and confirm. Repeated confirmations skip the same open tasks.</p></article>
+      <article class="card"><div class="card-header-lite"><h3>Verified Finding Sync</h3>${assistanceIndicator('Local rules', 'Review + reconciliation')}</div><p>Fixed checks flag missing proof, suspicious calculations, overdue balances, pricing issues, duplicates, and mismatched records. They become tasks only after you confirm Sync.</p></article>
+    </section>
+    <section class="card">
+      <div class="card-header-lite"><h3>Finding Sync Preview</h3>${assistanceIndicator('Local rules', 'Not model-written')}</div>
+      ${renderOperationReceipt(preview.receipt)}
+      <section class="entity-strip">
+        <div><span>Review findings</span><strong>${Number(preview.reviewFindingCount || 0)}</strong></div>
+        <div><span>Reconciliation findings</span><strong>${Number(preview.reconciliationFindingCount || 0)}</strong></div>
+        <div><span>Already open</span><strong>${Number(preview.alreadyOpenCount || 0)}</strong></div>
+        <div><span>Ready to create</span><strong>${ready}</strong></div>
+      </section>
+      <div class="actions">
+        <button class="primary-button" onclick="syncVerifiedFindingsToActions()" ${ready ? '' : 'disabled'}>${ready ? `Create ${ready} New Action Item${ready === 1 ? '' : 's'}` : 'No New Findings to Sync'}</button>
+        <button class="ghost-button" onclick="showPage('actions', { replace: true })">Refresh Preview</button>
+      </div>
+      <div class="ai-review-center-list">${candidates.length ? candidates.slice(0, 8).map(renderActionAutomationCandidate).join('') : emptyState('No verified findings right now.', 'The active ledger passed the current review and reconciliation checks.')}</div>
+      ${candidates.length > 8 ? `<p class="muted">Showing 8 of ${candidates.length} grouped findings. Open the Review Center and Duplicate Check for full evidence.</p>` : ''}
+    </section>
+    <div class="page-head">
+      <div><h2>Action Items</h2><p>Open means work remains, Waiting means parked for missing information, and Done means resolved. Generated task notes preserve their trigger and assistance source.</p></div>
+      <div class="actions">
+        <button class="primary-button" id="addRowBtn">Add New</button>
+        <a class="ghost-button" href="/api/export/action-items">Export CSV</a>
+      </div>
+    </div>
+    <div class="card">
+      <div class="table-tools">
+        <input class="search" id="searchBox" placeholder="Search actions, source, related record..." title="Filters this page only.">
+        <select id="statusFilter" class="search compact">
+          <option value="">All actions</option>
+          <option value="open">Open / Waiting</option>
+          <option value="paid">Done</option>
+        </select>
+        <span class="badge">${rows.length} active rows</span>
+      </div>
+      <div id="tableArea"></div>
+    </div>`;
+
+  qs('#addRowBtn').onclick = () => openModal(configs.actions, null);
+  qs('#searchBox').oninput = event => renderEntityTable(configs.actions, rows, event.target.value);
+  qs('#statusFilter').onchange = () => renderEntityTable(configs.actions, rows, qs('#searchBox').value);
+  renderEntityTable(configs.actions, rows, '');
+}
+
+function renderActionAutomationCandidate(candidate) {
+  const priorityClass = candidate.priority === 'High' ? 'bad' : candidate.priority === 'Normal' ? 'warn' : 'good';
+  return `<article class="ai-review-center-item">
+    <div class="ai-review-center-head">
+      <div><span class="badge ${priorityClass}">${escapeHtml(candidate.priority)}</span><span class="badge">${escapeHtml(candidate.area)}</span><span class="badge ${candidate.alreadyOpen ? 'good' : 'warn'}">${candidate.alreadyOpen ? 'Already open' : 'Ready to create'}</span></div>
+      <button class="ghost-button" onclick="showPage('${escapeHtml(candidate.route || 'aiReview')}')">Open Source Area</button>
+    </div>
+    <h3>${escapeHtml(candidate.title)}</h3>
+    <div class="ai-review-center-body">
+      <div><span>Trigger</span><p>${escapeHtml(candidate.source)}</p></div>
+      <div><span>Next step</span><p>${escapeHtml(candidate.recommendedAction)}</p></div>
+      <div class="wide"><span>Why it seems off</span><p>${escapeHtml(candidate.why)}</p></div>
+    </div>
+  </article>`;
+}
+
+function actionItemOrigin(row) {
+  const notes = String(row.notes || '').toLowerCase();
+  if (notes.includes('automation source: ai job planner')) return 'Job Planner (confirmed)';
+  if (notes.includes('automation source: verified local rules review')) return 'Local Rules Review';
+  if (notes.includes('automation source: deterministic duplicate & reconciliation check')) return 'Reconciliation Check';
+  if (notes.includes('automation:')) return 'App Automation';
+  return 'Manual';
+}
+
+async function syncVerifiedFindingsToActions() {
+  if (!confirm('Create Action Items for new verified review and reconciliation findings? Existing open generated tasks will be skipped.')) return;
+  try {
+    const result = await api('/api/action-items/sync-findings', { method: 'POST', body: '{}' });
+    toast(result.createdCount
+      ? `Created ${result.createdCount} new Action Item${result.createdCount === 1 ? '' : 's'}; skipped ${result.skippedExistingCount} already open.`
+      : `No new Action Items created; ${result.skippedExistingCount} verified finding${result.skippedExistingCount === 1 ? ' is' : 's are'} already open.`);
+    if (appState.currentPage === 'actions') await showPage('actions', { replace: true });
+  } catch (err) {
+    toast(`Action sync failed: ${friendlyApiError(err.message)}`);
+  }
+}
+
 async function renderPersonDetail(el, mode, name) {
   const isCustomer = mode === 'customer';
-  const [sales, invoices, docs, jobs, expenses, bills, assets, auditDocs] = await Promise.all([
+  const [parties, sales, invoices, docs, jobs, communications, expenses, bills, assets, auditDocs] = await Promise.all([
+    api('/api/parties'),
     api('/api/sales'),
     api('/api/receivable-invoices'),
     api('/api/documents?includeArchived=true'),
     api('/api/customer-jobs'),
+    api('/api/customer-communications'),
     api('/api/expenses'),
     api('/api/bills'),
     api('/api/assets'),
     api('/api/audit-documents')
   ]);
+  const party = parties.find(p => sameName(p.name, name) && (isCustomer ? ['customer','both'].includes(String(p.partyType || '').toLowerCase()) : ['vendor','both'].includes(String(p.partyType || '').toLowerCase())));
   const sections = isCustomer
     ? [
         ['Sales', 'sales', configs.sales, sales.filter(r => sameName(r.customerName, name))],
         ['AR Invoices', 'receivables', configs.receivables, invoices.filter(r => sameName(r.customerName, name))],
         ['Estimate / Invoice PDFs', null, null, docs.filter(r => sameName(r.customerName, name))],
-        ['Jobs', 'customerJobs', configs.customerJobs, jobs.filter(r => sameName(r.customerName, name))]
+        ['Jobs', 'customerJobs', configs.customerJobs, jobs.filter(r => sameName(r.customerName, name))],
+        ['Communications', 'communications', configs.communications, communications.filter(r => sameName(r.customerName, name))]
       ]
     : [
         ['Expenses', 'expenses', configs.expenses, expenses.filter(r => sameName(r.vendorName, name))],
@@ -1320,10 +1713,11 @@ async function renderPersonDetail(el, mode, name) {
       <div class="actions">
         <button class="ghost-button" onclick="showPage('${isCustomer ? 'customers' : 'vendors'}')">Back</button>
         ${isCustomer
-          ? `<button class="ghost-button" onclick="quickOpen('customerJobs','estimateSent',{customerName:'${escapeAttr(name)}'})">Add Job</button><button class="ghost-button" onclick="quickOpen('receivables','invoice',{customerName:'${escapeAttr(name)}'})">Add AR</button><button class="ghost-button" onclick="startCustomerDocument('${escapeAttr(name)}','ESTIMATE')">New Estimate</button><button class="ghost-button" onclick="startCustomerDocument('${escapeAttr(name)}','INVOICE')">New Invoice</button><button class="primary-button" onclick="quickOpen('sales','directPaid',{customerName:'${escapeAttr(name)}'})">Add Sale</button>`
+          ? `<button class="ghost-button" onclick="quickOpen('communications','communication',{customerName:'${escapeAttr(name)}'})">Log Communication</button><button class="ghost-button" onclick="quickOpen('customerJobs','estimateSent',{customerName:'${escapeAttr(name)}'})">Add Job</button><button class="ghost-button" onclick="quickOpen('receivables','invoice',{customerName:'${escapeAttr(name)}'})">Add AR</button><button class="ghost-button" onclick="startCustomerDocument('${escapeAttr(name)}','ESTIMATE')">New Estimate</button><button class="ghost-button" onclick="startCustomerDocument('${escapeAttr(name)}','INVOICE')">New Invoice</button><button class="primary-button" onclick="quickOpen('sales','directPaid',{customerName:'${escapeAttr(name)}'})">Add Sale</button>`
           : `<button class="ghost-button" onclick="quickOpen('assets','assetPurchase',{vendorName:'${escapeAttr(name)}'})">Add Asset</button><button class="ghost-button" onclick="quickOpen('bills','bill',{vendorName:'${escapeAttr(name)}'})">Add Bill</button><button class="primary-button" onclick="quickOpen('expenses','expense',{vendorName:'${escapeAttr(name)}'})">Add Expense</button>`}
         <button class="ghost-button" onclick="openDocumentIntakeWithPrefill('${isCustomer ? 'Customer' : 'Vendor'}','${escapeAttr(name)}')">Upload Proof</button>
       </div></div>
+    ${renderPersonBusinessCard(party, isCustomer, name)}
     <section class="entity-strip">
       <div><span>Linked Rows</span><strong>${sections.reduce((n, [, , , rows]) => n + rows.length, 0)}</strong></div>
       <div><span>${isCustomer ? 'Paid/Sold' : 'Spent'}</span><strong>${formatMoney(isCustomer ? sum(sections[0][3], r => r.customerPaid) : sum(sections[0][3], r => r.total))}</strong></div>
@@ -1337,20 +1731,46 @@ async function renderPersonDetail(el, mode, name) {
     </div>`;
 }
 
+function renderPersonBusinessCard(party, isCustomer, name) {
+  if (!party) {
+    return `<section class="card person-business-card"><div class="card-header-lite"><h3>${isCustomer ? 'Customer' : 'Vendor'} Business Card</h3><button class="primary-button" onclick="openPersonContact('${escapeAttr(name)}',${isCustomer},0)">Add Contact Details</button></div><p class="muted">No saved contact card exists yet. Activity below is currently connected by name only.</p></section>`;
+  }
+  const address = [party.address1, party.address2, [party.city, party.state, party.postalCode].filter(Boolean).join(' '), party.country].filter(Boolean).join('\n');
+  const contact = [
+    ['Email', party.email ? `<a href="mailto:${escapeAttr(party.email)}">${escapeHtml(party.email)}</a>` : 'Not provided'],
+    ['Phone', party.phone ? `<a href="tel:${escapeAttr(party.phone)}">${escapeHtml(party.phone)}</a>` : 'Not provided'],
+    ['Address', address ? escapeHtml(address).replaceAll('\n','<br>') : 'Not provided'],
+    ['Etsy Username', escapeHtml(party.etsyUsername || 'Not provided')],
+    ['Default Platform', escapeHtml(party.defaultPlatform || 'Not provided')],
+    ['Contact Type', escapeHtml(party.partyType || '')]
+  ];
+  return `<section class="card person-business-card">
+    <div class="card-header-lite"><div><h3>${isCustomer ? 'Customer' : 'Vendor'} Business Card</h3><p class="muted">Reusable contact details stored in People / Vendors.</p></div><button class="primary-button" onclick="openPersonContact('${escapeAttr(name)}',${isCustomer},${Number(party.id)})">Edit Contact</button></div>
+    <div class="ai-field-preview">${contact.map(([label,value]) => `<div><span>${escapeHtml(label)}</span><strong>${value}</strong></div>`).join('')}</div>
+    ${party.notes ? `<div class="callout"><strong>Relationship Notes</strong><p>${escapeHtml(party.notes)}</p></div>` : ''}
+  </section>`;
+}
+
+window.openPersonContact = async (name, isCustomer, id) => {
+  if (Number(id) > 0) return openLedgerEntityRecord('parties', Number(id));
+  openModal(configs.parties, { name, partyType: isCustomer ? 'Customer' : 'Vendor', defaultPlatform: isCustomer ? 'Direct' : 'Vendor' }, true);
+};
+
 async function renderRelationshipDirectory(el, mode) {
   const isCustomer = mode === 'customer';
-  const [parties, sales, invoices, docs, jobs, expenses, bills, assets] = await Promise.all([
+  const [parties, sales, invoices, docs, jobs, communications, expenses, bills, assets] = await Promise.all([
     api('/api/parties'),
     api('/api/sales'),
     api('/api/receivable-invoices'),
     api('/api/documents?includeArchived=true'),
     api('/api/customer-jobs'),
+    api('/api/customer-communications'),
     api('/api/expenses'),
     api('/api/bills'),
     api('/api/assets')
   ]);
   const rows = isCustomer
-    ? buildCustomerRows(parties, sales, invoices, docs, jobs)
+    ? buildCustomerRows(parties, sales, invoices, docs, jobs, communications)
     : buildVendorRows(parties, expenses, bills, assets);
   const key = isCustomer ? 'customers-directory' : 'vendors-directory';
   if (!tablePageState[key]) tablePageState[key] = { page: 0, pageSize: 25, sortColumn: 'lastActivity', sortDir: 'desc' };
@@ -1382,7 +1802,7 @@ async function renderRelationshipDirectory(el, mode) {
   renderRelationshipTable(rows, cols, mode, state, '');
 }
 
-function buildCustomerRows(parties, sales, invoices, docs, jobs) {
+function buildCustomerRows(parties, sales, invoices, docs, jobs, communications = []) {
   const map = new Map();
   const add = (name, source, row, amount = 0, open = 0) => {
     const clean = String(name || '').trim();
@@ -1402,6 +1822,7 @@ function buildCustomerRows(parties, sales, invoices, docs, jobs) {
   invoices.forEach(r => add(r.customerName, 'AR', r, r.invoiceTotal, ['Paid','Void'].includes(r.status) ? 0 : r.balanceDue));
   docs.forEach(r => add(r.customerName, 'PDF Docs', r, r.total));
   jobs.forEach(r => add(r.customerName, 'Jobs', r, r.invoiceAmount));
+  communications.forEach(r => add(r.customerName, 'Communications', r));
   return [...map.values()].map(row => ({ ...row, sources: [...row.sources].join(', ') }));
 }
 
@@ -1499,7 +1920,7 @@ function relationshipCell(row, key, mode) {
 }
 
 function relationshipSection(title, configKey, config, rows, mode = '', name = '') {
-  const cols = rows[0] ? Object.keys(rows[0]).filter(k => ['saleDate','invoiceNumber','docNumber','docType','status','customerName','vendorName','projectName','productName','description','total','customerPaid','invoiceTotal','balanceDue','expenseDate','dueDate','fileName','documentDate'].includes(k)).slice(0, 7) : [];
+  const cols = rows[0] ? Object.keys(rows[0]).filter(k => ['saleDate','invoiceNumber','docNumber','docType','status','customerName','vendorName','projectName','productName','description','total','customerPaid','invoiceTotal','balanceDue','expenseDate','dueDate','fileName','documentDate','occurredAt','direction','channel','subject','summary','followUpStatus','followUpDate'].includes(k)).slice(0, 7) : [];
   const stateKey = `relationship-section:${mode}:${name}:${configKey}`;
   const stateArg = escapeAttr(encodeURIComponent(stateKey));
   if (!tablePageState[stateKey]) tablePageState[stateKey] = { page: 0, pageSize: 10 };
@@ -1555,6 +1976,7 @@ function relationshipSectionActions(title, mode, name) {
     if (title === 'AR Invoices') return `<button class="ghost-button compact-action" onclick="quickOpen('receivables','invoice',{customerName:'${n}'})">Add AR</button>`;
     if (title === 'Estimate / Invoice PDFs') return `<button class="ghost-button compact-action" onclick="startCustomerDocument('${n}','ESTIMATE')">New Estimate</button><button class="ghost-button compact-action" onclick="startCustomerDocument('${n}','INVOICE')">New Invoice</button>`;
     if (title === 'Jobs') return `<button class="ghost-button compact-action" onclick="quickOpen('customerJobs','estimateSent',{customerName:'${n}'})">Add Job</button>`;
+    if (title === 'Communications') return `<button class="ghost-button compact-action" onclick="quickOpen('communications','communication',{customerName:'${n}'})">Log Communication</button>`;
   }
   if (mode === 'vendor') {
     if (title === 'Expenses') return `<button class="ghost-button compact-action" onclick="quickOpen('expenses','expense',{vendorName:'${n}'})">Add Expense</button>`;
@@ -1797,11 +2219,14 @@ function renderQuickAdd(el) {
       ${quickLinkCard('New Estimate PDF','Build a real customer estimate with calculator, line items, and PDF preview.','estimates')}
       ${quickLinkCard('New Invoice PDF','Build a real customer invoice with line items, AR sync, and PDF preview.','invoices')}
       ${quickCard('Etsy Sale','A paid Etsy order or marketplace sale.','sales','etsy')}
+      ${quickLinkCard('AI Upload Paid Marketplace Order','Upload an Etsy/marketplace order PDF or screenshot, review the extracted Sale, then save it with proof.','aiOperations')}
       ${quickCard('Direct Paid Sale','Customer already paid you directly.','sales','directPaid')}
       ${quickCard('Open Invoice / AR','You sent a direct invoice and are waiting for payment.','receivables','invoice')}
       ${quickCard('Bill / AP','You owe a vendor and have not paid yet.','bills','bill')}
       ${quickCard('Paid Expense','You already bought supplies, labels, software, etc.','expenses','expense')}
       ${quickCard('Equipment / Asset Purchase','A printer, AMS, durable tool, computer, or higher-value item that needs tax-treatment review.','assets','assetPurchase')}
+      ${quickCard('Log Customer Communication','Record an email, text, call, approval, question, or follow-up.','communications','communication')}
+      ${quickLinkCard('Open Printer Queue','Schedule active jobs, assign printers, and track production progress.','printerQueue')}
     </div>
     <div class="grid two">
       <div class="card"><h3>Clean Books Rule</h3><p><b>Sales</b> are money coming in. <b>AR invoices</b> are money customers owe you. <b>AP bills</b> are money you owe. <b>Expenses</b> are things already paid. <b>Customer Jobs</b> track the work itself.</p></div>
@@ -1857,7 +2282,7 @@ function renderLedgerMap(el) {
       plain: 'A cleanup reminder or follow-up task.',
       why: 'Actions are the app saying “something needs human attention”: missing COGS, review proof, confirm a number, collect payment, classify an expense, or follow up.',
       not: 'It is not money, not a sale, not an invoice, and not proof. It is a to-do attached to the bookkeeping story.',
-      use: 'Use Actions when you need to remember a cleanup task. Some actions are created by the app during imports/checks; you can also add them yourself.'
+      use: 'Use Actions when you need to remember a cleanup task. Add one manually, confirm Job Planner tasks, or explicitly sync verified Review Center and reconciliation findings. Scans never silently add tasks.'
     }
   };
   el.innerHTML = `
@@ -2198,7 +2623,9 @@ function quickOpen(configKey, kind, overrides = {}) {
     invoice: { status: 'Sent', invoiceDate: today, includeInCashReports: false, needsReview: false },
     bill: { status: 'Unpaid', billDate: today, taxDeductible: true },
     expense: { expenseDate: today, taxDeductible: true, taxBucket: 'Review', deductibleStatus: 'Review', countedExpense: true, businessUsePercent: 100, needsReview: true, notes: 'Classify as COGS/Materials, Operating Expense, Asset, or Memo Only before filing.' },
-    assetPurchase: { purchaseDate: today, inServiceDate: today, category: 'Equipment', businessUsePercent: 100, taxTreatment: 'Review', countedExpenseThisYear: false, needsReview: true, notes: 'Review with tax preparer before choosing Section 179, De Minimis Expense, or Depreciation.' }
+    assetPurchase: { purchaseDate: today, inServiceDate: today, category: 'Equipment', businessUsePercent: 100, taxTreatment: 'Review', countedExpenseThisYear: false, needsReview: true, notes: 'Review with tax preparer before choosing Section 179, De Minimis Expense, or Depreciation.' },
+    communication: { occurredAt: new Date().toISOString().substring(0,16), direction: 'Outgoing', channel: 'Email', followUpStatus: 'None', needsReview: false },
+    queue: { queueDate: today, priority: 'Normal', status: 'Queued', quantity: 1, plateCount: 1, progressPercent: 0, failureCount: 0, needsReview: false }
   };
   openModal(config, { ...(presets[kind] || {}), ...overrides }, true);
 }
@@ -2232,6 +2659,16 @@ function openModal(config, row, presetOnly = false) {
 }
 
 function modalIntro(config, row) {
+  if (config.route === 'action-items') {
+    const origin = actionItemOrigin(row);
+    return `<section class="modal-guide full" aria-label="Action Item explanation">
+      <div class="guide-main">
+        <span class="eyebrow">Action source: ${escapeHtml(origin)}</span>
+        <h3>This is a human follow-up, not a money record or automatic correction.</h3>
+        <p>Generated Action Items preserve their trigger in Notes. Mark it Done only after resolving the underlying record; scans never change the ledger for you.</p>
+      </div>
+    </section>`;
+  }
   if (config.route !== 'receivable-invoices') return '';
   const customer = escapeAttr(row.customerName || '');
   return `<section class="modal-guide full" aria-label="AR ledger explanation">
@@ -2272,7 +2709,11 @@ function renderField(field, row) {
   if (field.type === 'textarea') {
     return `<div class="form-field full">${label}<textarea id="field_${field.name}" name="${field.name}">${escapeHtml(value ?? '')}</textarea></div>`;
   }
-  const inputValue = dateFields.has(field.name) && value ? String(value).substring(0,10) : (value ?? '');
+  const inputValue = field.type === 'datetime-local' && value
+    ? String(value).substring(0,16)
+    : dateFields.has(field.name) && value
+      ? String(value).substring(0,10)
+      : (value ?? '');
   if (proofFieldNames.has(field.name)) {
     return `<div class="form-field ${full ? 'full' : ''} proof-field">${label}<div class="proof-control"><input id="field_${field.name}" name="${field.name}" type="${field.type}" value="${escapeHtml(inputValue)}" placeholder="Upload a proof file or paste a OneDrive/local path"><button class="ghost-button" type="button" data-proof-upload="${field.name}">Attach File</button><input class="hidden" id="proof_file_${field.name}" type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.txt,.csv,.json,.md,application/pdf,image/*,text/*"></div><small class="proof-help">Saves a copy into UploadedDocs, creates an Audit Doc, then fills this field with the saved local path.</small></div>`;
   }
@@ -2418,6 +2859,44 @@ function closeModal() {
   qs('#modal').classList.add('hidden');
 }
 
+window.openDashboardBreakdown = key => {
+  const breakdown = appState.dashboardBreakdowns?.[key];
+  if (!breakdown) return toast('This dashboard breakdown is not available yet.');
+  qs('#breakdownModalTitle').textContent = breakdown.title || 'Dashboard Breakdown';
+  qs('#breakdownModalHelp').textContent = breakdown.formula || '';
+  const rows = breakdown.items || [];
+  const total = breakdown.money ? formatMoney(breakdown.total) : `${Number(breakdown.total || 0)} row${Number(breakdown.total || 0) === 1 ? '' : 's'}`;
+  qs('#breakdownModalBody').innerHTML = `
+    <div class="breakdown-summary"><span>${escapeHtml(breakdown.formula || '')}<br>${rows.length} contributing record${rows.length === 1 ? '' : 's'}.</span><strong>${escapeHtml(total)}</strong></div>
+    ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Date</th><th>Source</th><th>Record</th><th>Why it counts</th><th>Contribution</th><th></th></tr></thead><tbody>
+      ${rows.map(row => {
+        const amount = Number(row.amount || 0);
+        const amountLabel = breakdown.money ? formatMoney(amount) : String(amount);
+        return `<tr>
+          <td>${escapeHtml(formatShortDate(row.date))}</td>
+          <td>${escapeHtml(row.sourceType || '')}</td>
+          <td><strong>${escapeHtml(row.label || '')}</strong></td>
+          <td>${escapeHtml(row.detail || '')}</td>
+          <td class="breakdown-amount ${amount < 0 ? 'negative' : 'positive'}">${escapeHtml(amountLabel)}</td>
+          <td><button class="ghost-button compact-action" type="button" onclick="openDashboardBreakdownRecord('${escapeAttr(row.route)}',${Number(row.id)})">Open</button></td>
+        </tr>`;
+      }).join('')}
+    </tbody></table></div>` : emptyState('No contributing records.', 'This total is currently zero.')}
+  `;
+  qs('#breakdownModalBackdrop').classList.remove('hidden');
+  qs('#breakdownModal').classList.remove('hidden');
+};
+
+window.openDashboardBreakdownRecord = async (route, id) => {
+  closeDashboardBreakdown();
+  await openLedgerEntityRecord(route, id);
+};
+
+function closeDashboardBreakdown() {
+  qs('#breakdownModalBackdrop').classList.add('hidden');
+  qs('#breakdownModal').classList.add('hidden');
+}
+
 function renderDocumentIntake(el) {
   el.innerHTML = `
     <div class="page-head">
@@ -2427,6 +2906,7 @@ function renderDocumentIntake(el) {
       </div>
       <div class="actions">
         <button class="ghost-button" onclick="showPage('auditDocs')">Open Audit Docs</button>
+        <button class="primary-button" onclick="showPage('aiOperations'); setTimeout(()=>document.getElementById('aiMarketplaceOrderCard')?.scrollIntoView({behavior:'smooth'}),120)">AI Add Paid Etsy / Marketplace Order</button>
       </div>
     </div>
     <div class="grid two">
@@ -2464,7 +2944,7 @@ function renderDocumentIntake(el) {
       <section class="card">
         <h3>What Happens After Upload?</h3>
         <p><b>One upload creates one Audit Doc.</b> That Audit Doc is your proof file/index card. It does not automatically fill every tab.</p>
-        <p>After upload, choose the next step: create the Sale/Expense/Invoice/Bill that the file proves, or edit the Audit Doc to add missing notes, related record number, and review status.</p>
+        <p>After upload, choose the next step: create the Sale/Expense/Invoice/Bill that the file proves, or edit the Audit Doc to add missing notes, related record number, and review status. For an already-paid Etsy/marketplace order, use <b>AI Add Paid Etsy / Marketplace Order</b> to extract and save the Sale with its proof.</p>
         <p>Text, CSV, JSON, and Markdown files get a clean preview. PDFs get best-effort text preview when the PDF stores readable text. Scanned image-only PDFs still need OCR later.</p>
       </section>
     </div>
@@ -2624,10 +3104,16 @@ function renderAiEstimateResult(result) {
   const prefill = result.prefill || {};
   const pricing = result.pricing || {};
   const receipt = result.executionReceipt || {};
+  const costBasisTotal = Number(pricing.setup || 0) + Number(pricing.material || 0) + Number(pricing.machine || 0)
+    + Number(pricing.design || 0) + Number(pricing.postProcessing || 0) + Number(pricing.difficultyFee || 0);
+  const quoteAboveCostBasis = Number(pricing.lineSubtotal || 0) - costBasisTotal;
   const executedAt = receipt.executedAtUtc ? new Date(receipt.executedAtUtc).toLocaleString() : 'Not supplied';
   const tokenUsage = receipt.totalTokens == null
     ? (result.usedAi ? 'Provider did not supply token usage' : 'Not applicable; no model ran')
     : `${receipt.totalTokens} total (${receipt.promptTokens ?? '?'} prompt + ${receipt.completionTokens ?? '?'} completion)`;
+  const sourceUsage = receipt.sourceCharacters
+    ? `${Number(receipt.modelInputCharacters || 0).toLocaleString()} of ${Number(receipt.sourceCharacters).toLocaleString()} characters${receipt.sourceWasCondensed ? ' (quote-relevant excerpts selected)' : ''}`
+    : 'Not supplied';
   const fields = [
     ['Customer', prefill.customerName],
     ['Phone', prefill.customerPhone],
@@ -2661,6 +3147,8 @@ function renderAiEstimateResult(result) {
       'Populated this preview and added a provenance note to Project Notes. Nothing is saved until you save the estimate.',
       'Review every field, item, price, tax, term, and question below before opening the draft.'
     )}
+    ${!result.usedAi && Number(receipt.sourceCharacters || 0) > 1000 ? `
+      <div class="callout bad"><strong>This detailed packet was not interpreted by model AI.</strong><p>Local Rules can extract obvious contact details, but they cannot create reliable job assumptions or granular pricing from a long conversation. Start/load Local AI and click Build Estimate Items again.</p></div>` : ''}
     <div class="card ai-execution-receipt">
       <div class="card-header-lite"><h3>Execution Receipt</h3>${assistanceIndicator(receipt.engine || (result.usedAi ? 'AI model' : 'Local rules'), receipt.provider || result.provider || '')}</div>
       <div class="ai-field-preview">
@@ -2670,6 +3158,7 @@ function renderAiEstimateResult(result) {
         <div><span>Model</span><strong>${escapeHtml(receipt.model || (result.usedAi ? 'Provider did not supply model name' : 'Not applicable'))}</strong></div>
         <div><span>Response ID</span><strong>${escapeHtml(receipt.responseId || (result.usedAi ? 'Provider did not supply response ID' : 'Not applicable'))}</strong></div>
         <div><span>Token usage</span><strong>${escapeHtml(tokenUsage)}</strong></div>
+        <div><span>Source used</span><strong>${escapeHtml(sourceUsage)}</strong></div>
       </div>
       <p class="muted">${result.usedAi
         ? 'This receipt is built from the completed model response. It is also copied into Project Notes when you fill the estimate.'
@@ -2694,7 +3183,9 @@ function renderAiEstimateResult(result) {
       <div class="workflow-row"><div><span>Material cost</span><strong>${formatMoney(pricing.material)}</strong></div><p>${escapeHtml(`${prefill.calcGrams || 0}g × ${formatMoney(prefill.calcGramRate)}/g`)}</p></div>
       <div class="workflow-row"><div><span>Machine + design</span><strong>${formatMoney(Number(pricing.machine || 0) + Number(pricing.design || 0))}</strong></div><p>${escapeHtml(`${prefill.calcHours || 0} machine hours; ${prefill.calcDesignHours || 0} design hours`)}</p></div>
       <div class="workflow-row"><div><span>Setup + post + difficulty</span><strong>${formatMoney(Number(pricing.setup || 0) + Number(pricing.postProcessing || 0) + Number(pricing.difficultyFee || 0))}</strong></div><p>The app computed these amounts from the proposed calculator inputs.</p></div>
-      <div class="workflow-row"><div><span>Line subtotal</span><strong>${formatMoney(pricing.lineSubtotal)}</strong></div><p>Before document-level rush, discount, and tax.</p></div>
+      <div class="workflow-row"><div><span>Calculator cost basis</span><strong>${formatMoney(costBasisTotal)}</strong></div><p>Material, machine, design, setup, post-processing, and visible difficulty costs before the customer-facing quote.</p></div>
+      <div class="workflow-row"><div><span>Quote above cost basis</span><strong>${formatMoney(quoteAboveCostBasis)}</strong></div><p>Customer-facing line subtotal minus the reconciled calculator cost basis.</p></div>
+      <div class="workflow-row"><div><span>Line subtotal</span><strong>${formatMoney(pricing.lineSubtotal)}</strong></div><p>${escapeHtml(pricing.pricingMode || 'Before document-level rush, discount, and tax.')}</p></div>
       <div class="workflow-row"><div><span>Final quoted total</span><strong>${formatMoney(pricing.total)}</strong></div><p>Deterministically calculated by the app. Review before saving or sending.</p></div>
     </div>
     <div class="ai-result-actions">
@@ -2703,6 +3194,486 @@ function renderAiEstimateResult(result) {
     </div>
     <details class="ai-json-preview"><summary>View structured JSON</summary><pre>${escapeHtml(JSON.stringify({ executionReceipt: receipt, prefill, pricing }, null, 2))}</pre></details>`;
 }
+
+async function renderAiOperations(el) {
+  const [status, localAiStatus, reconciliation, jobs, products] = await Promise.all([
+    api('/api/ai/operations/status'),
+    api('/api/ai/local/status').catch(() => null),
+    api('/api/ai/operations/reconciliation'),
+    api('/api/customer-jobs'),
+    api('/api/products')
+  ]);
+  const report = appState.aiReconciliationModelResult || reconciliation;
+  el.innerHTML = `
+    <section class="workspace-hero">
+      <div>
+        <span class="eyebrow">AI Operations</span>
+        <h2>Use AI for the repetitive work, with every touch labeled.</h2>
+        <p>Import products from MakerWorld or any public site, plan jobs, read slicer output, write listings, ask the ledger questions, and catch duplicates before they cost you.</p>
+      </div>
+      <div class="hero-actions">
+        <button class="ghost-button dark" onclick="showPage('localAi')">Local AI Controls</button>
+        <button class="primary-button" onclick="showPage('products')">Open Products</button>
+        <button class="ghost-button dark" onclick="showPage('customerJobs')">Open Jobs</button>
+      </div>
+    </section>
+    <div class="ai-status-strip">
+      ${assistanceIndicator(status.localAiReady ? 'AI model' : 'Local rules', status.provider)}
+      <span><b>Editable instructions:</b> ${escapeHtml(status.instructionsPath)}</span>
+      <span>${escapeHtml(status.safety)}</span>
+    </div>
+    <section class="ai-feature-map">
+      ${(status.features || []).map(feature => aiTouchCard(status.localAiReady ? 'AI model + local rules' : 'Local rules', feature.name, feature.reads, feature.writes, feature.useWhen)).join('')}
+    </section>
+
+    <section id="aiReconciliationCard" class="card">
+      <div class="card-header-lite"><h3>1. Duplicate & Reconciliation Check</h3>${assistanceIndicator(report.receipt?.engine || 'Local rules', report.receipt?.provider || '')}</div>
+      <p>Start here. Exact identifiers, suspicious repeated records, and invoice/AR/Sale disagreements are found with repeatable local checks. AI explanation is optional.</p>
+      <div class="actions">
+        <button id="refreshReconciliationBtn" class="ghost-button">Refresh Check</button>
+        <button id="explainReconciliationBtn" class="primary-button">${localAiStatus?.modelReady ? 'Explain Findings with Local AI' : 'Start Local AI to Explain'}</button>
+      </div>
+      <div id="aiReconciliationResult">${renderAiReconciliationReport(report)}</div>
+    </section>
+
+    <section id="aiMarketplaceOrderCard" class="card">
+      <div class="card-header-lite"><h3>2. Paid Etsy / Marketplace Order Import</h3>${assistanceIndicator(status.localAiReady ? 'AI model' : 'Local rules', 'Paid Sale + proof; no estimate or AR')}</div>
+      ${aiTouchCard(status.localAiReady ? 'AI model + local rules' : 'Local rules', 'Completed marketplace order intake', 'Only order PDFs, screenshots, documents, or pasted order text you add here.', 'Reviewable paid Sale and optional completed Job. Proof and records save only after explicit confirmation.', 'An Etsy or marketplace order is already paid and complete, so it should bypass estimates, invoices, and AR.')}
+      <div class="callout"><strong>Correct marketplace workflow</strong><p>Analyze one order at a time. This creates a paid Sale for revenue/tax tracking and can create a completed Customer Job for order history. It never creates an estimate, invoice, or AR row.</p></div>
+      <div class="ai-source">
+        <label for="aiMarketplaceOrderText">Optional pasted order or payment-statement text</label>
+        <textarea id="aiMarketplaceOrderText" class="ai-url-source" placeholder="Paste Etsy order details, seller activity, payment statement details, or notes here."></textarea>
+        <div class="ai-source-actions">
+          <label class="ghost-button file-button" for="aiMarketplaceOrderFiles">Add One Order's PDF / Screenshot / Document</label>
+          <input id="aiMarketplaceOrderFiles" class="visually-hidden" type="file" multiple accept=".txt,.md,.eml,.csv,.json,.pdf,.docx,.png,.jpg,.jpeg,.webp,image/*">
+          <span id="aiMarketplaceOrderFileList" class="muted">No files selected</span>
+          <button id="runMarketplaceOrderImportBtn" class="primary-button">Analyze Paid Order</button>
+        </div>
+      </div>
+      <div id="aiMarketplaceOrderResult">${appState.aiMarketplaceOrderDraft ? renderAiMarketplaceOrderResult(appState.aiMarketplaceOrderDraft) : emptyState('No paid marketplace order analyzed yet.', 'Upload an Etsy order PDF/screenshot or paste order text. Review the result before saving.')}</div>
+    </section>
+
+    <section id="aiProductImportCard" class="card">
+      <div class="card-header-lite"><h3>3. Product Importer: MakerWorld, Etsy, Any Public Site, Files, or Pictures</h3>${assistanceIndicator(status.localAiReady ? 'AI model' : 'Local rules', 'Reviewable Product draft')}</div>
+      ${aiTouchCard(status.localAiReady ? 'AI model' : 'Local rules', 'Product draft preparation', 'Only URLs, notes, documents, and pictures you add here.', 'Unsaved Product / Costing draft and listing preview.', 'Show it an existing MakerWorld page or any other public product source, then review the draft before saving.')}
+      <div class="ai-source">
+        <label for="aiProductUrls">Public product/source URLs, one per line</label>
+        <textarea id="aiProductUrls" class="ai-url-source" placeholder="https://makerworld.com/en/models/...&#10;https://www.etsy.com/listing/..."></textarea>
+        <label for="aiProductText">Extra notes or pasted source text</label>
+        <textarea id="aiProductText" class="ai-url-source" placeholder="Add known material, colors, quantity, dimensions, price, or anything the page does not explain."></textarea>
+        <div class="ai-source-actions">
+          <label class="ghost-button file-button" for="aiProductFiles">Add Product Files / Pictures</label>
+          <input id="aiProductFiles" class="visually-hidden" type="file" multiple accept=".txt,.md,.eml,.csv,.json,.pdf,.docx,.png,.jpg,.jpeg,.webp,image/*">
+          <span id="aiProductFileList" class="muted">No files selected</span>
+          <button id="runProductImportBtn" class="primary-button">Build Product Draft</button>
+        </div>
+      </div>
+      <div id="aiProductImportResult">${appState.aiProductImportDraft ? renderAiProductImportResult(appState.aiProductImportDraft) : emptyState('No Product draft yet.', 'Add a MakerWorld or other public product URL, files, pictures, or notes.')}</div>
+    </section>
+
+    <section id="aiJobPlannerCard" class="card">
+      <div class="card-header-lite"><h3>4. Job Planner</h3>${assistanceIndicator(status.localAiReady ? 'AI model' : 'Local rules', 'Tasks remain drafts until confirmed')}</div>
+      ${aiTouchCard(status.localAiReady ? 'AI model' : 'Local rules', 'Production task planning', 'A selected Customer Job and/or pasted job description.', 'Unsaved task plan; Action Items only after an explicit Create button.', 'After a quote is accepted or before production starts.')}
+      <div class="local-ai-form">
+        <label>Existing Customer Job<select id="aiJobSelect"><option value="">Use pasted description only</option>${jobs.map(job => `<option value="${job.id}">${escapeHtml(`${job.customerName}: ${job.jobName} (${job.status})`)}</option>`).join('')}</select></label>
+        <label>Extra job details<textarea id="aiJobText" class="ai-url-source" placeholder="Paste approval notes, deadline, production concerns, or missing steps."></textarea></label>
+        <button id="runJobPlanBtn" class="primary-button">Build Job Plan</button>
+      </div>
+      <div id="aiJobPlanResult">${appState.aiJobPlanDraft ? renderAiJobPlanResult(appState.aiJobPlanDraft) : emptyState('No job plan yet.', 'Choose a job or paste a job description.')}</div>
+    </section>
+
+    <section id="aiSlicerCard" class="card">
+      <div class="card-header-lite"><h3>5. Slicer Report & Screenshot Reader</h3>${assistanceIndicator(status.localAiReady ? 'AI model' : 'Local rules', 'Review slicer values')}</div>
+      ${aiTouchCard(status.localAiReady ? 'AI model' : 'Local rules', 'Slicer value extraction', 'Only slicer text, reports, screenshots, and files you add here.', 'Unsaved slicer summary and Product / Costing draft.', 'To fill grams, print time, material, plates, and costing assumptions.')}
+      <div class="ai-source">
+        <label for="aiSlicerText">Paste slicer summary or report text</label>
+        <textarea id="aiSlicerText" class="ai-url-source" placeholder="Example: PLA, 184.6g, print time 8h 42m, 2 plates, 4 copies..."></textarea>
+        <div class="ai-source-actions">
+          <label class="ghost-button file-button" for="aiSlicerFiles">Add Slicer Reports / Screenshots</label>
+          <input id="aiSlicerFiles" class="visually-hidden" type="file" multiple accept=".txt,.md,.csv,.json,.pdf,.docx,.png,.jpg,.jpeg,.webp,image/*">
+          <span id="aiSlicerFileList" class="muted">No files selected</span>
+          <button id="runSlicerReadBtn" class="primary-button">Read Slicer Output</button>
+        </div>
+      </div>
+      <div id="aiSlicerResult">${appState.aiSlicerDraft ? renderAiSlicerResult(appState.aiSlicerDraft) : emptyState('No slicer analysis yet.', 'Paste output or add a report/screenshot.')}</div>
+    </section>
+
+    <section id="aiListingCard" class="card">
+      <div class="card-header-lite"><h3>6. Product Listing Writer</h3>${assistanceIndicator(status.localAiReady ? 'AI model' : 'Local rules', 'Copy preview only')}</div>
+      ${aiTouchCard(status.localAiReady ? 'AI model' : 'Local rules', 'Marketplace listing copy', 'A selected Product / Costing row and optional instructions.', 'Listing copy preview only; nothing is posted.', 'When creating or refreshing MakerWorld, Etsy, or general product copy.')}
+      <div class="local-ai-form">
+        <label>Product<select id="aiListingProduct"><option value="">Choose Product</option>${products.map(product => `<option value="${product.id}">${escapeHtml(product.name)}</option>`).join('')}</select></label>
+        <label>Platform<select id="aiListingPlatform"><option>MakerWorld</option><option>Etsy</option><option>General</option><option>Website</option></select></label>
+        <label>Extra instructions<textarea id="aiListingInstructions" class="ai-url-source" placeholder="Example: emphasize personalization and easy installation; avoid compatibility claims."></textarea></label>
+        <button id="runListingWriterBtn" class="primary-button">Write Listing</button>
+      </div>
+      <div id="aiListingResult">${appState.aiListingDraft ? renderAiListingResult(appState.aiListingDraft) : emptyState('No listing draft yet.', 'Choose a Product and platform.')}</div>
+    </section>
+
+    <section id="aiLedgerSearchCard" class="card">
+      <div class="card-header-lite"><h3>7. Ask the Ledger</h3>${assistanceIndicator(status.localAiReady ? 'AI model' : 'Local rules', 'Read-only')}</div>
+      ${aiTouchCard(status.localAiReady ? 'AI model' : 'Local rules', 'Plain-language ledger questions', 'Only active local rows selected by your question.', 'Read-only answer and links.', 'Ask questions such as “Which jobs mention PETG?” or “Find Ryan invoices.”')}
+      <div class="assistant-suggestion">
+        <input id="aiLedgerQuestion" class="search" placeholder="Ask about customers, jobs, products, invoices, sales, or expenses...">
+        <button id="askLedgerBtn" class="primary-button">Ask Ledger</button>
+      </div>
+      <div id="aiLedgerAnswer">${emptyState('No question asked yet.', 'The answer will show its engine and the exact matching records it used.')}</div>
+    </section>`;
+
+  let marketplaceOrderFiles = [];
+  let productFiles = [];
+  let slicerFiles = [];
+  bindAiOperationFilePicker('aiMarketplaceOrderFiles', 'aiMarketplaceOrderFileList', files => marketplaceOrderFiles = files);
+  bindAiOperationFilePicker('aiProductFiles', 'aiProductFileList', files => productFiles = files);
+  bindAiOperationFilePicker('aiSlicerFiles', 'aiSlicerFileList', files => slicerFiles = files);
+
+  qs('#refreshReconciliationBtn').onclick = async () => {
+    appState.aiReconciliationModelResult = null;
+    await showPage('aiOperations', { replace: true });
+  };
+  qs('#explainReconciliationBtn').onclick = async () => {
+    if (!localAiStatus?.modelReady) return showPage('localAi');
+    const button = qs('#explainReconciliationBtn');
+    button.disabled = true; button.textContent = 'Explaining...';
+    try {
+      appState.aiReconciliationModelResult = await api('/api/ai/operations/reconciliation/model', { method: 'POST', body: '{}' });
+      qs('#aiReconciliationResult').innerHTML = renderAiReconciliationReport(appState.aiReconciliationModelResult);
+    } catch (err) { toast(`AI explanation failed: ${friendlyApiError(err.message)}`); }
+    finally { button.disabled = false; button.textContent = 'Explain Findings with Local AI'; }
+  };
+  qs('#runMarketplaceOrderImportBtn').onclick = async () => {
+    const button = qs('#runMarketplaceOrderImportBtn'); button.disabled = true; button.textContent = 'Analyzing paid order...';
+    try {
+      appState.aiMarketplaceOrderDraft = await postAiOperationFiles('/api/ai/operations/marketplace-order-import', qs('#aiMarketplaceOrderText').value, '', marketplaceOrderFiles, 'Paid marketplace order sources');
+      qs('#aiMarketplaceOrderResult').innerHTML = renderAiMarketplaceOrderResult(appState.aiMarketplaceOrderDraft);
+      bindMarketplaceOrderSaveButton(marketplaceOrderFiles);
+    } catch (err) { toast(`Marketplace order analysis failed: ${friendlyApiError(err.message)}`); }
+    finally { button.disabled = false; button.textContent = 'Analyze Paid Order'; }
+  };
+  qs('#runProductImportBtn').onclick = async () => {
+    const button = qs('#runProductImportBtn'); button.disabled = true; button.textContent = 'Importing...';
+    try {
+      appState.aiProductImportDraft = await postAiOperationFiles('/api/ai/operations/product-import', qs('#aiProductText').value, qs('#aiProductUrls').value, productFiles, 'Product import sources');
+      qs('#aiProductImportResult').innerHTML = renderAiProductImportResult(appState.aiProductImportDraft);
+      bindProductDraftButton();
+    } catch (err) { toast(`Product import failed: ${friendlyApiError(err.message)}`); }
+    finally { button.disabled = false; button.textContent = 'Build Product Draft'; }
+  };
+  qs('#runJobPlanBtn').onclick = async () => {
+    const button = qs('#runJobPlanBtn'); button.disabled = true; button.textContent = 'Planning...';
+    try {
+      appState.aiJobPlanDraft = await api('/api/ai/operations/job-plan', { method: 'POST', body: JSON.stringify({ jobId: Number(qs('#aiJobSelect').value) || null, sourceText: qs('#aiJobText').value }) });
+      qs('#aiJobPlanResult').innerHTML = renderAiJobPlanResult(appState.aiJobPlanDraft);
+      bindJobPlanActionsButton();
+    } catch (err) { toast(`Job planning failed: ${friendlyApiError(err.message)}`); }
+    finally { button.disabled = false; button.textContent = 'Build Job Plan'; }
+  };
+  qs('#runSlicerReadBtn').onclick = async () => {
+    const button = qs('#runSlicerReadBtn'); button.disabled = true; button.textContent = 'Reading...';
+    try {
+      appState.aiSlicerDraft = await postAiOperationFiles('/api/ai/operations/slicer-read', qs('#aiSlicerText').value, '', slicerFiles, 'Slicer sources');
+      qs('#aiSlicerResult').innerHTML = renderAiSlicerResult(appState.aiSlicerDraft);
+      bindSlicerDraftButton();
+    } catch (err) { toast(`Slicer read failed: ${friendlyApiError(err.message)}`); }
+    finally { button.disabled = false; button.textContent = 'Read Slicer Output'; }
+  };
+  qs('#runListingWriterBtn').onclick = async () => {
+    const button = qs('#runListingWriterBtn'); button.disabled = true; button.textContent = 'Writing...';
+    try {
+      appState.aiListingDraft = await api('/api/ai/operations/listing', { method: 'POST', body: JSON.stringify({ productId: Number(qs('#aiListingProduct').value) || null, platform: qs('#aiListingPlatform').value, extraInstructions: qs('#aiListingInstructions').value }) });
+      qs('#aiListingResult').innerHTML = renderAiListingResult(appState.aiListingDraft);
+      bindListingCopyButton();
+    } catch (err) { toast(`Listing writer failed: ${friendlyApiError(err.message)}`); }
+    finally { button.disabled = false; button.textContent = 'Write Listing'; }
+  };
+  qs('#askLedgerBtn').onclick = async () => {
+    const button = qs('#askLedgerBtn'); button.disabled = true; button.textContent = 'Searching...';
+    try {
+      const answer = await api('/api/ai/operations/ask-ledger', { method: 'POST', body: JSON.stringify({ query: qs('#aiLedgerQuestion').value }) });
+      qs('#aiLedgerAnswer').innerHTML = renderAiLedgerAnswer(answer);
+    } catch (err) { toast(`Ledger question failed: ${friendlyApiError(err.message)}`); }
+    finally { button.disabled = false; button.textContent = 'Ask Ledger'; }
+  };
+  bindProductDraftButton();
+  bindMarketplaceOrderSaveButton(marketplaceOrderFiles);
+  bindJobPlanActionsButton();
+  bindSlicerDraftButton();
+  bindListingCopyButton();
+}
+
+function renderOperationReceipt(receipt = {}) {
+  return `<div class="ai-operation-receipt">
+    <div>${assistanceIndicator(receipt.engine || (receipt.usedAi ? 'AI model' : 'Local rules'), receipt.provider || '')}</div>
+    <div><span>Reads</span><strong>${escapeHtml((receipt.reads || []).join(', ') || 'Nothing listed')}</strong></div>
+    <div><span>Can write</span><strong>${escapeHtml((receipt.writes || []).join(', ') || 'Nothing; read-only')}</strong></div>
+    <div><span>Use when</span><strong>${escapeHtml(receipt.useWhen || '')}</strong></div>
+    <div><span>Safety</span><strong>${escapeHtml(receipt.safety || '')}</strong></div>
+  </div>`;
+}
+
+function renderAiReconciliationReport(report) {
+  const findings = report.findings || [];
+  return `
+    ${renderOperationReceipt(report.receipt)}
+    <section class="entity-strip">
+      <div><span>Exact duplicate groups</span><strong>${Number(report.exactDuplicateGroups || 0)}</strong></div>
+      <div><span>Possible duplicate groups</span><strong>${Number(report.possibleDuplicateGroups || 0)}</strong></div>
+      <div><span>Reconciliation issues</span><strong>${Number(report.reconciliationIssues || 0)}</strong></div>
+      <div><span>Automatic deletes / merges</span><strong>0</strong></div>
+    </section>
+    ${report.modelSummary ? `<div class="callout"><strong>Local AI explanation</strong><p>${escapeHtml(report.modelSummary)}</p>${(report.modelRecommendedOrder || []).length ? `<ol>${report.modelRecommendedOrder.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ol>` : ''}</div>` : ''}
+    ${findings.length ? `<div class="ai-result-actions"><button class="primary-button" onclick="syncVerifiedFindingsToActions()">Sync Verified Findings to Actions</button><span class="muted">Creates only missing tasks from deterministic comparisons after confirmation. AI explanation text is never turned into tasks.</span></div>` : ''}
+    <div class="ai-review-center-list">${findings.length ? findings.map(finding => `
+      <article class="ai-review-center-item">
+        <div class="ai-review-center-head"><h3>${escapeHtml(finding.title)}</h3><div><span class="badge ${finding.severity === 'High' ? 'bad' : 'warn'}">${escapeHtml(finding.severity)}</span><span class="badge">${escapeHtml(finding.kind)}</span></div></div>
+        <div class="ai-review-center-body"><div><strong>Why</strong><p>${escapeHtml(finding.why)}</p></div><div><strong>Recommended action</strong><p>${escapeHtml(finding.recommendedAction)}</p></div></div>
+        <div class="actions">${(finding.records || []).map(record => `<button class="ghost-button" onclick="openAiOperationRecord('${escapeHtml(record.route)}',${Number(record.id)})">${escapeHtml(record.label)}</button>`).join('')}</div>
+      </article>`).join('') : emptyState('No duplicate or reconciliation findings.', 'The active records passed the current deterministic checks.')}</div>`;
+}
+
+function renderAiMarketplaceOrderResult(result) {
+  const sale = result.sale || {};
+  const customer = result.customer || {};
+  const duplicateSales = result.possibleDuplicateSales || [];
+  const duplicateJobs = result.possibleDuplicateJobs || [];
+  const customerMatches = result.possibleCustomerMatches || [];
+  const mixedOrders = result.detectedOrderNumbers || [];
+  const field = (name, label, type = 'text', value = sale[name] ?? '') => `<label>${escapeHtml(label)}<input id="marketplace_${name}" type="${type}" step="0.01" value="${escapeHtml(type === 'date' && value ? String(value).substring(0,10) : value)}"></label>`;
+  const customerField = (name, label, type = 'text', value = customer[name] ?? '') => `<label>${escapeHtml(label)}<input id="marketplace_customer_${name}" type="${type}" value="${escapeHtml(value)}"></label>`;
+  return `
+    ${renderOperationReceipt(result.receipt)}
+    ${duplicateSales.length ? `<div class="callout bad"><strong>Possible duplicate Sale: saving is blocked</strong><div class="actions">${duplicateSales.map(record => `<button class="ghost-button" onclick="openAiOperationRecord('${escapeHtml(record.route)}',${Number(record.id)})">${escapeHtml(record.label)}</button>`).join('')}</div></div>` : ''}
+    ${mixedOrders.length > 1 ? `<div class="callout bad"><strong>Multiple orders detected: saving is blocked</strong><p>${escapeHtml(mixedOrders.join(', '))}</p><p>Analyze and save one marketplace order at a time so dates, customers, amounts, and proof are not combined.</p></div>` : ''}
+    ${duplicateJobs.length ? `<div class="callout"><strong>Matching Customer Job found</strong><p>Leave “also create completed Job” unchecked to avoid duplicating the work history.</p><div class="actions">${duplicateJobs.map(record => `<button class="ghost-button" onclick="openAiOperationRecord('${escapeHtml(record.route)}',${Number(record.id)})">${escapeHtml(record.label)}</button>`).join('')}</div></div>` : ''}
+    ${customerMatches.length ? `<div class="callout"><strong>Matching customer contact found</strong><p>Confirmed save fills only missing contact fields and preserves information already saved.</p><div class="actions">${customerMatches.map(record => `<button class="ghost-button" onclick="openAiOperationRecord('${escapeHtml(record.route)}',${Number(record.id)})">${escapeHtml(record.label)}</button>`).join('')}</div></div>` : ''}
+    <div class="card-header-lite"><h3>Paid Sale</h3><span class="badge">Revenue record</span></div>
+    <div class="local-ai-form marketplace-review-form">
+      ${field('platform','Platform')}
+      ${field('orderNumber','Order Number')}
+      ${field('saleDate','Order / Sale Date','date')}
+      ${field('customerName','Customer / Buyer')}
+      ${field('productName','Product / Item')}
+      ${field('quantity','Quantity','number')}
+      ${field('itemSales','Item Sales','number')}
+      ${field('shippingCharged','Shipping Charged','number')}
+      ${field('salesTaxCollected','Sales Tax Collected','number')}
+      ${field('customerPaid','Customer Paid','number')}
+      ${field('platformFees','Marketplace Fees','number')}
+      ${field('shippingLabelCost','Shipping Label Cost','number')}
+      ${field('estimatedCogs','Estimated COGS','number')}
+      ${field('trackingNumber','Tracking Number')}
+    </div>
+    <div class="card-header-lite marketplace-contact-heading"><h3>Customer Business Card</h3><span class="badge">Reusable contact record</span></div>
+    <div class="local-ai-form marketplace-review-form">
+      ${customerField('name','Customer / Ship-To Name')}
+      ${customerField('email','Email','email')}
+      ${customerField('phone','Phone','tel')}
+      ${customerField('address1','Address 1')}
+      ${customerField('address2','Address 2')}
+      ${customerField('city','City')}
+      ${customerField('state','State')}
+      ${customerField('postalCode','ZIP / Postal Code')}
+      ${customerField('country','Country')}
+      ${customerField('etsyUsername','Etsy Username')}
+      ${customerField('defaultPlatform','Default Platform')}
+    </div>
+    <label class="check-row"><input id="marketplaceSaveCustomerContact" type="checkbox" checked> Create or safely fill the customer's saved business card</label>
+    <label class="check-row"><input id="marketplaceCreateJob" type="checkbox" ${result.suggestedCreateJob !== false ? 'checked' : ''}> Also create a completed/paid Customer Job for fulfillment history</label>
+    ${renderOperationWarnings(result)}
+    <div class="ai-result-actions">
+      <button id="saveMarketplaceOrderBtn" class="primary-button" ${duplicateSales.length || mixedOrders.length > 1 ? 'disabled' : ''}>Save Paid Sale + Link Proof</button>
+      <button id="openMarketplaceSaleDraftBtn" class="ghost-button">Open Unsaved Sale Draft</button>
+      <span class="muted">Explicit save creates the paid Sale, optional completed Job, and Audit Docs. It never creates an estimate, invoice, or AR row.</span>
+    </div>
+    <details class="ai-json-preview"><summary>View extracted marketplace order JSON</summary><pre>${escapeHtml(JSON.stringify(result, null, 2))}</pre></details>`;
+}
+
+function renderAiProductImportResult(result) {
+  const p = result.product || {};
+  const duplicates = result.possibleDuplicates || [];
+  return `
+    ${renderOperationReceipt(result.receipt)}
+    <div class="ai-field-preview">
+      ${[['Name',p.name],['SKU',p.sku],['Category',p.category],['Material',p.material],['Color',p.color],['Grams',p.grams],['Print hours',p.printHours],['Target price',formatMoney(p.targetPrice)]].map(([label,value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || 'Needs review')}</strong></div>`).join('')}
+    </div>
+    ${duplicates.length ? `<div class="callout bad"><strong>Possible existing Products</strong><div class="actions">${duplicates.map(record => `<button class="ghost-button" onclick="openAiOperationRecord('${escapeHtml(record.route)}',${Number(record.id)})">${escapeHtml(record.label)}</button>`).join('')}</div></div>` : ''}
+    ${renderOperationWarnings(result)}
+    <div class="ai-result-actions"><button id="openAiProductDraftBtn" class="primary-button">Open Unsaved Product Draft</button><span class="muted">Review every field. Nothing saves until you click Save in Products / Costing.</span></div>
+    ${renderListingCopy(result.listing)}
+    <details class="ai-json-preview"><summary>View structured Product draft</summary><pre>${escapeHtml(JSON.stringify(result, null, 2))}</pre></details>`;
+}
+
+function renderAiJobPlanResult(result) {
+  return `
+    ${renderOperationReceipt(result.receipt)}
+    <div class="callout"><strong>${escapeHtml(result.jobName || 'Job plan')}</strong><p>${escapeHtml(result.goal || '')}</p></div>
+    <div class="ai-review-center-list">${(result.tasks || []).map((task,index) => `<article class="ai-review-center-item"><div class="ai-review-center-head"><h3>${index + 1}. ${escapeHtml(task.title)}</h3><div><span class="badge">${escapeHtml(task.area)}</span><span class="badge ${task.priority === 'High' ? 'warn' : ''}">${escapeHtml(task.priority)}</span></div></div><p>${escapeHtml(task.notes || '')}</p><small>${escapeHtml(task.dueDate ? `Due ${task.dueDate}` : 'Due date needs review')}</small></article>`).join('')}</div>
+    ${renderOperationWarnings(result)}
+    <div class="ai-result-actions"><button id="createAiJobActionsBtn" class="primary-button">Create These Action Items</button><span class="muted">This is the only write action here. It creates tasks only after you click and confirm.</span></div>`;
+}
+
+function renderAiSlicerResult(result) {
+  const s = result.slicer || {};
+  return `
+    ${renderOperationReceipt(result.receipt)}
+    <div class="ai-field-preview">
+      ${[['Material',s.material],['Color',s.color],['Grams',s.grams],['Print hours',s.printHours],['Filament length (m)',s.filamentLengthMeters],['Plate count',s.plateCount],['Quantity',s.quantity],['Estimated material cost',formatMoney(s.estimatedMaterialCost)]].map(([label,value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value || 'Needs review')}</strong></div>`).join('')}
+    </div>
+    ${renderOperationWarnings(result)}
+    <div class="ai-result-actions"><button id="openSlicerProductDraftBtn" class="primary-button">Open Unsaved Product Draft</button><span class="muted">Verify whether slicer numbers are totals or per-unit before saving.</span></div>
+    <details class="ai-json-preview"><summary>View structured slicer result</summary><pre>${escapeHtml(JSON.stringify(result, null, 2))}</pre></details>`;
+}
+
+function renderAiListingResult(result) {
+  return `${renderOperationReceipt(result.receipt)}${renderOperationWarnings(result)}${renderListingCopy(result.listing)}<div class="ai-result-actions"><button id="copyAiListingBtn" class="primary-button">Copy Listing Text</button><span class="muted">Nothing is posted automatically.</span></div>`;
+}
+
+function renderListingCopy(listing = {}) {
+  return `<div class="card ai-listing-preview"><div class="card-header-lite"><h3>${escapeHtml(listing.platform || 'General')} Listing Preview</h3><span class="badge warn">Review before publishing</span></div><h3>${escapeHtml(listing.title || 'Title needs review')}</h3><p class="listing-description">${escapeHtml(listing.description || 'Description needs review')}</p><div class="grid two"><div><h4>Highlights</h4><ul>${(listing.highlights || []).map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul></div><div><h4>Tags</h4><p>${escapeHtml((listing.tags || []).join(', '))}</p><h4>Personalization</h4><p>${escapeHtml(listing.personalizationInstructions || '')}</p></div></div></div>`;
+}
+
+function renderAiLedgerAnswer(answer) {
+  return `${renderOperationReceipt(answer.receipt)}<div class="callout"><strong>Answer</strong><p>${escapeHtml(answer.answer)}</p></div>${renderOperationWarnings(answer)}<div class="ai-review-center-list">${(answer.results || []).map(hit => `<article class="ai-review-center-item"><div class="ai-review-center-head"><h3>${escapeHtml(hit.title)}</h3><span class="badge">${escapeHtml(hit.area)}</span></div><p>${escapeHtml(hit.detail)}</p><small>${escapeHtml(hit.evidence)}</small><div class="actions"><button class="ghost-button" onclick="openAiOperationRecord('${escapeHtml(hit.route)}',${Number(hit.id)})">Open Record</button></div></article>`).join('')}</div>`;
+}
+
+function renderOperationWarnings(result) {
+  const questions = result.questions || [];
+  const warnings = result.warnings || [];
+  if (!questions.length && !warnings.length) return '';
+  return `<div class="ai-review-list"><h4>Questions</h4>${questions.length ? `<ul>${questions.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul>` : '<p class="muted">None.</p>'}<h4>Warnings</h4>${warnings.length ? `<ul>${warnings.map(x => `<li>${escapeHtml(x)}</li>`).join('')}</ul>` : '<p class="muted">None.</p>'}</div>`;
+}
+
+function bindAiOperationFilePicker(inputId, labelId, onChange) {
+  const input = qs(`#${inputId}`);
+  input.onchange = () => {
+    const files = Array.from(input.files || []).slice(0, 25);
+    onChange(files);
+    qs(`#${labelId}`).textContent = files.length ? `${files.length} file${files.length === 1 ? '' : 's'} selected` : 'No files selected';
+  };
+}
+
+async function postAiOperationFiles(path, sourceText, sourceUrls, files, sourceName) {
+  const form = new FormData();
+  form.append('sourceText', sourceText || '');
+  form.append('sourceUrls', sourceUrls || '');
+  form.append('sourceName', sourceName);
+  (files || []).forEach(file => form.append('files', file, file.name));
+  const response = await fetch(path, { method: 'POST', body: form });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.message || `Request failed: ${response.status}`);
+  return result;
+}
+
+function bindProductDraftButton() {
+  const button = qs('#openAiProductDraftBtn');
+  if (button) button.onclick = () => openModal(configs.products, appState.aiProductImportDraft.product, true);
+}
+
+function updateMarketplaceOrderDraftFromInputs() {
+  const result = appState.aiMarketplaceOrderDraft;
+  if (!result?.sale) return;
+  const sale = result.sale;
+  const numberFields = ['quantity','itemSales','shippingCharged','salesTaxCollected','customerPaid','platformFees','shippingLabelCost','estimatedCogs'];
+  ['platform','orderNumber','saleDate','customerName','productName','quantity','itemSales','shippingCharged','salesTaxCollected','customerPaid','platformFees','shippingLabelCost','estimatedCogs','trackingNumber'].forEach(name => {
+    const input = qs(`#marketplace_${name}`);
+    if (!input) return;
+    sale[name] = numberFields.includes(name) ? (input.value === '' ? null : Number(input.value)) : (input.value || null);
+  });
+  result.customer ||= {};
+  ['name','email','phone','address1','address2','city','state','postalCode','country','etsyUsername','defaultPlatform'].forEach(name => {
+    const input = qs(`#marketplace_customer_${name}`);
+    if (input) result.customer[name] = input.value || null;
+  });
+  if (!result.customer.name) result.customer.name = sale.customerName;
+  if (!sale.customerName) sale.customerName = result.customer.name;
+  if (result.job) {
+    result.job.jobDate = sale.saleDate;
+    result.job.customerName = sale.customerName;
+    result.job.platform = sale.platform;
+    result.job.relatedOrderNumber = sale.orderNumber;
+    result.job.jobName = sale.productName;
+    result.job.productName = sale.productName;
+    result.job.invoiceAmount = sale.customerPaid;
+    result.job.amountPaid = sale.customerPaid;
+  }
+}
+
+function bindMarketplaceOrderSaveButton(files = []) {
+  const openButton = qs('#openMarketplaceSaleDraftBtn');
+  if (openButton) openButton.onclick = () => {
+    updateMarketplaceOrderDraftFromInputs();
+    openModal(configs.sales, appState.aiMarketplaceOrderDraft.sale, true);
+  };
+  const button = qs('#saveMarketplaceOrderBtn');
+  if (!button) return;
+  button.onclick = async () => {
+    updateMarketplaceOrderDraftFromInputs();
+    const draft = appState.aiMarketplaceOrderDraft;
+    if (!draft?.sale?.orderNumber && !confirm('No marketplace order number was extracted. Save anyway? Duplicate prevention will be weaker.')) return;
+    if (!draft?.sale?.saleDate) return toast('Sale Date is required. Enter the order date shown on the marketplace receipt before saving.');
+    if ((draft?.detectedOrderNumbers || []).length > 1) return toast('This batch contains multiple orders. Analyze and save one order at a time.');
+    if (!confirm('Save this reviewed paid marketplace Sale, link the uploaded proof, and create the optional completed Job? No estimate, invoice, or AR row will be created.')) return;
+    button.disabled = true;
+    button.textContent = 'Saving paid order...';
+    try {
+      const form = new FormData();
+      form.append('saleJson', JSON.stringify(draft.sale));
+      form.append('jobJson', JSON.stringify(draft.job || {}));
+      form.append('customerJson', JSON.stringify(draft.customer || {}));
+      form.append('createJob', String(qs('#marketplaceCreateJob')?.checked === true));
+      form.append('saveCustomerContact', String(qs('#marketplaceSaveCustomerContact')?.checked !== false));
+      form.append('detectedOrderNumbersJson', JSON.stringify(draft.detectedOrderNumbers || []));
+      (files || []).forEach(file => form.append('files', file, file.name));
+      const response = await fetch('/api/ai/operations/marketplace-order-import/save', { method: 'POST', body: form });
+      const saved = await response.json();
+      if (!response.ok) throw new Error(saved.message || `Save failed: ${response.status}`);
+      appState.aiMarketplaceOrderDraft = null;
+      qs('#aiMarketplaceOrderResult').innerHTML = `${renderOperationReceipt(saved.receipt)}<div class="callout"><strong>Paid marketplace order saved</strong><p>Created Sale #${Number(saved.sale?.id || 0)}${saved.customer ? `, ${escapeHtml(String(saved.customerSaveAction || 'saved').toLowerCase())} customer contact ${escapeHtml(saved.customer.name || '')}` : ''}${saved.job ? `, completed Job #${Number(saved.job.id)}` : ''}, and ${(saved.auditDocuments || []).length} linked proof document(s). No estimate, invoice, or AR row was created.</p><div class="actions"><button class="primary-button" onclick="openAiOperationRecord('sales',${Number(saved.sale?.id || 0)})">Open Sale</button>${saved.customer ? `<button class="ghost-button" onclick="openAiOperationRecord('parties',${Number(saved.customer.id)})">Open Customer Contact</button>` : ''}${saved.job ? `<button class="ghost-button" onclick="openAiOperationRecord('customerJobs',${Number(saved.job.id)})">Open Job</button>` : ''}</div></div>`;
+      toast('Paid marketplace order saved and proof linked.');
+    } catch (err) {
+      toast(`Marketplace order save failed: ${friendlyApiError(err.message)}`);
+      button.disabled = false;
+      button.textContent = 'Save Paid Sale + Link Proof';
+    }
+  };
+}
+
+function bindSlicerDraftButton() {
+  const button = qs('#openSlicerProductDraftBtn');
+  if (button) button.onclick = () => openModal(configs.products, appState.aiSlicerDraft.productPrefill, true);
+}
+
+function bindJobPlanActionsButton() {
+  const button = qs('#createAiJobActionsBtn');
+  if (!button) return;
+  button.onclick = async () => {
+    if (!confirm('Create these reviewed job-plan tasks as Action Items?')) return;
+    button.disabled = true;
+    try {
+      const created = await api('/api/ai/operations/job-plan/actions', { method: 'POST', body: JSON.stringify({ jobName: appState.aiJobPlanDraft.jobName, tasks: appState.aiJobPlanDraft.tasks }) });
+      toast(created.length
+        ? `Created ${created.length} new Action Item${created.length === 1 ? '' : 's'}.`
+        : 'No new Action Items created; the same Job Planner tasks are already open.');
+    } catch (err) { toast(`Action creation failed: ${friendlyApiError(err.message)}`); }
+    finally { button.disabled = false; }
+  };
+}
+
+function bindListingCopyButton() {
+  const button = qs('#copyAiListingBtn');
+  if (!button) return;
+  button.onclick = async () => {
+    const listing = appState.aiListingDraft?.listing || {};
+    const text = `${listing.title || ''}\n\n${listing.description || ''}\n\nHighlights:\n${(listing.highlights || []).map(x => `- ${x}`).join('\n')}\n\nTags: ${(listing.tags || []).join(', ')}\n\nPersonalization:\n${listing.personalizationInstructions || ''}`.trim();
+    await navigator.clipboard?.writeText(text);
+    toast('Listing text copied.');
+  };
+}
+
+window.openAiOperationRecord = async (route, id) => {
+  if (route === 'invoiceRecords') return showPage('invoiceRecords');
+  await openLedgerEntityRecord(route, id);
+};
 
 async function renderAiReviewCenter(el) {
   const [status, localReview, localAiStatus] = await Promise.all([
@@ -2725,6 +3696,7 @@ async function renderAiReviewCenter(el) {
       </div>
       <div class="hero-actions">
         <button id="modelAssistReviewBtn" class="primary-button">${localAiStatus?.modelReady ? 'Explain with Local AI' : 'Start Local AI to Explain'}</button>
+        <button class="ghost-button dark" onclick="showPage('aiOperations'); setTimeout(()=>document.getElementById('aiReconciliationCard')?.scrollIntoView({behavior:'smooth'}),120)">Duplicate Check</button>
         <button class="ghost-button dark" onclick="showPage('localAi')">Local AI Controls</button>
         <button class="primary-button" onclick="showPage('aiEstimate')">Draft an Estimate</button>
         <button class="ghost-button dark" onclick="showPage('taxPrep')">Open Tax Prep</button>
@@ -2754,7 +3726,7 @@ async function renderAiReviewCenter(el) {
       </section>` : ''}
     <div class="page-head">
       <div><h2>Recommended Review</h2><p>Generated ${escapeHtml(generated)}. Evidence is limited to a few examples so the list stays readable.</p></div>
-      <div class="actions"><button class="ghost-button" onclick="showPage('aiReview', { replace: true })">Refresh Review</button></div>
+      <div class="actions"><button class="primary-button" onclick="syncVerifiedFindingsToActions()">Sync Verified Findings to Actions</button><button class="ghost-button" onclick="showPage('aiReview', { replace: true })">Refresh Review</button></div>
     </div>
     <section class="ai-review-center-list">
       ${items.length ? items.map(renderAiReviewItem).join('') : emptyState('No review recommendations.', 'The current active ledger rows passed the review-center checks.')}
@@ -2764,7 +3736,7 @@ async function renderAiReviewCenter(el) {
       <div class="help-list">
         <div class="help-item"><strong>Deterministic findings stay authoritative</strong><p>The review list comes from local repeatable checks. It does not depend on a model and remains available when Local AI is off.</p></div>
         <div class="help-item"><strong>Optional local-model explanation</strong><p>Click Explain with Local AI to send only the already-generated review findings to your loaded LM Studio model. Nothing leaves this computer.</p></div>
-        <div class="help-item"><strong>No automatic writes</strong><p>The model can summarize and prioritize, but it cannot change, save, file, post, or send any ledger record.</p></div>
+        <div class="help-item"><strong>No automatic writes</strong><p>The model can summarize and prioritize, but it cannot change, save, file, post, or send any ledger record. The separate Sync button creates deduplicated Action Items from deterministic findings only after you confirm.</p></div>
       </div>
     </div>`;
 
@@ -2940,7 +3912,7 @@ function renderAiReviewItem(item) {
 async function renderGlobalSearch(el) {
   const query = (qs('#globalSearch').value || '').trim().toLowerCase();
   if (!query) {
-    el.innerHTML = `<div class="page-head"><div><h2>Global Search</h2><p>Search customer names, invoice numbers, order numbers, vendors, notes, and proof references across the ledger.</p></div></div>${emptyState('Start typing above.', 'Results appear here as you search.')}`;
+    el.innerHTML = `<div class="page-head"><div><h2>Global Search</h2><p>Search customer names, invoice numbers, order numbers, vendors, notes, and proof references across the ledger.</p></div><div class="actions"><button class="ghost-button" onclick="showPage('aiOperations'); setTimeout(()=>document.getElementById('aiLedgerSearchCard')?.scrollIntoView({behavior:'smooth'}),120)">Ask the Ledger with AI</button></div></div>${emptyState('Start typing above.', 'Results appear here as you search.')}`;
     return;
   }
 
@@ -2953,7 +3925,7 @@ async function renderGlobalSearch(el) {
   }));
   const results = entries.flat();
   el.innerHTML = `
-    <div class="page-head"><div><h2>Search Results</h2><p>${results.length} result${results.length === 1 ? '' : 's'} for "${escapeHtml(query)}".</p></div></div>
+    <div class="page-head"><div><h2>Search Results</h2><p>${results.length} result${results.length === 1 ? '' : 's'} for "${escapeHtml(query)}".</p></div><div class="actions"><button class="ghost-button" onclick="showPage('aiOperations'); setTimeout(()=>document.getElementById('aiLedgerSearchCard')?.scrollIntoView({behavior:'smooth'}),120)">Ask the Ledger with AI</button></div></div>
     <div class="search-results">
       ${results.length ? results.map(resultCard).join('') : emptyState('No results found.', 'Try a customer, invoice number, order number, vendor, or file name.')}
     </div>`;
@@ -4313,9 +5285,12 @@ function renderHelp(el) {
     ['Invoice Records', 'Saved estimate/invoice PDFs from the unified database. Open, duplicate, convert, archive, export, and review document records here.'],
     ['Job Timeline', 'The story view. It chains estimates, jobs, invoices, payments, proof, and cleanup actions by customer/project.'],
     ['AI Estimate Intake', 'Combine pasted requests, public product/source URLs, PDF or DOCX documents, product/reference pictures, and text files to create structured estimate items in an unsaved draft. Pricing rules come from AiEstimateInstructions.json.'],
+    ['AI Operations', 'Duplicate/reconciliation checking, MakerWorld or any-site Product importing, job planning, slicer reading, listing writing, and read-only ledger questions. Every result labels what it read and what it can write.'],
     ['AI Review Center', 'Read-only deterministic review with an optional, explicit LM Studio explanation and prioritization step.'],
     ['Local AI Power', 'Choose a downloaded LM Studio model, start or stop the loopback-only server, and monitor whether the server and model are ready.'],
     ['Document Intake', 'The inbox for proof files. Upload PDFs, receipts, screenshots, CSVs, and notes before linking them to a business record.'],
+    ['Communications', 'Customer conversation history for calls, texts, emails, approvals, questions, and due follow-ups.'],
+    ['Printer Queue', 'Production board for assigning printers, scheduling jobs, and tracking progress, failures, and completion.'],
     ['Sales', 'Money that came in. Etsy orders and paid direct invoices live here for revenue/tax reporting.'],
     ['AR Ledger', 'Money customers owe you. This tracks unpaid or paid direct invoices as receivables. It is the invoice-money tracker.'],
     ['AP Bills', 'Money you owe vendors but have not paid yet.'],
@@ -4348,6 +5323,7 @@ function renderHelp(el) {
       ['invoiceRecords', 'Invoice Records', 'Find documents', 'Open saved estimates/invoices, convert estimates, duplicate records, or export.'],
       ['jobTimeline', 'Job Timeline', 'See the story', 'Review the full chain: estimate, job, invoice, payment, proof, and actions.'],
       ['aiEstimate', 'AI Estimate Intake', 'Draft from mixed sources', 'Combine customer text, public source URLs, documents, and pictures; review the generated line items, then open an unsaved estimate draft.'],
+      ['aiOperations', 'AI Operations', 'Import, plan, reconcile, and write', 'Start with duplicate checking, then import Products from any public site, plan jobs, read slicer data, write listings, or ask the ledger.'],
       ['documentIntake', 'Document Intake', 'Upload proof', 'Use this when the file comes first. Then link it to the record it proves.']
     ]],
     ['Books: money ledgers', [
@@ -4359,6 +5335,8 @@ function renderHelp(el) {
     ]],
     ['Operations: people and work', [
       ['customerJobs', 'Customer Jobs', 'Track the work', 'Use this for make/design status and project history.'],
+      ['communications', 'Communications', 'Track the conversation', 'Log customer messages, approvals, questions, and follow-ups. Due follow-ups appear in AI Review.'],
+      ['printerQueue', 'Printer Queue', 'Run production', 'Assign printers, schedule jobs, track progress and failures, and complete production.'],
       ['customers', 'Customers', 'Customer history', 'Click a customer to see their jobs, sales, AR, PDFs, and proof.'],
       ['vendors', 'Vendors', 'Vendor history', 'Click a vendor to see expenses, bills, assets, and proof tied to them.'],
       ['products', 'Products / Costing', 'Reuse pricing data', 'Store products and cost assumptions so quotes/invoices can prefill.'],
@@ -4369,7 +5347,7 @@ function renderHelp(el) {
       ['aiReview', 'AI Review Center', 'Prioritize cleanup', 'See a read-only worklist with reasons, evidence, and links to the relevant ledger.'],
       ['localAi', 'Local AI Power', 'Start private AI', 'Select a downloaded LM Studio model, start it only when needed, and monitor its local-only status.'],
       ['auditDocs', 'Audit Docs', 'View proof files', 'Open uploaded PDFs/images/files and see which record they support.'],
-      ['actions', 'Actions', 'Finish cleanup', 'Tasks can be created by you or by the app when data needs review.'],
+      ['actions', 'Actions', 'Finish cleanup', 'Add tasks manually, confirm Job Planner tasks, or explicitly sync verified review/reconciliation findings.'],
       ['taxPrep', 'Tax Prep', 'Prepare filing exports', 'Review income, expenses, proof gaps, and export CSVs for filing.'],
       ['taxObligations', 'Tax Obligations', 'Track filings and payments', 'Confirm what applies, then record due dates, amounts, confirmation numbers, and proof.'],
       ['mileage', 'Mileage Log', 'Track business driving', 'Record business purpose and miles while details are fresh.'],
@@ -4403,6 +5381,7 @@ function renderHelp(el) {
       ${assistanceLegend()}
       <div class="ai-guide-grid">
         ${aiTouchCard('AI model', 'AI Estimate Intake', 'Only sources you add to intake plus AiEstimateInstructions.json.', 'Returns a preview and unsaved draft with a provenance note. It never silently saves or sends.', 'A request is spread across messages, email, public source URLs, documents, pictures, or notes.')}
+        ${aiTouchCard('AI model + local rules', 'AI Operations', 'Only selected ledger records or the URLs/files/text/pictures you explicitly add to a tool.', 'Drafts and read-only findings by default. Job-plan tasks and verified finding Action Items require separate explicit confirmed buttons; nothing silently saves.', 'Import Products from MakerWorld or any public site, catch duplicates, plan production, read slicer output, write listings, or ask ledger questions.')}
         ${aiTouchCard('Local rules', 'Estimate fallback, AI Review Center, and Document Intake suggestions', 'Supplied estimate sources or active local ledger/proof metadata, depending on the feature.', 'Creates drafts, findings, or suggestions for review. It does not silently post ledger records.', 'You need a fast first pass, cleanup priorities, or help routing proof.')}
         ${aiTouchCard('Automation', 'Ledger synchronization', 'A record you explicitly save or mark paid.', 'Updates related Job, AR, Sale, or Audit Doc records according to fixed app rules.', 'You save an estimate/invoice, record payment, or upload proof.')}
       </div>
@@ -4574,10 +5553,14 @@ qs('#modalClose').onclick = closeModal;
 qs('#modalCancel').onclick = e => { e.preventDefault(); closeModal(); };
 qs('#modalBackdrop').onclick = closeModal;
 qs('#modalSave').onclick = e => { e.preventDefault(); saveModal(); };
+qs('#breakdownModalClose').onclick = closeDashboardBreakdown;
+qs('#breakdownModalDone').onclick = closeDashboardBreakdown;
+qs('#breakdownModalBackdrop').onclick = closeDashboardBreakdown;
 
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape') {
     closeModal();
+    closeDashboardBreakdown();
     closeMobileSidebar();
   }
 });

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>EPATA Business Ledger</title>
-  <link rel="stylesheet" href="/css/site.css?v=20260609-assistance-source">
+  <link rel="stylesheet" href="/css/site.css?v=20260612-communications-printer-queue">
 </head>
 <body>
   <div id="testModeBanner" class="test-mode-banner hidden">⚠ TEST MODE — separate test database. Changes here do NOT affect your real data.</div>
@@ -66,9 +66,24 @@
     </div>
   </section>
 
+  <div id="breakdownModalBackdrop" class="modal-backdrop hidden" role="presentation"></div>
+  <section id="breakdownModal" class="modal breakdown-modal hidden" role="dialog" aria-modal="true" aria-labelledby="breakdownModalTitle">
+    <div class="modal-header">
+      <div>
+        <h2 id="breakdownModalTitle"></h2>
+        <p id="breakdownModalHelp"></p>
+      </div>
+      <button class="icon-button" id="breakdownModalClose" aria-label="Close">×</button>
+    </div>
+    <div id="breakdownModalBody" class="breakdown-modal-body"></div>
+    <div class="modal-footer">
+      <button id="breakdownModalDone" class="primary-button">Done</button>
+    </div>
+  </section>
+
   <div id="toast" class="toast hidden"></div>
   <div id="tooltip" class="floating-tooltip hidden" role="tooltip"></div>
 
-  <script src="/js/app.js?v=20260609-assistance-source"></script>
+  <script src="/js/app.js?v=20260612-communications-printer-queue"></script>
 </body>
 </html>

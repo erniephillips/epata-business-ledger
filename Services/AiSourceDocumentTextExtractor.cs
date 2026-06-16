@@ -2,6 +2,7 @@ using System.IO.Compression;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
+using UglyToad.PdfPig;
 
 namespace EPATA.BusinessLedger.Services;
 
@@ -90,6 +91,23 @@ public sealed class AiSourceDocumentTextExtractor
 
     private static string ExtractPdf(byte[] bytes)
     {
+        try
+        {
+            using var document = PdfDocument.Open(bytes);
+            var pages = document.GetPages()
+                .Select(page => string.Join(" ", page.GetWords().Select(word => word.Text)))
+                .Where(page => !string.IsNullOrWhiteSpace(page))
+                .ToList();
+            if (pages.Count > 0)
+            {
+                return string.Join(Environment.NewLine + Environment.NewLine, pages);
+            }
+        }
+        catch
+        {
+            // Fall through to the limited operator parser for malformed or unsupported PDFs.
+        }
+
         var raw = Encoding.Latin1.GetString(bytes);
         var pieces = ExtractPdfTextOperators(raw).ToList();
 

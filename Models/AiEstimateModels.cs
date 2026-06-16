@@ -13,6 +13,7 @@ public sealed class AiEstimateDraftResult
 {
     public string Provider { get; set; } = "Local rules";
     public bool UsedAi { get; set; }
+    public bool UsedSourcePlanning { get; set; }
     public AiExecutionReceipt ExecutionReceipt { get; set; } = new();
     public string SourceName { get; set; } = "Pasted text";
     public string InstructionsPath { get; set; } = string.Empty;
@@ -33,6 +34,9 @@ public sealed class AiExecutionReceipt
     public int? PromptTokens { get; set; }
     public int? CompletionTokens { get; set; }
     public int? TotalTokens { get; set; }
+    public int SourceCharacters { get; set; }
+    public int ModelInputCharacters { get; set; }
+    public bool SourceWasCondensed { get; set; }
 }
 
 public sealed class AiEstimatePrefill
@@ -89,6 +93,7 @@ public sealed class AiEstimateLineItem
 
 public sealed class AiEstimatePricingSummary
 {
+    public string PricingMode { get; set; } = "Calculator cost basis";
     public bool UsedCalculatorInputs { get; set; }
     public bool RequiresPricingReview { get; set; } = true;
     public decimal Setup { get; set; }

@@ -22,10 +22,17 @@ builder.Services.AddDbContext<AppDbContext>(options =>
 
 builder.Services.AddScoped<DashboardService>();
 builder.Services.AddScoped<AiBusinessReviewService>();
+builder.Services.AddScoped<ActionItemAutomationService>();
 builder.Services.AddScoped<TaxPlanningService>();
 builder.Services.AddScoped<AiSourceDocumentTextExtractor>();
 builder.Services.AddHttpClient<InvoiceAppImportService>();
 builder.Services.AddHttpClient<LocalAiService>(client => client.Timeout = TimeSpan.FromMinutes(10));
+builder.Services.AddHttpClient<AiOperationsService>(client =>
+    {
+        client.Timeout = TimeSpan.FromMinutes(10);
+        client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 EPATA-Business-Ledger/1.0");
+    })
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.AddHttpClient<AiEstimateService>(client => client.Timeout = TimeSpan.FromMinutes(10))
     .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });
 builder.Services.ConfigureHttpJsonOptions(options =>
@@ -70,6 +77,8 @@ app.UseStaticFiles(new StaticFileOptions
 MapCrud<Party>(app, "parties");
 MapCrud<Sale>(app, "sales");
 MapCrud<CustomerJob>(app, "customer-jobs");
+MapCrud<CustomerCommunication>(app, "customer-communications");
+MapCrud<PrinterQueueItem>(app, "printer-queue-items");
 MapCrud<ReceivableInvoice>(app, "receivable-invoices");
 MapCrud<Bill>(app, "bills");
 MapCrud<Expense>(app, "expenses");
@@ -109,11 +118,213 @@ app.MapGet("/api/ai/review/status", (AiBusinessReviewService review) => Results.
 
 app.MapGet("/api/ai/review", async (AiBusinessReviewService review) => Results.Ok(await review.BuildAsync()));
 
+app.MapGet("/api/action-items/automation-preview", async (ActionItemAutomationService actions, CancellationToken cancellationToken) =>
+    Results.Ok(await actions.PreviewAsync(cancellationToken)));
+
+app.MapPost("/api/action-items/sync-findings", async (ActionItemAutomationService actions, CancellationToken cancellationToken) =>
+    Results.Ok(await actions.SyncAsync(cancellationToken)));
+
 app.MapPost("/api/ai/review/model", async Task<IResult> (AiBusinessReviewService review, CancellationToken cancellationToken) =>
 {
     try
     {
         return Results.Ok(await review.BuildModelAssistedAsync(cancellationToken));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { message = ex.Message });
+    }
+});
+
+app.MapGet("/api/ai/operations/status", async (AiOperationsService operations, CancellationToken cancellationToken) =>
+    Results.Ok(await operations.StatusAsync(cancellationToken)));
+
+app.MapGet("/api/ai/operations/reconciliation", async (AiOperationsService operations, CancellationToken cancellationToken) =>
+    Results.Ok(await operations.BuildReconciliationAsync(cancellationToken)));
+
+app.MapPost("/api/ai/operations/reconciliation/model", async Task<IResult> (AiOperationsService operations, CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return Results.Ok(await operations.ExplainReconciliationAsync(cancellationToken));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { message = ex.Message });
+    }
+});
+
+app.MapPost("/api/ai/operations/marketplace-order-import", async Task<IResult> (
+    HttpRequest request,
+    AiOperationsService operations,
+    AiSourceDocumentTextExtractor extractor,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var packet = await ReadAiOperationSourcePacketAsync(request, extractor, cancellationToken);
+        return Results.Ok(await operations.BuildMarketplaceOrderDraftAsync(packet, cancellationToken));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { message = ex.Message });
+    }
+});
+
+app.MapPost("/api/ai/operations/marketplace-order-import/save", async Task<IResult> (
+    HttpRequest request,
+    AiOperationsService operations,
+    IWebHostEnvironment env,
+    CancellationToken cancellationToken) =>
+{
+    if (!request.HasFormContentType)
+    {
+        return Results.BadRequest(new { message = "Marketplace order save must be sent as multipart/form-data." });
+    }
+    var storedPaths = new List<string>();
+    try
+    {
+        var form = await request.ReadFormAsync(cancellationToken);
+        var serializerOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
+        var sale = JsonSerializer.Deserialize<Sale>(form["saleJson"].FirstOrDefault() ?? string.Empty, serializerOptions)
+            ?? throw new InvalidOperationException("The reviewed Sale draft is missing or invalid.");
+        var jobText = form["jobJson"].FirstOrDefault();
+        var job = string.IsNullOrWhiteSpace(jobText) ? null : JsonSerializer.Deserialize<CustomerJob>(jobText, serializerOptions);
+        var customerText = form["customerJson"].FirstOrDefault();
+        var customer = string.IsNullOrWhiteSpace(customerText) ? null : JsonSerializer.Deserialize<Party>(customerText, serializerOptions);
+        var createJob = bool.TryParse(form["createJob"].FirstOrDefault(), out var parsedCreateJob) && parsedCreateJob;
+        var saveCustomerContact = !bool.TryParse(form["saveCustomerContact"].FirstOrDefault(), out var parsedSaveCustomerContact) || parsedSaveCustomerContact;
+        var detectedOrderNumbers = JsonSerializer.Deserialize<List<string>>(form["detectedOrderNumbersJson"].FirstOrDefault() ?? "[]", serializerOptions) ?? [];
+        var files = form.Files.Take(AiEstimateService.MaxUploadFiles).ToList();
+        if (files.Sum(file => file.Length) > AiEstimateService.MaxTotalUploadBytes)
+        {
+            throw new InvalidOperationException($"The selected files total more than {AiEstimateService.MaxTotalUploadBytes / 1024 / 1024} MB.");
+        }
+        var uploadDir = Path.Combine(env.ContentRootPath, "UploadedDocs");
+        Directory.CreateDirectory(uploadDir);
+        var proofs = new List<AiMarketplaceProof>();
+        foreach (var file in files)
+        {
+            if (file.Length <= 0) continue;
+            if (file.Length > AiEstimateService.MaxUploadFileBytes)
+            {
+                throw new InvalidOperationException($"{file.FileName} is larger than the {AiEstimateService.MaxUploadFileBytes / 1024 / 1024} MB per-file limit.");
+            }
+            var storedName = $"{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..8]}-{MakeSafeFileName(file.FileName)}";
+            var storedPath = Path.Combine(uploadDir, storedName);
+            await using (var stream = System.IO.File.Create(storedPath))
+            {
+                await file.CopyToAsync(stream, cancellationToken);
+            }
+            storedPaths.Add(storedPath);
+            proofs.Add(new AiMarketplaceProof(file.FileName, storedPath));
+        }
+        return Results.Ok(await operations.SaveMarketplaceOrderAsync(new AiMarketplaceOrderSaveRequest(
+            sale,
+            job,
+            customer,
+            createJob,
+            saveCustomerContact,
+            proofs,
+            detectedOrderNumbers), cancellationToken));
+    }
+    catch (Exception ex) when (ex is InvalidOperationException or JsonException or IOException)
+    {
+        foreach (var path in storedPaths)
+        {
+            try { System.IO.File.Delete(path); } catch { }
+        }
+        return Results.BadRequest(new { message = ex.Message });
+    }
+});
+
+app.MapPost("/api/ai/operations/product-import", async Task<IResult> (
+    HttpRequest request,
+    AiOperationsService operations,
+    AiSourceDocumentTextExtractor extractor,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var packet = await ReadAiOperationSourcePacketAsync(request, extractor, cancellationToken);
+        return Results.Ok(await operations.BuildProductDraftAsync(packet, cancellationToken));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { message = ex.Message });
+    }
+});
+
+app.MapPost("/api/ai/operations/job-plan", async Task<IResult> (
+    AiOperationsService operations,
+    AiJobPlanRequest request,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return Results.Ok(await operations.BuildJobPlanAsync(request, cancellationToken));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { message = ex.Message });
+    }
+});
+
+app.MapPost("/api/ai/operations/job-plan/actions", async Task<IResult> (
+    AiOperationsService operations,
+    AiJobPlanSaveRequest request,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return Results.Ok(await operations.CreateJobPlanActionsAsync(request, cancellationToken));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { message = ex.Message });
+    }
+});
+
+app.MapPost("/api/ai/operations/slicer-read", async Task<IResult> (
+    HttpRequest request,
+    AiOperationsService operations,
+    AiSourceDocumentTextExtractor extractor,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var packet = await ReadAiOperationSourcePacketAsync(request, extractor, cancellationToken);
+        return Results.Ok(await operations.ReadSlicerAsync(packet, cancellationToken));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { message = ex.Message });
+    }
+});
+
+app.MapPost("/api/ai/operations/listing", async Task<IResult> (
+    AiOperationsService operations,
+    AiListingRequest request,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return Results.Ok(await operations.BuildListingAsync(request, cancellationToken));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { message = ex.Message });
+    }
+});
+
+app.MapPost("/api/ai/operations/ask-ledger", async Task<IResult> (
+    AiOperationsService operations,
+    AiLedgerQuestionRequest request,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        return Results.Ok(await operations.AskLedgerAsync(request, cancellationToken));
     }
     catch (InvalidOperationException ex)
     {
@@ -585,6 +796,8 @@ app.MapGet("/api/export/{entity}", async (string entity, AppDbContext db, bool i
         "parties" or "customers" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.Parties.AsNoTracking(), includeArchived).ToListAsync())),
         "sales" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.Sales.AsNoTracking(), includeArchived).ToListAsync())),
         "customer-jobs" or "jobs" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.CustomerJobs.AsNoTracking(), includeArchived).ToListAsync())),
+        "customer-communications" or "communications" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.CustomerCommunications.AsNoTracking(), includeArchived).ToListAsync())),
+        "printer-queue-items" or "printer-queue" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.PrinterQueueItems.AsNoTracking(), includeArchived).ToListAsync())),
         "receivable-invoices" or "invoices" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.ReceivableInvoices.AsNoTracking(), includeArchived).ToListAsync())),
         "bills" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.Bills.AsNoTracking(), includeArchived).ToListAsync())),
         "expenses" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.Expenses.AsNoTracking(), includeArchived).ToListAsync())),
@@ -788,6 +1001,8 @@ static async Task<object> BuildJobTimelineAsync(AppDbContext db, string? q, stri
 
     var sales = await db.Sales.AsNoTracking().Where(x => !x.IsArchived).ToListAsync();
     var jobs = await db.CustomerJobs.AsNoTracking().Where(x => !x.IsArchived).ToListAsync();
+    var communications = await db.CustomerCommunications.AsNoTracking().Where(x => !x.IsArchived).ToListAsync();
+    var printerQueue = await db.PrinterQueueItems.AsNoTracking().Where(x => !x.IsArchived).ToListAsync();
     var receivables = await db.ReceivableInvoices.AsNoTracking().Where(x => !x.IsArchived).ToListAsync();
     var expenses = await db.Expenses.AsNoTracking().Where(x => !x.IsArchived).ToListAsync();
     var docs = await db.InvoiceDocuments.AsNoTracking().ToListAsync();
@@ -905,6 +1120,73 @@ static async Task<object> BuildJobTimelineAsync(AppDbContext db, string? q, stri
             job.Description ?? job.ProductName ?? job.JobName ?? "Customer job", job.InvoiceAmount ?? job.QuoteAmount, "customerJobs", job.Id, job.JobNumber ?? job.RelatedOrderNumber ?? job.RelatedInvoiceNumber, job.SourceProof, job.NeedsReview));
         if (string.IsNullOrWhiteSpace(job.SourceProof)) AddMissing(group, "Job needs proof or customer message");
         if (job.Status is "Lead" or "Quoted" or "Open" or "In Progress") AddMissing(group, $"Job still {job.Status}");
+    }
+
+    foreach (var communication in communications)
+    {
+        var group = GetTimelineGroup(
+            groups,
+            aliases,
+            communication.CustomerName,
+            communication.RelatedInvoiceNumber,
+            communication.RelatedOrderNumber,
+            communication.Subject ?? communication.RelatedJobNumber ?? communication.CustomerName,
+            "Communication");
+        group.FlowScore = Math.Max(group.FlowScore, 2);
+        group.WorkflowType = string.IsNullOrWhiteSpace(group.WorkflowType) ? "Customer Conversation" : group.WorkflowType;
+        group.Events.Add(new TimelineEventDto(
+            TimelineMoment(communication.OccurredAt, communication.UpdatedAtUtc, communication.CreatedAtUtc, communication.Id),
+            "Communication",
+            $"{communication.Direction} · {communication.Channel}",
+            communication.Subject ?? $"{communication.Channel} with {communication.CustomerName}",
+            communication.Summary,
+            null,
+            "communications",
+            communication.Id,
+            FirstFilled(communication.RelatedInvoiceNumber, communication.RelatedOrderNumber, communication.RelatedJobNumber),
+            communication.SourceProof,
+            communication.NeedsReview));
+        if (communication.FollowUpStatus.Equals("Open", StringComparison.OrdinalIgnoreCase))
+        {
+            AddMissing(group, communication.FollowUpDate.HasValue
+                ? $"Communication follow-up due {communication.FollowUpDate:yyyy-MM-dd}"
+                : "Communication follow-up is open");
+        }
+    }
+
+    foreach (var queueItem in printerQueue)
+    {
+        var group = GetTimelineGroup(
+            groups,
+            aliases,
+            queueItem.CustomerName,
+            queueItem.RelatedInvoiceNumber,
+            queueItem.RelatedOrderNumber,
+            queueItem.JobName,
+            "Printer Queue");
+        group.FlowScore = Math.Max(group.FlowScore, 3);
+        group.WorkflowType = string.IsNullOrWhiteSpace(group.WorkflowType) ? "Production Flow" : group.WorkflowType;
+        var timing = queueItem.Status.Equals("Completed", StringComparison.OrdinalIgnoreCase)
+            ? queueItem.CompletedAt
+            : queueItem.Status.Equals("Printing", StringComparison.OrdinalIgnoreCase)
+                ? queueItem.StartedAt
+                : queueItem.ScheduledStart ?? queueItem.QueueDate;
+        group.Events.Add(new TimelineEventDto(
+            TimelineMoment(timing, queueItem.UpdatedAtUtc, queueItem.CreatedAtUtc, queueItem.Id),
+            "Printer Queue",
+            queueItem.Status,
+            queueItem.JobName,
+            $"{queueItem.PrinterName ?? "Unassigned printer"} · {queueItem.Material ?? "Material TBD"} {queueItem.Color ?? string.Empty} · {queueItem.ProgressPercent:0}% complete",
+            null,
+            "printerQueue",
+            queueItem.Id,
+            FirstFilled(queueItem.RelatedInvoiceNumber, queueItem.RelatedOrderNumber),
+            queueItem.SourceProof,
+            queueItem.NeedsReview || queueItem.Status.Equals("Needs Attention", StringComparison.OrdinalIgnoreCase)));
+        if (queueItem.Status is "Queued" or "Ready" or "Printing" or "Paused" or "Needs Attention")
+        {
+            AddMissing(group, $"Production is {queueItem.Status}");
+        }
     }
 
     foreach (var expense in expenses)
@@ -1938,6 +2220,74 @@ static string GetSqliteDataDirectory(IConfiguration configuration, string conten
     return Path.GetDirectoryName(Path.GetFullPath(dataSource)) ?? Path.Combine(contentRootPath, "Data");
 }
 
+static async Task<AiOperationSourcePacket> ReadAiOperationSourcePacketAsync(
+    HttpRequest request,
+    AiSourceDocumentTextExtractor extractor,
+    CancellationToken cancellationToken)
+{
+    if (!request.HasFormContentType)
+    {
+        throw new InvalidOperationException("AI source uploads must be sent as multipart/form-data.");
+    }
+
+    var form = await request.ReadFormAsync(cancellationToken);
+    var sourceText = form["sourceText"].FirstOrDefault() ?? string.Empty;
+    var sourceName = form["sourceName"].FirstOrDefault() ?? "Mixed sources";
+    var urls = form["sourceUrls"]
+        .SelectMany(value => value?.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) ?? [])
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .Take(AiEstimateService.MaxSourceUrls)
+        .ToList();
+    var images = new List<AiEstimateImageInput>();
+    var warnings = new List<string>();
+    var files = form.Files.Take(AiEstimateService.MaxUploadFiles).ToList();
+    if (form.Files.Count > AiEstimateService.MaxUploadFiles)
+    {
+        warnings.Add($"Only the first {AiEstimateService.MaxUploadFiles} files were read.");
+    }
+    if (files.Sum(file => file.Length) > AiEstimateService.MaxTotalUploadBytes)
+    {
+        throw new InvalidOperationException($"The selected files total more than {AiEstimateService.MaxTotalUploadBytes / 1024 / 1024} MB.");
+    }
+
+    foreach (var file in files)
+    {
+        if (file.Length <= 0) continue;
+        if (file.Length > AiEstimateService.MaxUploadFileBytes)
+        {
+            throw new InvalidOperationException($"{file.FileName} is larger than the {AiEstimateService.MaxUploadFileBytes / 1024 / 1024} MB per-file limit.");
+        }
+
+        if (file.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+        {
+            await using var memory = new MemoryStream();
+            await file.CopyToAsync(memory, cancellationToken);
+            images.Add(new AiEstimateImageInput(file.FileName, file.ContentType, Convert.ToBase64String(memory.ToArray())));
+            continue;
+        }
+
+        try
+        {
+            var extraction = await extractor.ExtractAsync(file, cancellationToken);
+            if (!string.IsNullOrWhiteSpace(extraction.Text))
+            {
+                sourceText = string.Join("\n\n", new[] { sourceText, $"SOURCE FILE: {file.FileName}\n{extraction.Text}" }.Where(x => !string.IsNullOrWhiteSpace(x)));
+            }
+            if (!string.IsNullOrWhiteSpace(extraction.Warning)) warnings.Add(extraction.Warning);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or System.Xml.XmlException)
+        {
+            warnings.Add($"{file.FileName} could not be read as a valid {Path.GetExtension(file.FileName).TrimStart('.').ToUpperInvariant()} document.");
+        }
+    }
+
+    if (sourceText.Length > AiEstimateService.MaxCombinedTextCharacters)
+    {
+        throw new InvalidOperationException($"The combined extracted text is too large. Keep it under {AiEstimateService.MaxCombinedTextCharacters:N0} characters.");
+    }
+    return new AiOperationSourcePacket(sourceText, urls, images, warnings, sourceName);
+}
+
 static void MapCrud<TEntity>(WebApplication app, string route) where TEntity : AuditableEntity
 {
     var group = app.MapGroup($"/api/{route}");
@@ -2161,6 +2511,34 @@ static void NormalizeCrudEntity<TEntity>(TEntity entity) where TEntity : Auditab
                 }
             }
             break;
+        case CustomerCommunication communication:
+            communication.OccurredAt ??= DateTime.Now;
+            if (!communication.FollowUpStatus.Equals("Open", StringComparison.OrdinalIgnoreCase))
+            {
+                communication.FollowUpDate = communication.FollowUpStatus.Equals("Done", StringComparison.OrdinalIgnoreCase)
+                    ? communication.FollowUpDate
+                    : null;
+            }
+            break;
+        case PrinterQueueItem queue:
+            queue.Quantity = Math.Max(1, queue.Quantity);
+            queue.PlateCount = Math.Max(1, queue.PlateCount);
+            queue.FailureCount = Math.Max(0, queue.FailureCount);
+            queue.EstimatedHours = ClampMoney(queue.EstimatedHours);
+            queue.ActualHours = ClampMoney(queue.ActualHours);
+            queue.ProgressPercent = Math.Clamp(queue.ProgressPercent, 0, 100);
+            if (queue.Status.Equals("Printing", StringComparison.OrdinalIgnoreCase))
+            {
+                queue.StartedAt ??= DateTime.Now;
+                queue.ProgressPercent = Math.Max(1, queue.ProgressPercent);
+            }
+            if (queue.Status.Equals("Completed", StringComparison.OrdinalIgnoreCase))
+            {
+                queue.CompletedAt ??= DateTime.Now;
+                queue.ProgressPercent = 100;
+                queue.NeedsReview = false;
+            }
+            break;
         case Asset asset:
             asset.Cost = ClampMoney(asset.Cost);
             asset.BusinessUsePercent = ClampPercent(asset.BusinessUsePercent);
@@ -2195,6 +2573,17 @@ static void ApplyDefaultClockToBusinessDates(AuditableEntity entity)
             job.JobDate = AddClockIfMidnight(job.JobDate, clock, 5);
             job.DueDate = AddClockIfMidnight(job.DueDate, clock, 10);
             job.ShipByDate = AddClockIfMidnight(job.ShipByDate, clock, 15);
+            break;
+        case CustomerCommunication communication:
+            communication.OccurredAt = AddClockIfMidnight(communication.OccurredAt, clock, 0);
+            communication.FollowUpDate = AddClockIfMidnight(communication.FollowUpDate, clock, 10);
+            break;
+        case PrinterQueueItem queue:
+            queue.QueueDate = AddClockIfMidnight(queue.QueueDate, clock, 0);
+            queue.ScheduledStart = AddClockIfMidnight(queue.ScheduledStart, clock, 5);
+            queue.StartedAt = AddClockIfMidnight(queue.StartedAt, clock, 10);
+            queue.EstimatedFinish = AddClockIfMidnight(queue.EstimatedFinish, clock, 15);
+            queue.CompletedAt = AddClockIfMidnight(queue.CompletedAt, clock, 20);
             break;
         case ReceivableInvoice invoice:
             invoice.InvoiceDate = AddClockIfMidnight(invoice.InvoiceDate, clock, 0);
@@ -2243,6 +2632,23 @@ static async Task ApplyCrudSideEffectsAsync<TEntity>(AppDbContext db, TEntity en
     if (entity is ReceivableInvoice invoice)
     {
         await SyncManualReceivableInvoiceToSaleAsync(db, invoice);
+    }
+    if (entity is PrinterQueueItem queue && queue.CustomerJobId.HasValue)
+    {
+        var job = await db.CustomerJobs.FirstOrDefaultAsync(x => x.Id == queue.CustomerJobId.Value && !x.IsArchived);
+        if (job is not null)
+        {
+            if (queue.Status.Equals("Printing", StringComparison.OrdinalIgnoreCase)
+                && job.Status is not ("Paid" or "Completed" or "Cancelled"))
+            {
+                job.Status = "In Progress";
+            }
+            else if (queue.Status.Equals("Completed", StringComparison.OrdinalIgnoreCase)
+                && job.Status is not ("Paid" or "Cancelled"))
+            {
+                job.Status = "Completed";
+            }
+        }
     }
 }
 
@@ -3158,6 +3564,64 @@ static async Task EnsureUnifiedInvoiceTablesAsync(AppDbContext db)
         );
         """);
 
+    await db.Database.ExecuteSqlRawAsync("""
+        CREATE TABLE IF NOT EXISTS "CustomerCommunications" (
+            "Id" INTEGER NOT NULL CONSTRAINT "PK_CustomerCommunications" PRIMARY KEY AUTOINCREMENT,
+            "OccurredAt" TEXT NULL,
+            "CustomerName" TEXT NOT NULL,
+            "Direction" TEXT NOT NULL DEFAULT 'Outgoing',
+            "Channel" TEXT NOT NULL DEFAULT 'Email',
+            "Subject" TEXT NULL,
+            "Summary" TEXT NOT NULL,
+            "CustomerJobId" INTEGER NULL,
+            "RelatedJobNumber" TEXT NULL,
+            "RelatedOrderNumber" TEXT NULL,
+            "RelatedInvoiceNumber" TEXT NULL,
+            "FollowUpDate" TEXT NULL,
+            "FollowUpStatus" TEXT NOT NULL DEFAULT 'None',
+            "SourceProof" TEXT NULL,
+            "NeedsReview" INTEGER NOT NULL DEFAULT 0,
+            "Notes" TEXT NULL,
+            "CreatedAtUtc" TEXT NOT NULL,
+            "UpdatedAtUtc" TEXT NOT NULL,
+            "IsArchived" INTEGER NOT NULL DEFAULT 0
+        );
+        """);
+
+    await db.Database.ExecuteSqlRawAsync("""
+        CREATE TABLE IF NOT EXISTS "PrinterQueueItems" (
+            "Id" INTEGER NOT NULL CONSTRAINT "PK_PrinterQueueItems" PRIMARY KEY AUTOINCREMENT,
+            "QueueDate" TEXT NULL,
+            "Priority" TEXT NOT NULL DEFAULT 'Normal',
+            "Status" TEXT NOT NULL DEFAULT 'Queued',
+            "PrinterName" TEXT NULL,
+            "CustomerJobId" INTEGER NULL,
+            "CustomerName" TEXT NULL,
+            "JobName" TEXT NOT NULL,
+            "RelatedOrderNumber" TEXT NULL,
+            "RelatedInvoiceNumber" TEXT NULL,
+            "ProductName" TEXT NULL,
+            "Material" TEXT NULL,
+            "Color" TEXT NULL,
+            "Quantity" INTEGER NOT NULL DEFAULT 1,
+            "PlateCount" INTEGER NOT NULL DEFAULT 1,
+            "EstimatedHours" TEXT NULL,
+            "ActualHours" TEXT NULL,
+            "ProgressPercent" TEXT NOT NULL DEFAULT '0.0',
+            "ScheduledStart" TEXT NULL,
+            "StartedAt" TEXT NULL,
+            "EstimatedFinish" TEXT NULL,
+            "CompletedAt" TEXT NULL,
+            "FailureCount" INTEGER NOT NULL DEFAULT 0,
+            "SourceProof" TEXT NULL,
+            "NeedsReview" INTEGER NOT NULL DEFAULT 0,
+            "Notes" TEXT NULL,
+            "CreatedAtUtc" TEXT NOT NULL,
+            "UpdatedAtUtc" TEXT NOT NULL,
+            "IsArchived" INTEGER NOT NULL DEFAULT 0
+        );
+        """);
+
     await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_InvoiceDocuments_DocNumber\" ON \"InvoiceDocuments\" (\"DocNumber\");");
     await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_InvoiceDocuments_UpdatedAt\" ON \"InvoiceDocuments\" (\"UpdatedAt\");");
     await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_InvoiceLineItems_InvoiceDocumentId\" ON \"InvoiceLineItems\" (\"InvoiceDocumentId\");");
@@ -3166,6 +3630,11 @@ static async Task EnsureUnifiedInvoiceTablesAsync(AppDbContext db)
     await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_TaxObligations_DueDate\" ON \"TaxObligations\" (\"DueDate\");");
     await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_TaxObligations_TaxYear_Title_Period\" ON \"TaxObligations\" (\"TaxYear\", \"Title\", \"Period\");");
     await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_MileageLogs_TripDate\" ON \"MileageLogs\" (\"TripDate\");");
+    await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_CustomerCommunications_CustomerName\" ON \"CustomerCommunications\" (\"CustomerName\");");
+    await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_CustomerCommunications_OccurredAt\" ON \"CustomerCommunications\" (\"OccurredAt\");");
+    await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_PrinterQueueItems_Status\" ON \"PrinterQueueItems\" (\"Status\");");
+    await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_PrinterQueueItems_PrinterName\" ON \"PrinterQueueItems\" (\"PrinterName\");");
+    await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_PrinterQueueItems_CustomerJobId\" ON \"PrinterQueueItems\" (\"CustomerJobId\");");
 
     // ── Schema migrations for new fields (safe on existing DBs) ──────────────
     var alterations = new[]

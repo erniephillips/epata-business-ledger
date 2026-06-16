@@ -195,7 +195,28 @@ public sealed class LocalAiService(AppDbContext db, HttpClient httpClient)
 
     public async Task<T> CompleteJsonAsync<T>(string systemPrompt, string userPrompt, CancellationToken cancellationToken = default)
     {
-        var content = await CompleteTextAsync(systemPrompt, userPrompt, cancellationToken);
+        var content = await SendChatAsync(systemPrompt, userPrompt, typeof(T), cancellationToken);
+        return DeserializeJson<T>(content);
+    }
+
+    public async Task<T> CompleteJsonWithImagesAsync<T>(
+        string systemPrompt,
+        string userPrompt,
+        IReadOnlyCollection<AiEstimateImageInput> images,
+        CancellationToken cancellationToken = default)
+    {
+        var content = new List<object> { new { type = "text", text = userPrompt } };
+        content.AddRange(images.Take(10).Select(image => (object)new
+        {
+            type = "image_url",
+            image_url = new { url = $"data:{image.ContentType};base64,{image.Base64Data}" }
+        }));
+        var response = await SendChatAsync(systemPrompt, content, typeof(T), cancellationToken);
+        return DeserializeJson<T>(response);
+    }
+
+    private static T DeserializeJson<T>(string content)
+    {
         try
         {
             return JsonSerializer.Deserialize<T>(JsonCandidate(content), JsonOptions)
@@ -208,6 +229,24 @@ public sealed class LocalAiService(AppDbContext db, HttpClient httpClient)
     }
 
     public async Task<string> CompleteTextAsync(string systemPrompt, string userPrompt, CancellationToken cancellationToken = default)
+        => await SendChatAsync(systemPrompt, userPrompt, null, cancellationToken);
+
+    public async Task<string> CompleteTextWithImagesAsync(
+        string systemPrompt,
+        string userPrompt,
+        IReadOnlyCollection<AiEstimateImageInput> images,
+        CancellationToken cancellationToken = default)
+    {
+        var content = new List<object> { new { type = "text", text = userPrompt } };
+        content.AddRange(images.Take(10).Select(image => (object)new
+        {
+            type = "image_url",
+            image_url = new { url = $"data:{image.ContentType};base64,{image.Base64Data}" }
+        }));
+        return await SendChatAsync(systemPrompt, content, null, cancellationToken);
+    }
+
+    private async Task<string> SendChatAsync(string systemPrompt, object userContent, Type? responseType, CancellationToken cancellationToken)
     {
         var connection = await GetReadyConnectionAsync(cancellationToken)
             ?? throw new InvalidOperationException("Local AI is off or no model is loaded. Open Local AI, select a model, and click Start.");
@@ -215,11 +254,13 @@ public sealed class LocalAiService(AppDbContext db, HttpClient httpClient)
         {
             model = connection.Model,
             temperature = 0.1,
-            response_format = new { type = "text" },
+            max_tokens = 4096,
+            reasoning_effort = "none",
+            response_format = BuildResponseFormat(responseType),
             messages = new object[]
             {
                 new { role = "system", content = systemPrompt },
-                new { role = "user", content = userPrompt }
+                new { role = "user", content = userContent }
             }
         };
         using var message = new HttpRequestMessage(HttpMethod.Post, connection.ChatEndpoint)
@@ -234,10 +275,82 @@ public sealed class LocalAiService(AppDbContext db, HttpClient httpClient)
         }
 
         using var envelope = JsonDocument.Parse(responseText);
-        var content = envelope.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString();
+        var responseMessage = envelope.RootElement.GetProperty("choices")[0].GetProperty("message");
+        var content = responseMessage.TryGetProperty("content", out var contentElement) && contentElement.ValueKind == JsonValueKind.String
+            ? contentElement.GetString()
+            : null;
+        if (string.IsNullOrWhiteSpace(content)
+            && responseMessage.TryGetProperty("reasoning_content", out var reasoningElement)
+            && reasoningElement.ValueKind == JsonValueKind.String)
+        {
+            content = reasoningElement.GetString();
+        }
         return string.IsNullOrWhiteSpace(content)
             ? throw new InvalidOperationException("Local AI returned no text.")
             : content.Trim();
+    }
+
+    private static object BuildResponseFormat(Type? responseType)
+    {
+        if (responseType is null) return new { type = "text" };
+        return new
+        {
+            type = "json_schema",
+            json_schema = new
+            {
+                name = "epata_structured_response",
+                strict = false,
+                schema = BuildJsonSchema(responseType, [])
+            }
+        };
+    }
+
+    private static object BuildJsonSchema(Type type, HashSet<Type> activeTypes)
+    {
+        type = Nullable.GetUnderlyingType(type) ?? type;
+        if (type == typeof(string) || type == typeof(char) || type == typeof(Guid)
+            || type == typeof(DateTime) || type == typeof(DateTimeOffset) || type == typeof(DateOnly) || type == typeof(TimeOnly))
+        {
+            return new { type = "string" };
+        }
+        if (type == typeof(bool)) return new { type = "boolean" };
+        if (type.IsEnum) return new { type = "string", @enum = Enum.GetNames(type) };
+        if (type == typeof(byte) || type == typeof(short) || type == typeof(int) || type == typeof(long)
+            || type == typeof(sbyte) || type == typeof(ushort) || type == typeof(uint) || type == typeof(ulong))
+        {
+            return new { type = "integer" };
+        }
+        if (type == typeof(float) || type == typeof(double) || type == typeof(decimal))
+        {
+            return new { type = "number" };
+        }
+
+        var enumerableType = type.IsArray
+            ? typeof(IEnumerable<>).MakeGenericType(type.GetElementType()!)
+            : type.GetInterfaces().Append(type)
+                .FirstOrDefault(candidate => candidate.IsGenericType && candidate.GetGenericTypeDefinition() == typeof(IEnumerable<>));
+        if (enumerableType is not null)
+        {
+            return new
+            {
+                type = "array",
+                items = BuildJsonSchema(enumerableType.GetGenericArguments()[0], activeTypes)
+            };
+        }
+
+        if (!activeTypes.Add(type)) return new { type = "object" };
+        var properties = type.GetProperties()
+            .Where(property => property.CanRead && property.GetIndexParameters().Length == 0)
+            .ToDictionary(
+                property => JsonNamingPolicy.CamelCase.ConvertName(property.Name),
+                property => BuildJsonSchema(property.PropertyType, activeTypes));
+        activeTypes.Remove(type);
+        return new
+        {
+            type = "object",
+            properties,
+            additionalProperties = false
+        };
     }
 
     private async Task<LocalAiStatus> WaitForReadyStatusAsync(bool requireModel, CancellationToken cancellationToken)

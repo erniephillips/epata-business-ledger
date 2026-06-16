@@ -8,6 +8,8 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<Party> Parties => Set<Party>();
     public DbSet<Sale> Sales => Set<Sale>();
     public DbSet<CustomerJob> CustomerJobs => Set<CustomerJob>();
+    public DbSet<CustomerCommunication> CustomerCommunications => Set<CustomerCommunication>();
+    public DbSet<PrinterQueueItem> PrinterQueueItems => Set<PrinterQueueItem>();
     public DbSet<ReceivableInvoice> ReceivableInvoices => Set<ReceivableInvoice>();
     public DbSet<Bill> Bills => Set<Bill>();
     public DbSet<Expense> Expenses => Set<Expense>();
@@ -33,6 +35,11 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         modelBuilder.Entity<Sale>().HasIndex(x => x.OrderNumber);
         modelBuilder.Entity<CustomerJob>().HasIndex(x => x.CustomerName);
         modelBuilder.Entity<CustomerJob>().HasIndex(x => x.RelatedInvoiceNumber);
+        modelBuilder.Entity<CustomerCommunication>().HasIndex(x => x.CustomerName);
+        modelBuilder.Entity<CustomerCommunication>().HasIndex(x => x.OccurredAt);
+        modelBuilder.Entity<PrinterQueueItem>().HasIndex(x => x.Status);
+        modelBuilder.Entity<PrinterQueueItem>().HasIndex(x => x.PrinterName);
+        modelBuilder.Entity<PrinterQueueItem>().HasIndex(x => x.CustomerJobId);
         modelBuilder.Entity<ReceivableInvoice>().HasIndex(x => x.InvoiceNumber).IsUnique(false);
         modelBuilder.Entity<Bill>().HasIndex(x => x.DueDate);
         modelBuilder.Entity<Expense>().HasIndex(x => x.ExpenseDate);
