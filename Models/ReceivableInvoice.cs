@@ -31,8 +31,15 @@ public class ReceivableInvoice : AuditableEntity
     public decimal? InvoiceTotal { get; set; }
     public decimal? AmountPaid { get; set; }
 
+    [MaxLength(80)]
+    public string PaymentMethod { get; set; } = "Unknown / Review";
+
     [NotMapped]
-    public decimal BalanceDue => Math.Max(0, (InvoiceTotal ?? 0) - (AmountPaid ?? 0));
+    public decimal BalanceDue => Status.Equals("Void", StringComparison.OrdinalIgnoreCase)
+        || Status.Equals("Paid", StringComparison.OrdinalIgnoreCase)
+        || Status.Equals("Draft", StringComparison.OrdinalIgnoreCase)
+            ? 0
+            : Math.Max(0, (InvoiceTotal ?? 0) - (AmountPaid ?? 0));
 
     [MaxLength(220)]
     public string? SourceProof { get; set; }

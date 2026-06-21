@@ -24,7 +24,7 @@ public class DashboardService(AppDbContext db)
         var taxMemo = reportableSales.Sum(MoneyRules.SaleSalesTaxMemo);
         var customerPaid = reportableSales.Sum(MoneyRules.SaleCustomerPaid);
         var sellingCosts = reportableSales.Sum(MoneyRules.SaleKnownCosts);
-        var directExpenses = expenses.Sum(MoneyRules.TaxCountedExpenseAmount);
+        var directExpenses = expenses.Sum(MoneyRules.TaxCountedExpenseAmount) + bills.Sum(MoneyRules.TaxCountedBillAmount);
         var expensedAssets = assets.Sum(MoneyRules.FullyExpensedAssetAmount);
         var makerWorldIncome = rewards.Sum(MoneyRules.MakerWorldIncomeAmount);
         var estimatedNet = grossReceipts - sellingCosts - directExpenses;
@@ -51,21 +51,25 @@ public class DashboardService(AppDbContext db)
                     .Select(x => Item("Sale", "sales", x.Id, x.SaleDate, $"{x.CustomerName}: {x.ProductName}", $"Order {x.OrderNumber ?? "none"}; {x.SalesTaxHandling}", MoneyRules.SaleSalesTaxMemo(x)))),
             ["knownCosts"] = Breakdown(
                 "Known Costs",
-                "Entered Sale costs plus counted deductible operating/COGS Expenses.",
+                "Entered Sale costs plus counted deductible operating/COGS Expenses and paid Bills.",
                 true,
                 reportableSales.Where(x => MoneyRules.SaleKnownCosts(x) != 0)
                     .Select(x => Item("Sale costs", "sales", x.Id, x.SaleDate, $"{x.CustomerName}: {x.ProductName}", $"Fees {(x.PlatformFees ?? 0):C}; label {(x.ShippingLabelCost ?? 0):C}; COGS {(x.EstimatedCogs ?? 0):C}", MoneyRules.SaleKnownCosts(x)))
                     .Concat(expenses.Where(x => MoneyRules.TaxCountedExpenseAmount(x) != 0)
-                        .Select(x => Item("Expense", "expenses", x.Id, x.ExpenseDate, $"{x.VendorName}: {x.Description}", $"{x.TaxBucket}; {x.BusinessUsePercent ?? 100}% business use", MoneyRules.TaxCountedExpenseAmount(x))))),
+                        .Select(x => Item("Expense", "expenses", x.Id, x.ExpenseDate, $"{x.VendorName}: {x.Description}", $"{x.TaxBucket}; {x.BusinessUsePercent ?? 100}% business use", MoneyRules.TaxCountedExpenseAmount(x))))
+                    .Concat(bills.Where(x => MoneyRules.TaxCountedBillAmount(x) != 0)
+                        .Select(x => Item("Bill", "bills", x.Id, x.PaymentDate ?? x.BillDate, $"{x.VendorName}: {x.Description}", $"{MoneyRules.BillDeductionBucket(x)}; paid AP", MoneyRules.TaxCountedBillAmount(x))))),
             ["estimatedNet"] = Breakdown(
                 "Estimated Net",
-                "Gross receipts - entered Sale costs - counted deductible operating/COGS Expenses.",
+                "Gross receipts - entered Sale costs - counted deductible operating/COGS Expenses and paid Bills.",
                 true,
                 reportableSales.Select(x => Item("Sale revenue", "sales", x.Id, x.SaleDate, $"{x.CustomerName}: {x.ProductName}", $"Gross receipts from order {x.OrderNumber ?? "none"}", MoneyRules.SaleGrossReceipts(x)))
                     .Concat(reportableSales.Where(x => MoneyRules.SaleKnownCosts(x) != 0)
                         .Select(x => Item("Sale costs", "sales", x.Id, x.SaleDate, $"{x.CustomerName}: {x.ProductName}", $"Fees {(x.PlatformFees ?? 0):C}; label {(x.ShippingLabelCost ?? 0):C}; COGS {(x.EstimatedCogs ?? 0):C}", -MoneyRules.SaleKnownCosts(x))))
                     .Concat(expenses.Where(x => MoneyRules.TaxCountedExpenseAmount(x) != 0)
-                        .Select(x => Item("Expense", "expenses", x.Id, x.ExpenseDate, $"{x.VendorName}: {x.Description}", $"{x.TaxBucket}; {x.BusinessUsePercent ?? 100}% business use", -MoneyRules.TaxCountedExpenseAmount(x))))),
+                        .Select(x => Item("Expense", "expenses", x.Id, x.ExpenseDate, $"{x.VendorName}: {x.Description}", $"{x.TaxBucket}; {x.BusinessUsePercent ?? 100}% business use", -MoneyRules.TaxCountedExpenseAmount(x))))
+                    .Concat(bills.Where(x => MoneyRules.TaxCountedBillAmount(x) != 0)
+                        .Select(x => Item("Bill", "bills", x.Id, x.PaymentDate ?? x.BillDate, $"{x.VendorName}: {x.Description}", $"{MoneyRules.BillDeductionBucket(x)}; paid AP", -MoneyRules.TaxCountedBillAmount(x))))),
             ["openReceivables"] = Breakdown(
                 "Open AR",
                 "Invoice total - amount paid for non-draft, non-closed AR invoices.",
@@ -124,12 +128,16 @@ public class DashboardService(AppDbContext db)
         var openBills = bills
             .Where(x => !IsClosedOrDraft(x.Status) && Math.Max(0, (x.Total ?? 0) - (x.AmountPaid ?? 0)) > 0)
             .OrderBy(x => x.DueDate ?? DateTime.MaxValue)
+            .ThenBy(x => x.VendorName)
+            .ThenBy(x => x.Description)
             .Select(x => new
             {
                 x.VendorName,
                 x.Description,
                 x.Category,
                 dueDate = x.DueDate,
+                daysUntilDue = DaysUntilDue(x.DueDate),
+                urgency = DueUrgency(x.DueDate),
                 balanceDue = Math.Max(0, (x.Total ?? 0) - (x.AmountPaid ?? 0)),
                 x.Status,
                 x.NeedsReview
@@ -170,6 +178,22 @@ public class DashboardService(AppDbContext db)
 
     private static DashboardBreakdownItem Item(string sourceType, string route, int id, DateTime? date, string label, string detail, decimal amount) =>
         new(sourceType, route, id, date, label, detail, amount);
+
+    private static int? DaysUntilDue(DateTime? dueDate) =>
+        dueDate.HasValue ? (dueDate.Value.Date - DateTime.Today).Days : null;
+
+    private static string DueUrgency(DateTime? dueDate)
+    {
+        var days = DaysUntilDue(dueDate);
+        return days switch
+        {
+            null => "No due date",
+            < 0 => "Overdue",
+            0 => "Due today",
+            <= 7 => "Due soon",
+            _ => "Scheduled"
+        };
+    }
 
     private static bool IsClosedOrDraft(string? status)
     {

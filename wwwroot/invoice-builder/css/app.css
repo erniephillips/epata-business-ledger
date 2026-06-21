@@ -76,6 +76,16 @@ body {
   overflow-x: hidden;
 }
 
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+[tabindex]:not([tabindex="-1"]):focus-visible {
+  outline: 3px solid rgba(37,99,235,0.32);
+  outline-offset: 2px;
+}
+
 /* ── App Shell ────────────────────────────────────────────────── */
 #app { display: flex; min-height: 100vh; }
 
@@ -569,13 +579,16 @@ table.data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   border-bottom: 1px solid #f1f5f9;
   color: var(--ink-2);
   vertical-align: middle;
+  max-width: 320px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .data-table tr:last-child td { border-bottom: none; }
 .data-table tbody tr:hover td { background: #f8fafe; }
-.data-table .num     { font-variant-numeric: tabular-nums; text-align: right; }
-.data-table .actions { display: flex; gap: 6px; justify-content: flex-end; }
-.data-table .doc-number { font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; }
-.data-table .muted   { color: var(--muted); font-size: 12px; }
+.data-table .num     { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.data-table .actions { display: flex; gap: 6px; justify-content: flex-end; white-space: nowrap; }
+.data-table .doc-number { font-weight: 700; color: var(--ink); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.data-table .muted   { color: var(--muted); font-size: 12px; white-space: nowrap; }
 .record-link {
   border: 0;
   background: transparent;
@@ -584,6 +597,11 @@ table.data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
   font: inherit;
   font-weight: 800;
   cursor: pointer;
+  max-width: 100%;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .record-link:hover { text-decoration: underline; }
 .records-pager {

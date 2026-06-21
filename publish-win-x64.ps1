@@ -32,7 +32,9 @@ dotnet publish "EPATA.BusinessLedger.csproj" `
   -o $publishDir
 
 if ($LASTEXITCODE -ne 0) {
-  throw "dotnet publish failed with exit code $LASTEXITCODE"
+  Write-Warning "dotnet publish failed with exit code $LASTEXITCODE. Starting from project source instead."
+  dotnet run -c Release --no-launch-profile --project "EPATA.BusinessLedger.csproj"
+  exit $LASTEXITCODE
 }
 
 Write-Host "Published to $publishDir"

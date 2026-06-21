@@ -37,6 +37,50 @@ const DEFAULT_INVOICE_TERMS_NOTES = `- Payment is due by the due date shown abov
 - Paid invoices serve as a receipt for your records.
 - Thank you for supporting EPATA 3D Prints!`;
 
+export const ESTIMATE_STATUSES = ['Draft', 'Sent', 'Accepted', 'Void'];
+export const INVOICE_STATUSES = ['Draft', 'Sent', 'Partial', 'Paid', 'Void'];
+
+export function statusOptionsForDocType(type) {
+  return (type === 'INVOICE' ? INVOICE_STATUSES : ESTIMATE_STATUSES)
+    .map(status => [status, status]);
+}
+
+export function remapStatusForDocType(type, current) {
+  if (type === 'INVOICE' && current === 'Accepted') return 'Paid';
+  if (type === 'ESTIMATE' && (current === 'Paid' || current === 'Partial')) return 'Accepted';
+  return statusOptionsForDocType(type).some(([value]) => value === current) ? current : 'Draft';
+}
+
+export function defaultTermsForDocType(type) {
+  return type === 'INVOICE' ? DEFAULT_INVOICE_TERMS_NOTES : DEFAULT_TERMS_NOTES;
+}
+
+export function resolveTermsNotesForDocType(type, current) {
+  const clean = String(current || '').trim();
+  const knownDefaults = [DEFAULT_TERMS_NOTES, DEFAULT_INVOICE_TERMS_NOTES].map(s => s.trim());
+  return !clean || knownDefaults.includes(clean) ? defaultTermsForDocType(type) : current;
+}
+
+export function shouldClearDocNumberForDocType(type, docNumber) {
+  const cleanType = type === 'INVOICE' ? 'INVOICE' : 'ESTIMATE';
+  const cleanNumber = String(docNumber || '').trim().toUpperCase();
+  return (cleanType === 'INVOICE' && cleanNumber.startsWith('EST-'))
+    || (cleanType === 'ESTIMATE' && cleanNumber.startsWith('INV-'));
+}
+
+export function planDocTypeChange(type, current = {}) {
+  const cleanType = type === 'INVOICE' ? 'INVOICE' : 'ESTIMATE';
+  const docNumber = String(current.docNumber || '');
+  return {
+    docType: cleanType,
+    docNumber: shouldClearDocNumberForDocType(cleanType, docNumber) ? '' : docNumber,
+    status: remapStatusForDocType(cleanType, current.status),
+    termsNotes: resolveTermsNotesForDocType(cleanType, current.termsNotes),
+    dueDateLabel: cleanType === 'INVOICE' ? 'Due Date' : 'Valid Until',
+    statusOptions: statusOptionsForDocType(cleanType),
+  };
+}
+
 export function initBuilder() {
   FORM_FIELD_IDS.forEach(id => {
     const node = el(id);
@@ -50,13 +94,8 @@ export function initBuilder() {
 }
 
 // ── Line Items ────────────────────────────────────────
-export function addLineItem(item = {}) {
-  const tbody = el('lineItemsBody');
-  if (!tbody) return;
-
-  const row = document.createElement('tr');
-  if (item.source) row.dataset.source = item.source;
-  row.innerHTML = `
+export function buildLineItemRowHtml(item = {}) {
+  return `
     <td class="li-num"></td>
     <td class="li-desc">
       <textarea class="item-desc" placeholder="Description…" oninput="window._builderUpdate()">${escapeHtml(item.desc ?? item.description ?? '')}</textarea>
@@ -72,8 +111,17 @@ export function addLineItem(item = {}) {
     </td>
     <td class="li-amount num">$0.00</td>
     <td class="li-del">
-      <button class="btn-danger btn-sm btn-icon" type="button" title="Remove row" onclick="window._removeLineItem(this)">✕</button>
+      <button class="btn-danger btn-sm btn-icon" type="button" title="Remove row" aria-label="Remove line item" onclick="window._removeLineItem(this)">✕</button>
     </td>`;
+}
+
+export function addLineItem(item = {}) {
+  const tbody = el('lineItemsBody');
+  if (!tbody) return;
+
+  const row = document.createElement('tr');
+  if (item.source) row.dataset.source = item.source;
+  row.innerHTML = buildLineItemRowHtml(item);
   tbody.appendChild(row);
   renumber();
   updateTotals();
@@ -116,33 +164,65 @@ function clamp(v) {
 }
 
 // ── Totals ────────────────────────────────────────────
+export function calculateDocumentTotals({
+  docType = 'ESTIMATE',
+  status = 'Draft',
+  amountPaid = 0,
+  discount = 0,
+  rushPercent = 0,
+  taxRate = 0,
+  lineItems = [],
+} = {}) {
+  const subtotal = lineItems.reduce((sum, item) => {
+    const amount = Number(item?.amount);
+    const quantity = Number(item?.quantity ?? item?.qty ?? 0);
+    const rate = Number(item?.rate ?? 0);
+    return sum + (Number.isFinite(amount) ? amount : Math.max(0, quantity) * Math.max(0, rate));
+  }, 0);
+  const cleanDiscount = Math.max(0, Number(discount) || 0);
+  const cleanRushPercent = Math.max(0, Number(rushPercent) || 0);
+  const cleanTaxRate = Math.max(0, Number(taxRate) || 0);
+  const rush = subtotal * (cleanRushPercent / 100);
+  const taxable = Math.max(0, subtotal + rush - cleanDiscount);
+  const tax = taxable * (cleanTaxRate / 100);
+  const total = taxable + tax;
+  const isInvoice = docType === 'INVOICE';
+  const isPaid = isInvoice && status === 'Paid';
+  const isVoid = isInvoice && status === 'Void';
+  const paid = isInvoice && !isVoid ? (isPaid ? total : Math.max(0, Number(amountPaid) || 0)) : 0;
+  const balance = isInvoice && !isVoid ? Math.max(0, total - paid) : 0;
+
+  return { subtotal, discountAmount: cleanDiscount, rushAmount: rush, taxAmount: tax, total, amountPaid: paid, balance };
+}
+
 export function updateTotals() {
   const items    = getLineItems();
-  const subtotal = items.reduce((s, li) => s + li.amount, 0);
-  const discount = val('docDiscount');
-  const rush     = subtotal * (val('docRushPercent') / 100);
-  const taxable  = Math.max(0, subtotal + rush - discount);
-  const tax      = taxable * (val('docTaxRate') / 100);
-  const total    = taxable + tax;
   const closedStatus = textVal('docStatus');
-  const isInvoice = textVal('docType') === 'INVOICE';
+  const docType = textVal('docType');
+  const totals = calculateDocumentTotals({
+    docType,
+    status: closedStatus,
+    amountPaid: val('amountPaid'),
+    discount: val('docDiscount'),
+    rushPercent: val('docRushPercent'),
+    taxRate: val('docTaxRate'),
+    lineItems: items,
+  });
+  const isInvoice = docType === 'INVOICE';
   const isPaid   = isInvoice && closedStatus === 'Paid';
   const isVoid   = isInvoice && closedStatus === 'Void';
-  const paid     = isInvoice && !isVoid ? (isPaid ? total : val('amountPaid')) : 0;
-  const balance  = isInvoice && !isVoid ? Math.max(0, total - paid) : 0;
 
-  if (isPaid) setVal('amountPaid', total.toFixed(2));
+  if (isPaid) setVal('amountPaid', totals.total.toFixed(2));
   else if (!isInvoice || isVoid) setVal('amountPaid', '0');
 
-  setText('bSubtotal',  money(subtotal));
-  setText('bDiscount',  '-' + money(discount));
-  setText('bRush',      '+' + money(rush));
-  setText('bTax',       money(tax));
-  setText('bTotal',     money(total));
-  setText('bPaid',      money(paid));
-  setText('bBalance',   money(balance));
+  setText('bSubtotal',  money(totals.subtotal));
+  setText('bDiscount',  '-' + money(totals.discountAmount));
+  setText('bRush',      '+' + money(totals.rushAmount));
+  setText('bTax',       money(totals.taxAmount));
+  setText('bTotal',     money(totals.total));
+  setText('bPaid',      money(totals.amountPaid));
+  setText('bBalance',   money(totals.balance));
 
-  const totals = { subtotal, discountAmount: discount, rushAmount: rush, taxAmount: tax, total, amountPaid: paid, balance };
   document.dispatchEvent(new CustomEvent('epata:totals-updated', { detail: totals }));
   return totals;
 }
@@ -155,13 +235,18 @@ function setText(id, text) {
 // ── Doc Type changes ──────────────────────────────────
 function onDocTypeChange() {
   const type = textVal('docType');
-  const num  = textVal('docNumber');
-  if (type === 'INVOICE' && num.startsWith('EST-')) setVal('docNumber', num.replace('EST-', 'INV-'));
-  if (type === 'ESTIMATE' && num.startsWith('INV-')) setVal('docNumber', num.replace('INV-', 'EST-'));
+  const plan = planDocTypeChange(type, {
+    docNumber: textVal('docNumber'),
+    status: textVal('docStatus'),
+    termsNotes: textVal('termsNotes'),
+  });
+  if (plan.docNumber !== textVal('docNumber')) {
+    setVal('docNumber', plan.docNumber);
+  }
 
   // Adjust due date label & default
   const dueDateLabel = el('dueDateLabel');
-  if (dueDateLabel) dueDateLabel.textContent = type === 'INVOICE' ? 'Due Date' : 'Valid Until';
+  if (dueDateLabel) dueDateLabel.textContent = plan.dueDateLabel;
 
   // Adjust status dropdown — estimates can be Accepted, invoices can be Paid
   syncStatusOptionsToDocType(type);
@@ -175,31 +260,17 @@ function onDocTypeChange() {
 function syncStatusOptionsToDocType(type) {
   const sel = el('docStatus');
   if (!sel) return;
-  const current = sel.value;
-
-  // Map between equivalents when switching types so we don't leave an invalid value
-  let remapped = current;
-  if (type === 'INVOICE' && current === 'Accepted') remapped = 'Paid';
-  else if (type === 'ESTIMATE' && current === 'Paid') remapped = 'Accepted';
-
-  const opts = type === 'INVOICE'
-    ? [['Draft','Draft'], ['Sent','Sent'], ['Paid','Paid'], ['Void','Void']]
-    : [['Draft','Draft'], ['Sent','Sent'], ['Accepted','Accepted'], ['Void','Void']];
+  const opts = statusOptionsForDocType(type);
+  const remapped = remapStatusForDocType(type, sel.value);
 
   sel.innerHTML = opts.map(([v, lbl]) => `<option value="${v}">${lbl}</option>`).join('');
-  sel.value = opts.some(([v]) => v === remapped) ? remapped : 'Draft';
+  sel.value = remapped;
 }
 
 function syncTermsNotesToDocType(type) {
   const node = el('termsNotes');
   if (!node) return;
-  const current = (node.value || '').trim();
-  // If user customized the text, leave it alone. Only swap when the text
-  // still matches one of the known default templates.
-  const KNOWN = [DEFAULT_TERMS_NOTES, DEFAULT_INVOICE_TERMS_NOTES].map(s => s.trim());
-  if (!current || KNOWN.includes(current)) {
-    setVal('termsNotes', type === 'INVOICE' ? DEFAULT_INVOICE_TERMS_NOTES : DEFAULT_TERMS_NOTES);
-  }
+  setVal('termsNotes', resolveTermsNotesForDocType(type, node.value));
 }
 
 // ── Capture / restore state ───────────────────────────
@@ -222,13 +293,22 @@ export function restoreState(state) {
   if (!state) return;
   const BUSINESS_IDS = ['businessName','businessLocation','businessEmail','businessPhone',
                         'businessWebsite','businessEtsy','businessInstagram','businessFacebook','brandBlue'];
-  Object.entries(state.formValues ?? {}).forEach(([id, value]) => {
+  const formValues = state.formValues ?? {};
+  const requestedStatus = formValues.docStatus;
+  Object.entries(formValues).forEach(([id, value]) => {
+    if (id === 'docStatus') return;
     if (!BUSINESS_IDS.includes(id) && el(id)) el(id).value = value;
   });
 
   // Sync the status dropdown options + value to whatever docType was restored.
   // Handles legacy data where an estimate was saved with status="Paid", etc.
-  syncStatusOptionsToDocType(textVal('docType') || 'ESTIMATE');
+  const restoredDocType = textVal('docType') || 'ESTIMATE';
+  syncStatusOptionsToDocType(restoredDocType);
+  const dueDateLabel = el('dueDateLabel');
+  if (dueDateLabel) dueDateLabel.textContent = restoredDocType === 'INVOICE' ? 'Due Date' : 'Valid Until';
+  if (el('docStatus')) {
+    setVal('docStatus', remapStatusForDocType(restoredDocType, requestedStatus || 'Draft'));
+  }
 
   const tbody = el('lineItemsBody');
   if (tbody) tbody.innerHTML = '';
@@ -303,7 +383,7 @@ export function newDocument(type = 'ESTIMATE', nextNumber = '') {
   setVal('amountPaid',    '0');
   setVal('paymentMethod', 'Unknown / Review');
   setVal('pricingGuide', DEFAULT_PRICING_GUIDE);
-  setVal('termsNotes', type === 'INVOICE' ? DEFAULT_INVOICE_TERMS_NOTES : DEFAULT_TERMS_NOTES);
+  setVal('termsNotes', defaultTermsForDocType(type));
   setVal('standardTurnaround', 'Estimated timeline provided after design review and schedule confirmation');
   setVal('rushTurnaround', 'Expedited service available upon request, subject to current workload');
 

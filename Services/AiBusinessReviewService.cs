@@ -125,12 +125,26 @@ public sealed class AiBusinessReviewService(AppDbContext db, LocalAiService loca
 
         AddGroup(
             items,
-            bills.Where(x => x.BalanceDue > 0 && x.DueDate.HasValue && x.DueDate.Value.Date < today),
+            bills.Where(x => IsOpenBill(x) && x.BalanceDue > 0 && x.DueDate.HasValue && x.DueDate.Value.Date < today),
             "High",
             "AP",
             "Vendor bills are overdue",
             "These vendor balances have passed their due dates.",
             "Pay, dispute, or update the bill status and notes.",
+            "bills",
+            x => $"{x.VendorName}: {x.BillNumber ?? x.Description}");
+
+        AddGroup(
+            items,
+            bills.Where(x => x.NeedsReview
+                || (x.TaxDeductible
+                    && MoneyRules.PaidBillAmount(x) > 0
+                    && MoneyRules.BillDeductionBucket(x).Equals("Review", StringComparison.OrdinalIgnoreCase))),
+            "Normal",
+            "AP",
+            "Bills need tax or deductibility review",
+            "These vendor bills are marked for review or have paid deductible amounts without a confirmed tax category.",
+            "Confirm source proof, tax category, deductibility, and paid amount before tax handoff.",
             "bills",
             x => $"{x.VendorName}: {x.BillNumber ?? x.Description}");
 
@@ -214,14 +228,14 @@ public sealed class AiBusinessReviewService(AppDbContext db, LocalAiService loca
 
         AddGroup(
             items,
-            printerQueue.Where(x => x.NeedsReview || x.Status.Equals("Needs Attention", StringComparison.OrdinalIgnoreCase)),
+            printerQueue.Where(x => PrinterQueueNeedsAttention(x, today)),
             "High",
             "Operations",
             "Printer queue items need attention",
-            "These production items are explicitly flagged or have a problem status.",
+            "These production items are overdue, failed, explicitly flagged, or have a problem status.",
             "Review the printer, slicer settings, material, failure notes, and next production step.",
             "printerQueue",
-            x => $"{x.PrinterName ?? "Unassigned printer"}: {x.JobName}");
+            x => PrinterQueueEvidence(x, today));
 
         var priorityOrder = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase)
         {
@@ -298,5 +312,82 @@ public sealed class AiBusinessReviewService(AppDbContext db, LocalAiService loca
             route,
             Engine,
             string.Join(" | ", rows)));
+    }
+
+    private static bool IsOpenBill(Bill bill)
+    {
+        return bill.Status is not null
+            && !bill.Status.Equals("Draft", StringComparison.OrdinalIgnoreCase)
+            && !bill.Status.Equals("Paid", StringComparison.OrdinalIgnoreCase)
+            && !bill.Status.Equals("Void", StringComparison.OrdinalIgnoreCase)
+            && !bill.Status.Equals("Cancelled", StringComparison.OrdinalIgnoreCase)
+            && !bill.Status.Equals("Canceled", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool PrinterQueueNeedsAttention(PrinterQueueItem queue, DateTime today)
+    {
+        if (IsClosedPrinterQueueStatus(queue.Status))
+        {
+            return false;
+        }
+
+        return queue.NeedsReview
+            || (queue.Status?.Equals("Needs Attention", StringComparison.OrdinalIgnoreCase) ?? false)
+            || (queue.Status?.Contains("Fail", StringComparison.OrdinalIgnoreCase) ?? false)
+            || queue.FailureCount > 0
+            || PrinterQueueIsOverdue(queue, today);
+    }
+
+    private static bool PrinterQueueIsOverdue(PrinterQueueItem queue, DateTime today)
+    {
+        if (queue.EstimatedFinish.HasValue && queue.EstimatedFinish.Value.Date < today)
+        {
+            return true;
+        }
+
+        return queue.ScheduledStart.HasValue
+            && queue.ScheduledStart.Value.Date < today
+            && !queue.StartedAt.HasValue;
+    }
+
+    private static bool IsClosedPrinterQueueStatus(string? status)
+    {
+        return status is not null
+            && (status.Equals("Completed", StringComparison.OrdinalIgnoreCase)
+                || status.Equals("Done", StringComparison.OrdinalIgnoreCase)
+                || status.Equals("Cancelled", StringComparison.OrdinalIgnoreCase)
+                || status.Equals("Canceled", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string PrinterQueueEvidence(PrinterQueueItem queue, DateTime today)
+    {
+        var status = queue.Status ?? string.Empty;
+        var reasons = new List<string>();
+        if (queue.NeedsReview)
+        {
+            reasons.Add("needs review");
+        }
+
+        if (status.Equals("Needs Attention", StringComparison.OrdinalIgnoreCase))
+        {
+            reasons.Add("needs attention");
+        }
+        else if (status.Contains("Fail", StringComparison.OrdinalIgnoreCase))
+        {
+            reasons.Add(status);
+        }
+
+        if (queue.FailureCount > 0)
+        {
+            reasons.Add(queue.FailureCount == 1 ? "1 failed attempt" : $"{queue.FailureCount} failed attempts");
+        }
+
+        if (PrinterQueueIsOverdue(queue, today))
+        {
+            reasons.Add("overdue");
+        }
+
+        var reasonText = reasons.Count > 0 ? $" ({string.Join(", ", reasons)})" : string.Empty;
+        return $"{queue.PrinterName ?? "Unassigned printer"}: {queue.JobName}{reasonText}";
     }
 }

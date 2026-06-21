@@ -9,7 +9,7 @@
 <body>
   <div id="testModeBanner" class="test-mode-banner hidden">⚠ TEST MODE — separate test database. Changes here do NOT affect your real data.</div>
   <header class="topbar">
-    <button id="sidebarToggle" class="sidebar-toggle" type="button" aria-controls="primarySidebar" aria-expanded="true" title="Collapse menu">
+    <button id="sidebarToggle" class="sidebar-toggle" type="button" aria-controls="primarySidebar" aria-expanded="true" aria-label="Collapse menu" title="Collapse menu">
       <span class="sidebar-toggle-icon" aria-hidden="true">←</span>
       <span class="sidebar-toggle-label">Menu</span>
     </button>
@@ -81,9 +81,24 @@
     </div>
   </section>
 
-  <div id="toast" class="toast hidden"></div>
+  <div id="toast-container" class="toast-container" aria-live="polite" aria-atomic="false"></div>
   <div id="tooltip" class="floating-tooltip hidden" role="tooltip"></div>
 
-  <script src="/js/app.js?v=20260612-communications-printer-queue"></script>
+  <script src="/js/relationship-directory.js?v=1"></script>
+  <script src="/js/toast-stack.js?v=1"></script>
+  <script src="/js/modal-lifecycle.js?v=1"></script>
+  <script src="/js/modal-save-state.js?v=1"></script>
+  <script src="/js/entity-table-state.js?v=1"></script>
+  <script src="/js/sidebar-state.js?v=1"></script>
+  <script src="/js/navigation-history.js?v=1"></script>
+  <script src="/js/global-search.js?v=1"></script>
+  <script src="/js/quick-add.js?v=1"></script>
+  <script src="/js/invoice-prefill.js?v=1"></script>
+  <script src="/js/ai-product-draft.js?v=1"></script>
+  <script src="/js/tax-prep-state.js?v=1"></script>
+  <script src="/js/communication-state.js?v=1"></script>
+  <script src="/js/job-workflow-state.js?v=1"></script>
+  <script src="/js/dashboard-state.js?v=1"></script>
+  <script src="/js/app.js?v=20260619-ar-prefill"></script>
 </body>
 </html>

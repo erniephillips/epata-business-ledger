@@ -1,6 +1,10 @@
 bin/
 obj/
 publish-win-x64/
+node_modules/
+test-results/
+playwright-report/
+*.log
 
 # Private business data: never commit receipts, proof files, local DBs, or backups.
 Data/*.db

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -10,6 +11,9 @@ using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Logging.ClearProviders();
+builder.Logging.AddConsole();
+builder.Logging.AddDebug();
 
 var appUrl = builder.Configuration["App:Url"] ?? "http://127.0.0.1:5062";
 builder.WebHost.UseUrls(appUrl);
@@ -25,6 +29,7 @@ builder.Services.AddScoped<AiBusinessReviewService>();
 builder.Services.AddScoped<ActionItemAutomationService>();
 builder.Services.AddScoped<TaxPlanningService>();
 builder.Services.AddScoped<AiSourceDocumentTextExtractor>();
+builder.Services.AddScoped<InvoiceDocumentPdfDraftService>();
 builder.Services.AddHttpClient<InvoiceAppImportService>();
 builder.Services.AddHttpClient<LocalAiService>(client => client.Timeout = TimeSpan.FromMinutes(10));
 builder.Services.AddHttpClient<AiOperationsService>(client =>
@@ -71,6 +76,36 @@ app.UseStaticFiles(new StaticFileOptions
             context.Context.Response.Headers.Pragma = "no-cache";
             context.Context.Response.Headers.Expires = "0";
         }
+    }
+});
+
+if (int.TryParse(app.Configuration["App:ArtificialLatencyMs"], out var artificialLatencyMs) && artificialLatencyMs > 0)
+{
+    var boundedLatencyMs = Math.Min(artificialLatencyMs, 5_000);
+    app.Use(async (context, next) =>
+    {
+        if (context.Request.Path.StartsWithSegments("/api"))
+        {
+            await Task.Delay(boundedLatencyMs, context.RequestAborted);
+        }
+
+        await next();
+    });
+}
+
+app.Use(async (context, next) =>
+{
+    try
+    {
+        await next();
+    }
+    catch (Exception ex) when (IsSqliteBusyOrLocked(ex) && !context.Response.HasStarted)
+    {
+        context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+        await context.Response.WriteAsJsonAsync(new
+        {
+            message = "The local SQLite database is busy or locked. Close other EPATA windows, wait for OneDrive sync to finish, then try again."
+        });
     }
 });
 
@@ -434,23 +469,24 @@ app.MapGet("/api/config", async (AppDbContext db) =>
 
 app.MapPut("/api/config", async (AppDbContext db, InvoiceBuilderConfigRequest request) =>
 {
-    await UpsertSettingAsync(db, "BusinessName", request.BusinessName);
-    await UpsertSettingAsync(db, "BusinessLocation", request.BusinessLocation);
-    await UpsertSettingAsync(db, "BusinessEmail", request.BusinessEmail);
-    await UpsertSettingAsync(db, "BusinessPhone", request.BusinessPhone);
-    await UpsertSettingAsync(db, "BusinessWebsite", request.BusinessWebsite);
-    await UpsertSettingAsync(db, "BusinessEtsy", request.BusinessEtsy);
-    await UpsertSettingAsync(db, "BusinessInstagram", request.BusinessInstagram);
-    await UpsertSettingAsync(db, "BusinessFacebook", request.BusinessFacebook);
-    await UpsertSettingAsync(db, "BrandColor", request.BrandColor);
-    await UpsertSettingAsync(db, "CalcGramRate", request.CalcGramRate.ToString());
-    await UpsertSettingAsync(db, "CalcHourRate", request.CalcHourRate.ToString());
-    await UpsertSettingAsync(db, "CalcDesignRate", request.CalcDesignRate.ToString());
-    await UpsertSettingAsync(db, "CalcSetupFee", request.CalcSetupFee.ToString());
-    await UpsertSettingAsync(db, "CalcPostFee", request.CalcPostFee.ToString());
-    await UpsertSettingAsync(db, "CalcMinimum", request.CalcMinimum.ToString());
+    var normalized = NormalizeInvoiceBuilderConfigRequest(request);
+    await UpsertSettingAsync(db, "BusinessName", normalized.BusinessName);
+    await UpsertSettingAsync(db, "BusinessLocation", normalized.BusinessLocation);
+    await UpsertSettingAsync(db, "BusinessEmail", normalized.BusinessEmail);
+    await UpsertSettingAsync(db, "BusinessPhone", normalized.BusinessPhone);
+    await UpsertSettingAsync(db, "BusinessWebsite", normalized.BusinessWebsite);
+    await UpsertSettingAsync(db, "BusinessEtsy", normalized.BusinessEtsy);
+    await UpsertSettingAsync(db, "BusinessInstagram", normalized.BusinessInstagram);
+    await UpsertSettingAsync(db, "BusinessFacebook", normalized.BusinessFacebook);
+    await UpsertSettingAsync(db, "BrandColor", normalized.BrandColor);
+    await UpsertSettingAsync(db, "CalcGramRate", normalized.CalcGramRate.ToString(CultureInfo.InvariantCulture));
+    await UpsertSettingAsync(db, "CalcHourRate", normalized.CalcHourRate.ToString(CultureInfo.InvariantCulture));
+    await UpsertSettingAsync(db, "CalcDesignRate", normalized.CalcDesignRate.ToString(CultureInfo.InvariantCulture));
+    await UpsertSettingAsync(db, "CalcSetupFee", normalized.CalcSetupFee.ToString(CultureInfo.InvariantCulture));
+    await UpsertSettingAsync(db, "CalcPostFee", normalized.CalcPostFee.ToString(CultureInfo.InvariantCulture));
+    await UpsertSettingAsync(db, "CalcMinimum", normalized.CalcMinimum.ToString(CultureInfo.InvariantCulture));
     await db.SaveChangesAsync();
-    return Results.Ok(request with { Id = 1 });
+    return Results.Ok(normalized);
 });
 
 app.MapGet("/api/documents", async (AppDbContext db, string? q, string? type, string? status, bool includeArchived = false) =>
@@ -488,14 +524,12 @@ app.MapGet("/api/documents/{id:int}", async (AppDbContext db, int id) =>
 
 app.MapPost("/api/documents", async (AppDbContext db, SaveInvoiceDocumentRequest request) =>
 {
-    var doc = await CreateInvoiceDocumentAsync(db, request);
-    return Results.Ok(ToInvoiceDocumentDto(doc));
+    return await CreateInvoiceDocumentResultAsync(db, request);
 });
 
 app.MapPut("/api/documents/{id:int}", async (AppDbContext db, int id, SaveInvoiceDocumentRequest request) =>
 {
-    var doc = await UpdateInvoiceDocumentAsync(db, id, request);
-    return doc is null ? Results.NotFound(new { message = $"Document {id} was not found." }) : Results.Ok(ToInvoiceDocumentDto(doc));
+    return await UpdateInvoiceDocumentResultAsync(db, id, request);
 });
 
 app.MapDelete("/api/documents/{id:int}", async (AppDbContext db, int id) =>
@@ -567,14 +601,12 @@ app.MapGet("/api/invoice-documents/{id:int}", async (AppDbContext db, int id) =>
 
 app.MapPost("/api/invoice-documents", async (AppDbContext db, SaveInvoiceDocumentRequest request) =>
 {
-    var doc = await CreateInvoiceDocumentAsync(db, request);
-    return Results.Ok(ToInvoiceDocumentDto(doc));
+    return await CreateInvoiceDocumentResultAsync(db, request);
 });
 
 app.MapPut("/api/invoice-documents/{id:int}", async (AppDbContext db, int id, SaveInvoiceDocumentRequest request) =>
 {
-    var doc = await UpdateInvoiceDocumentAsync(db, id, request);
-    return doc is null ? Results.NotFound(new { message = $"Document {id} was not found." }) : Results.Ok(ToInvoiceDocumentDto(doc));
+    return await UpdateInvoiceDocumentResultAsync(db, id, request);
 });
 
 app.MapDelete("/api/invoice-documents/{id:int}", async (AppDbContext db, int id) =>
@@ -714,17 +746,30 @@ app.MapPost("/api/documents/upload", async (HttpRequest request, AppDbContext db
         return Results.BadRequest(new { message = "Choose at least one file to upload." });
     }
 
+    foreach (var file in form.Files)
+    {
+        if (file.Length <= 0)
+        {
+            return Results.BadRequest(new { message = $"{file.FileName} is empty. Choose a non-empty proof file." });
+        }
+
+        if (file.Length > AiEstimateService.MaxUploadFileBytes)
+        {
+            return Results.BadRequest(new { message = $"{file.FileName} is larger than the {AiEstimateService.MaxUploadFileBytes / 1024 / 1024} MB per-file proof upload limit." });
+        }
+
+        if (!IsSupportedProofUploadFile(file.FileName))
+        {
+            return Results.BadRequest(new { message = $"{file.FileName} is not a supported proof upload type. Use PDF, PNG, JPG, WEBP, TXT, CSV, JSON, or Markdown." });
+        }
+    }
+
     var uploadDir = Path.Combine(env.ContentRootPath, "UploadedDocs");
     Directory.CreateDirectory(uploadDir);
 
     var created = new List<AuditDocument>();
     foreach (var file in form.Files)
     {
-        if (file.Length == 0)
-        {
-            continue;
-        }
-
         var safeName = MakeSafeFileName(file.FileName);
         var storedName = $"{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..8]}-{safeName}";
         var storedPath = Path.Combine(uploadDir, storedName);
@@ -950,6 +995,66 @@ app.MapPost("/api/ai/estimate-draft/upload", async Task<IResult> (
     try
     {
         return Results.Ok(await ai.CreateDraftAsync(new AiEstimateDraftRequest(sourceText, sourceName, sourceUrls, images, warnings), cancellationToken));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { message = ex.Message });
+    }
+});
+
+app.MapPost("/api/ai/invoice-document-draft/upload", async Task<IResult> (
+    HttpRequest request,
+    InvoiceDocumentPdfDraftService draftService,
+    AiSourceDocumentTextExtractor extractor,
+    CancellationToken cancellationToken) =>
+{
+    if (!request.HasFormContentType)
+    {
+        return Results.BadRequest(new { message = "Invoice PDF import must be sent as multipart/form-data." });
+    }
+
+    var form = await request.ReadFormAsync(cancellationToken);
+    var sourceText = form["sourceText"].FirstOrDefault() ?? string.Empty;
+    var sourceName = form["sourceName"].FirstOrDefault() ?? "Uploaded invoice or estimate PDF";
+    var warnings = new List<string>();
+    var files = form.Files.Take(AiEstimateService.MaxUploadFiles).ToList();
+    if (form.Files.Count > AiEstimateService.MaxUploadFiles)
+    {
+        warnings.Add($"Only the first {AiEstimateService.MaxUploadFiles} files were read.");
+    }
+
+    var totalBytes = files.Sum(file => file.Length);
+    if (totalBytes > AiEstimateService.MaxTotalUploadBytes)
+    {
+        return Results.BadRequest(new { message = $"The selected files total more than {AiEstimateService.MaxTotalUploadBytes / 1024 / 1024} MB. Remove or split some files and try again." });
+    }
+
+    foreach (var file in files)
+    {
+        if (file.Length <= 0) continue;
+        if (file.Length > AiEstimateService.MaxUploadFileBytes)
+        {
+            return Results.BadRequest(new { message = $"{file.FileName} is larger than the {AiEstimateService.MaxUploadFileBytes / 1024 / 1024} MB per-file AI intake limit." });
+        }
+
+        try
+        {
+            var extraction = await extractor.ExtractAsync(file, cancellationToken);
+            if (!string.IsNullOrWhiteSpace(extraction.Text))
+            {
+                sourceText = string.Join("\n\n", new[] { sourceText, $"SOURCE FILE: {file.FileName}\n{extraction.Text}" }.Where(x => !string.IsNullOrWhiteSpace(x)));
+            }
+            if (!string.IsNullOrWhiteSpace(extraction.Warning)) warnings.Add(extraction.Warning);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or System.Xml.XmlException)
+        {
+            warnings.Add($"{file.FileName} could not be read as a valid {Path.GetExtension(file.FileName).TrimStart('.').ToUpperInvariant()} document.");
+        }
+    }
+
+    try
+    {
+        return Results.Ok(await draftService.CreateDraftAsync(sourceText, sourceName, warnings, cancellationToken));
     }
     catch (InvalidOperationException ex)
     {
@@ -1571,16 +1676,18 @@ static object BuildInboxSuggestion(AuditDocument doc)
 
     ScoreWhen(scores, reasons, "sale", 45, doc.RelatedRecordType?.Equals("Sale", StringComparison.OrdinalIgnoreCase) == true, "You selected Related Area = Sale.");
     ScoreWhen(scores, reasons, "expense", 45, doc.RelatedRecordType?.Equals("Expense", StringComparison.OrdinalIgnoreCase) == true, "You selected Related Area = Expense.");
+    ScoreWhen(scores, reasons, "asset", 55, doc.RelatedRecordType?.Equals("Asset", StringComparison.OrdinalIgnoreCase) == true, "You selected Related Area = Asset.");
     ScoreWhen(scores, reasons, "estimate", 55, doc.RelatedRecordType?.Equals("Estimate", StringComparison.OrdinalIgnoreCase) == true, "You selected Related Area = Estimate.");
     ScoreWhen(scores, reasons, "invoice", 45, doc.RelatedRecordType?.Equals("Invoice", StringComparison.OrdinalIgnoreCase) == true, "You selected Related Area = Invoice.");
     ScoreWhen(scores, reasons, "bill", 45, doc.RelatedRecordType?.Equals("Bill", StringComparison.OrdinalIgnoreCase) == true, "You selected Related Area = Bill.");
-    ScoreWhen(scores, reasons, "sale", 35, HasAny(text, "etsy order", "payment for order", "customer paid", "sale", "buyer paid", "order total"), "Looks like customer money or an order.");
+    ScoreWhen(scores, reasons, "sale", 55, HasAny(text, "etsy order", "payment for order", "customer paid", "sale", "buyer paid", "order total"), "Looks like customer money or an order.");
     ScoreWhen(scores, reasons, "expense", 35, HasAny(text, "receipt", "purchase", "paid to", "charged", "expense", "invoice paid"), "Looks like a paid purchase/receipt.");
     ScoreWhen(scores, reasons, "expense", 40, HasAny(text, "etsy ads", "advertising", "marketing", "click-through", "listing fee", "processing fee", "transaction fee"), "Looks like marketplace fees or advertising.");
     ScoreWhen(scores, reasons, "shipping", 45, HasAny(text, "shipping label", "usps", "postage", "tracking", "ship by"), "Looks like shipping/postage.");
-    ScoreWhen(scores, reasons, "invoice", 35, HasAny(text, "invoice", "amount due", "balance due", "payment due"), "Looks like an invoice.");
+    ScoreWhen(scores, reasons, "invoice", 55, HasAny(text, "invoice", "amount due", "balance due", "payment due"), "Looks like an invoice.");
     ScoreWhen(scores, reasons, "estimate", 35, HasAny(text, "estimate", "quote", "proposal", "valid until"), "Looks like an estimate/quote.");
-    ScoreWhen(scores, reasons, "asset", 40, HasAny(text, "printer", "ams", "bambu", "x1c", "p1s", "a1 mini", "equipment", "serial"), "Looks like equipment or durable business property.");
+    ScoreWhen(scores, reasons, "asset", 60, HasAny(text, "printer", "ams", "bambu", "x1c", "p1s", "a1 mini", "equipment", "serial"), "Looks like equipment or durable business property.");
+    ScoreWhen(scores, reasons, "bill", 50, HasAny(text, "vendor bill", "supplier bill", "bill from", "payment terms", "net 30", "supplier statement"), "Looks like a vendor bill or statement.");
     ScoreWhen(scores, reasons, "bill", 30, HasAny(text, "due date", "net 30", "amount due", "unpaid", "statement"), "Looks like money owed to a vendor.");
     ScoreWhen(scores, reasons, "sale", 15, !string.IsNullOrWhiteSpace(orderNumber) && !HasAny(text, "receipt", "purchase"), $"Found order/reference number {orderNumber}.");
     ScoreWhen(scores, reasons, "expense", 10, amount.HasValue && HasAny(text, "tax", "subtotal", "total"), "Found money fields that often appear on receipts.");
@@ -2147,6 +2254,23 @@ static async Task<object> BuildTaxAuditAsync(AppDbContext db)
             issues.Add(new("Medium", "Unpaid bill has payment amount", billLabel,
                 $"Status is {bill.Status}, but AmountPaid is {paid:C}."));
         }
+
+        if (bill.NeedsReview
+            || (bill.TaxDeductible
+                && MoneyRules.PaidBillAmount(bill) > 0
+                && MoneyRules.BillDeductionBucket(bill).Equals("Review", StringComparison.OrdinalIgnoreCase)))
+        {
+            issues.Add(new("Medium", "AP bill needs tax classification", billLabel,
+                "Confirm the bill's tax category, deductibility, paid amount, and source proof before tax handoff."));
+        }
+
+        if (bill.TaxDeductible
+            && MoneyRules.PaidBillAmount(bill) > 0
+            && string.IsNullOrWhiteSpace(bill.SourceProof))
+        {
+            issues.Add(new("Medium", "Paid deductible bill missing proof", billLabel,
+                "Paid deductible AP should link to the vendor invoice, receipt, statement, or payment proof."));
+        }
     }
 
     foreach (var asset in assets)
@@ -2171,7 +2295,7 @@ static async Task<object> BuildTaxAuditAsync(AppDbContext db)
             reportableGrossReceipts = sales.Where(MoneyRules.IsReportableSale).Sum(MoneyRules.SaleGrossReceipts),
             customerPaidIncludingTaxMemo = sales.Where(MoneyRules.IsReportableSale).Sum(MoneyRules.SaleCustomerPaid),
             salesTaxMemo = sales.Where(MoneyRules.IsReportableSale).Sum(MoneyRules.SaleSalesTaxMemo),
-            deductibleExpenses = expenses.Sum(MoneyRules.TaxCountedExpenseAmount),
+            deductibleExpenses = expenses.Sum(MoneyRules.TaxCountedExpenseAmount) + bills.Sum(MoneyRules.TaxCountedBillAmount),
             expensedAssets = assets.Sum(MoneyRules.FullyExpensedAssetAmount),
             makerWorldIncome = rewards.Sum(MoneyRules.MakerWorldIncomeAmount),
             criticalIssues = issues.Count(x => x.Severity == "Critical"),
@@ -2329,6 +2453,7 @@ static void MapCrud<TEntity>(WebApplication app, string route) where TEntity : A
             return Results.NotFound();
         }
 
+        input.Id = id;
         var created = existing.CreatedAtUtc;
         db.Entry(existing).CurrentValues.SetValues(input);
         existing.Id = id;
@@ -2407,6 +2532,29 @@ static bool PaymentChannelMatches(string paymentChannel, string? requested)
     };
 }
 
+static string NormalizePaymentMethod(string? paymentMethod, string? platform = null)
+{
+    var method = (paymentMethod ?? string.Empty).Trim();
+    var normalizedPlatform = (platform ?? string.Empty).Trim();
+    if (string.IsNullOrWhiteSpace(method)
+        || method.Equals("Unknown / Review", StringComparison.OrdinalIgnoreCase))
+    {
+        if (normalizedPlatform.Equals("Etsy", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Etsy Payments";
+        }
+
+        if (normalizedPlatform.Contains("MakerWorld", StringComparison.OrdinalIgnoreCase))
+        {
+            return "MakerWorld";
+        }
+
+        return "Unknown / Review";
+    }
+
+    return method.Length > 80 ? method[..80] : method;
+}
+
 static void NormalizeCrudEntity<TEntity>(TEntity entity) where TEntity : AuditableEntity
 {
     ApplyDefaultClockToBusinessDates(entity);
@@ -2418,6 +2566,8 @@ static void NormalizeCrudEntity<TEntity>(TEntity entity) where TEntity : Auditab
             bill.SalesTax = ClampMoney(bill.SalesTax);
             bill.Total = (bill.Amount ?? 0) + (bill.SalesTax ?? 0);
             bill.AmountPaid = ClampMoney(bill.AmountPaid);
+            bill.PaymentMethod = NormalizePaymentMethod(bill.PaymentMethod);
+            if (string.IsNullOrWhiteSpace(bill.TaxCategory)) bill.TaxCategory = "Other business expense";
             if (bill.Status.Equals("Paid", StringComparison.OrdinalIgnoreCase) && (bill.AmountPaid ?? 0) <= 0 && (bill.Total ?? 0) > 0)
             {
                 bill.AmountPaid = bill.Total;
@@ -2428,6 +2578,7 @@ static void NormalizeCrudEntity<TEntity>(TEntity entity) where TEntity : Auditab
             expense.SalesTax = ClampMoney(expense.SalesTax);
             expense.Total = (expense.Amount ?? 0) + (expense.SalesTax ?? 0);
             expense.BusinessUsePercent = ClampPercent(expense.BusinessUsePercent);
+            expense.PaymentMethod = NormalizePaymentMethod(expense.PaymentMethod);
             if (string.IsNullOrWhiteSpace(expense.TaxCategory)) expense.TaxCategory = "Other business expense";
             break;
         case ReceivableInvoice invoice:
@@ -2441,6 +2592,7 @@ static void NormalizeCrudEntity<TEntity>(TEntity entity) where TEntity : Auditab
             {
                 invoice.AmountPaid = invoice.InvoiceTotal;
             }
+            invoice.PaymentMethod = NormalizePaymentMethod(invoice.PaymentMethod);
             invoice.IncludeInCashReports = invoice.AmountPaid > 0 && !invoice.Status.Equals("Void", StringComparison.OrdinalIgnoreCase);
             if (invoice.Status.Equals("Void", StringComparison.OrdinalIgnoreCase))
             {
@@ -2470,12 +2622,7 @@ static void NormalizeCrudEntity<TEntity>(TEntity entity) where TEntity : Auditab
             {
                 sale.IncludeInDashboard = false;
             }
-            if (string.IsNullOrWhiteSpace(sale.PaymentMethod))
-            {
-                sale.PaymentMethod = PaymentChannelFor(sale) == "Online Marketplace"
-                    ? $"{sale.Platform} Payments"
-                    : "Unknown / Review";
-            }
+            sale.PaymentMethod = NormalizePaymentMethod(sale.PaymentMethod, sale.Platform);
             if (string.IsNullOrWhiteSpace(sale.SalesTaxHandling))
             {
                 sale.SalesTaxHandling = "Unknown / Review";
@@ -2484,6 +2631,7 @@ static void NormalizeCrudEntity<TEntity>(TEntity entity) where TEntity : Auditab
         case TaxObligation obligation:
             obligation.EstimatedAmount = ClampMoney(obligation.EstimatedAmount);
             obligation.AmountPaid = ClampMoney(obligation.AmountPaid);
+            obligation.PaymentMethod = NormalizePaymentMethod(obligation.PaymentMethod);
             obligation.TaxYear = obligation.TaxYear is >= 2000 and <= 2200 ? obligation.TaxYear : DateTime.Today.Year;
             if (obligation.Status.Equals("Filed / Paid", StringComparison.OrdinalIgnoreCase)
                 || obligation.Status.Equals("Not Required", StringComparison.OrdinalIgnoreCase))
@@ -2499,6 +2647,7 @@ static void NormalizeCrudEntity<TEntity>(TEntity entity) where TEntity : Auditab
             job.QuoteAmount = ClampMoney(job.QuoteAmount);
             job.InvoiceAmount = ClampMoney(job.InvoiceAmount);
             job.AmountPaid = ClampMoney(job.AmountPaid);
+            job.PaymentMethod = NormalizePaymentMethod(job.PaymentMethod, job.Platform);
             if (!string.IsNullOrWhiteSpace(job.RelatedInvoiceNumber)
                 && job.RelatedInvoiceNumber.StartsWith("EST-", StringComparison.OrdinalIgnoreCase))
             {
@@ -2543,6 +2692,7 @@ static void NormalizeCrudEntity<TEntity>(TEntity entity) where TEntity : Auditab
             asset.Cost = ClampMoney(asset.Cost);
             asset.BusinessUsePercent = ClampPercent(asset.BusinessUsePercent);
             asset.NotYetExpensed = ClampMoney(asset.NotYetExpensed);
+            asset.PaymentMethod = NormalizePaymentMethod(asset.PaymentMethod);
             break;
         case MakerWorldReward reward:
             reward.GiftCardAmount = ClampMoney(reward.GiftCardAmount);
@@ -2622,9 +2772,14 @@ static DateTime? AddClockIfMidnight(DateTime? value, DateTime clock, int minuteO
     }
 
     var localClock = clock.Kind == DateTimeKind.Utc ? clock.ToLocalTime() : clock;
+    var timeOfDay = localClock.TimeOfDay.Add(TimeSpan.FromMinutes(minuteOffset));
+    if (timeOfDay >= TimeSpan.FromDays(1))
+    {
+        timeOfDay = TimeSpan.FromDays(1).Subtract(TimeSpan.FromSeconds(1));
+    }
+
     return value.Value.Date
-        .Add(localClock.TimeOfDay)
-        .AddMinutes(minuteOffset);
+        .Add(timeOfDay);
 }
 
 static async Task ApplyCrudSideEffectsAsync<TEntity>(AppDbContext db, TEntity entity) where TEntity : AuditableEntity
@@ -2719,16 +2874,19 @@ static IQueryable<object> InvoiceDocumentSummaries(IQueryable<InvoiceDocument> q
             d.UpdatedAt,
             d.IsArchived,
             d.ArchivedAt,
-            d.ArchiveReason
+            d.ArchiveReason,
+            SourceKind = "document",
+            SourceId = d.Id,
+            SourceLabel = "Builder document"
         });
 }
 
 static async Task<List<object>> UnifiedInvoiceRecordSummariesAsync(AppDbContext db, string? q, string? type, string? status, bool includeArchived = false)
 {
     var docRows = await InvoiceDocumentSummaries(FilterInvoiceDocuments(db, q, type, status, includeArchived)).ToListAsync();
-    var invoiceDocKeys = await db.InvoiceDocuments.AsNoTracking()
+    var activeInvoiceDocNumbers = await db.InvoiceDocuments.AsNoTracking()
         .Where(d => !d.IsArchived && d.DocType == "INVOICE" && d.DocNumber != null && d.Status != "Void")
-        .Select(d => new { d.DocNumber, d.CustomerName })
+        .Select(d => d.DocNumber)
         .ToListAsync();
 
     var includeInvoices = string.IsNullOrWhiteSpace(type) || type.Equals("INVOICE", StringComparison.OrdinalIgnoreCase);
@@ -2756,9 +2914,7 @@ static async Task<List<object>> UnifiedInvoiceRecordSummariesAsync(AppDbContext 
         .ToListAsync();
 
     var arOnlyRows = activeArRows
-        .Where(x => !invoiceDocKeys.Any(d =>
-            string.Equals(d.DocNumber, x.InvoiceNumber, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(d.CustomerName ?? string.Empty, x.CustomerName ?? string.Empty, StringComparison.OrdinalIgnoreCase)))
+        .Where(x => !IsGeneratedReceivableForActiveInvoiceDocument(x, activeInvoiceDocNumbers))
         .Select(x => new
         {
             x.Id,
@@ -2803,19 +2959,17 @@ static async Task<object> UnifiedInvoiceStatsAsync(AppDbContext db)
         })
         .ToListAsync();
 
-    var invoiceDocKeys = docs
+    var activeInvoiceDocNumbers = docs
         .Where(d => d.DocType == "INVOICE"
             && !StatusEquals(d.Status, "Void")
             && !string.IsNullOrWhiteSpace(d.DocNumber))
-        .Select(d => new { d.DocNumber, d.CustomerName })
+        .Select(d => d.DocNumber)
         .ToList();
 
     var arOnly = (await db.ReceivableInvoices.AsNoTracking()
         .Where(x => !x.IsArchived)
         .ToListAsync())
-        .Where(x => !invoiceDocKeys.Any(d =>
-            string.Equals(d.DocNumber, x.InvoiceNumber, StringComparison.OrdinalIgnoreCase)
-            && string.Equals(d.CustomerName ?? string.Empty, x.CustomerName ?? string.Empty, StringComparison.OrdinalIgnoreCase)))
+        .Where(x => !IsGeneratedReceivableForActiveInvoiceDocument(x, activeInvoiceDocNumbers))
         .Select(x => new
         {
             DocType = "INVOICE",
@@ -2861,6 +3015,19 @@ static bool StatusEquals(string? actual, string expected)
     return string.Equals(actual ?? string.Empty, expected, StringComparison.OrdinalIgnoreCase);
 }
 
+static bool IsGeneratedReceivableForActiveInvoiceDocument(ReceivableInvoice invoice, IEnumerable<string?> activeInvoiceDocumentNumbers)
+{
+    if (string.IsNullOrWhiteSpace(invoice.InvoiceNumber))
+    {
+        return false;
+    }
+
+    var hasActiveDocument = activeInvoiceDocumentNumbers.Any(docNumber =>
+        string.Equals(docNumber, invoice.InvoiceNumber, StringComparison.OrdinalIgnoreCase));
+    return hasActiveDocument
+        && string.Equals(invoice.SourceProof?.Trim(), $"Unified invoice {invoice.InvoiceNumber}", StringComparison.OrdinalIgnoreCase);
+}
+
 static async Task<InvoiceDocument> CreateInvoiceDocumentAsync(AppDbContext db, SaveInvoiceDocumentRequest request)
 {
     var now = DateTimeOffset.UtcNow.ToString("O");
@@ -2880,6 +3047,19 @@ static async Task<InvoiceDocument> CreateInvoiceDocumentAsync(AppDbContext db, S
     await db.SaveChangesAsync();
     await SyncUnifiedInvoiceDocumentToLedgerAsync(db, doc);
     return doc;
+}
+
+static async Task<IResult> CreateInvoiceDocumentResultAsync(AppDbContext db, SaveInvoiceDocumentRequest request)
+{
+    try
+    {
+        var doc = await CreateInvoiceDocumentAsync(db, request);
+        return Results.Ok(ToInvoiceDocumentDto(doc));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { message = ex.Message });
+    }
 }
 
 static async Task<InvoiceDocument?> UpdateInvoiceDocumentAsync(AppDbContext db, int id, SaveInvoiceDocumentRequest request)
@@ -2904,10 +3084,26 @@ static async Task<InvoiceDocument?> UpdateInvoiceDocumentAsync(AppDbContext db, 
 
     ApplyInvoiceDocumentRequest(doc, request);
     await ValidateInvoiceDocumentIdentityAsync(db, doc);
+    await RepointUnifiedDocumentLedgerLinksAsync(db, doc, before);
     AddInvoiceDocumentChangeEvents(db, doc, before);
     await db.SaveChangesAsync();
     await SyncUnifiedInvoiceDocumentToLedgerAsync(db, doc);
     return doc;
+}
+
+static async Task<IResult> UpdateInvoiceDocumentResultAsync(AppDbContext db, int id, SaveInvoiceDocumentRequest request)
+{
+    try
+    {
+        var doc = await UpdateInvoiceDocumentAsync(db, id, request);
+        return doc is null
+            ? Results.NotFound(new { message = $"Document {id} was not found." })
+            : Results.Ok(ToInvoiceDocumentDto(doc));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { message = ex.Message });
+    }
 }
 
 static async Task<InvoiceDocument?> DuplicateInvoiceDocumentAsync(AppDbContext db, int id, string? targetType)
@@ -3067,12 +3263,13 @@ static async Task ValidateInvoiceDocumentIdentityAsync(AppDbContext db, InvoiceD
     }
 
     var duplicate = await db.InvoiceDocuments.AsNoTracking()
-        .Where(d => !d.IsArchived && d.Id != doc.Id && d.DocNumber == doc.DocNumber)
-        .Select(d => new { d.Id, d.DocType, d.CustomerName, d.ProjectName })
+        .Where(d => d.Id != doc.Id && d.DocNumber == doc.DocNumber)
+        .Select(d => new { d.Id, d.DocType, d.CustomerName, d.ProjectName, d.IsArchived })
         .FirstOrDefaultAsync();
     if (duplicate is not null)
     {
-        throw new InvalidOperationException($"Document number {doc.DocNumber} is already used by record #{duplicate.Id} ({duplicate.DocType}, {duplicate.CustomerName}, {duplicate.ProjectName}).");
+        var archiveState = duplicate.IsArchived ? "archived " : string.Empty;
+        throw new InvalidOperationException($"Document number {doc.DocNumber} is already reserved by {archiveState}record #{duplicate.Id} ({duplicate.DocType}, {duplicate.CustomerName}, {duplicate.ProjectName}). Archived estimates/invoices keep their numbers reserved for audit clarity.");
     }
 }
 
@@ -3138,11 +3335,19 @@ static async Task<IResult> RestoreInvoiceDocumentAndSyncAsync(AppDbContext db, i
         return Results.NotFound(new { message = $"Document {id} was not found." });
     }
 
+    try
+    {
+        await ValidateInvoiceDocumentIdentityAsync(db, doc);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { message = ex.Message });
+    }
+
     doc.IsArchived = false;
     doc.ArchivedAt = null;
     doc.ArchiveReason = null;
     doc.UpdatedAt = DateTimeOffset.UtcNow.ToString("O");
-    await ValidateInvoiceDocumentIdentityAsync(db, doc);
     AddInvoiceDocumentEvent(db, doc, "Restored", doc.Status, doc.Status, $"{doc.DocType} restored", $"{doc.DocNumber} was restored from archive.", doc.Total);
     await SyncUnifiedInvoiceDocumentToLedgerAsync(db, doc);
     await db.SaveChangesAsync();
@@ -3160,6 +3365,46 @@ static async Task UpsertSettingAsync(AppDbContext db, string key, string? value)
     {
         setting.Value = value ?? string.Empty;
     }
+}
+
+static InvoiceBuilderConfigRequest NormalizeInvoiceBuilderConfigRequest(InvoiceBuilderConfigRequest request)
+{
+    return request with
+    {
+        Id = 1,
+        BusinessName = NormalizeConfigText(request.BusinessName, 160),
+        BusinessLocation = NormalizeConfigText(request.BusinessLocation, 160),
+        BusinessEmail = NormalizeConfigText(request.BusinessEmail, 160).ToLowerInvariant(),
+        BusinessPhone = NormalizeConfigText(request.BusinessPhone, 160),
+        BusinessWebsite = NormalizeConfigText(request.BusinessWebsite, 500),
+        BusinessEtsy = NormalizeConfigText(request.BusinessEtsy, 300),
+        BusinessInstagram = NormalizeConfigText(request.BusinessInstagram, 160),
+        BusinessFacebook = NormalizeConfigText(request.BusinessFacebook, 300),
+        BrandColor = NormalizeConfigBrandColor(request.BrandColor),
+        CalcGramRate = ClampDefaultedConfigDecimal(request.CalcGramRate, 0.05m, 0m, 1_000m),
+        CalcHourRate = ClampDefaultedConfigDecimal(request.CalcHourRate, 3m, 0m, 10_000m),
+        CalcDesignRate = ClampDefaultedConfigDecimal(request.CalcDesignRate, 25m, 0m, 10_000m),
+        CalcSetupFee = Math.Clamp(request.CalcSetupFee, 0m, 1_000_000_000m),
+        CalcPostFee = Math.Clamp(request.CalcPostFee, 0m, 1_000_000_000m),
+        CalcMinimum = ClampDefaultedConfigDecimal(request.CalcMinimum, 15m, 0m, 1_000_000_000m)
+    };
+}
+
+static string NormalizeConfigText(string? value, int maxLength)
+{
+    var clean = Regex.Replace(value ?? string.Empty, @"[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]", string.Empty).Trim();
+    return clean.Length > maxLength ? clean[..maxLength] : clean;
+}
+
+static string NormalizeConfigBrandColor(string? value)
+{
+    var clean = NormalizeConfigText(value, 32);
+    return Regex.IsMatch(clean, "^#[0-9a-fA-F]{6}$") ? clean.ToLowerInvariant() : "#17468f";
+}
+
+static decimal ClampDefaultedConfigDecimal(decimal value, decimal fallback, decimal min, decimal max)
+{
+    return Math.Clamp(value <= 0m ? fallback : value, min, max);
 }
 
 static async Task<(byte[] Bytes, string FileName)> CreateDatabaseBackupAsync(AppDbContext db, IWebHostEnvironment env, IConfiguration configuration)
@@ -3228,6 +3473,35 @@ static string ContentTypeForFile(string filePath)
         ".md" => "text/markdown; charset=utf-8",
         _ => "application/octet-stream"
     };
+}
+
+static bool IsSupportedProofUploadFile(string? fileName)
+{
+    var extension = Path.GetExtension(fileName ?? string.Empty).ToLowerInvariant();
+    return extension is ".pdf" or ".docx" or ".png" or ".jpg" or ".jpeg" or ".webp" or ".txt" or ".csv" or ".json" or ".md";
+}
+
+static bool IsSqliteBusyOrLocked(Exception exception)
+{
+    for (var current = exception; current is not null; current = current.InnerException)
+    {
+        if (current is SqliteException sqlite
+            && (sqlite.SqliteErrorCode is 5 or 6
+                || sqlite.SqliteExtendedErrorCode is 5 or 6
+                || current.Message.Contains("locked", StringComparison.OrdinalIgnoreCase)
+                || current.Message.Contains("busy", StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+
+        if (current.Message.Contains("database is locked", StringComparison.OrdinalIgnoreCase)
+            || current.Message.Contains("database is busy", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 static bool IsAllowedProofFilePath(string contentRootPath, string fullPath)
@@ -3309,6 +3583,19 @@ static async Task<string> TryExtractDocumentPreviewAsync(string path, string? co
                 .Take(80);
             return TrimPreview(string.Join(" ", pieces));
         }
+
+        if (extension == ".docx")
+        {
+            using var archive = System.IO.Compression.ZipFile.OpenRead(path);
+            var document = archive.GetEntry("word/document.xml");
+            if (document is null) return string.Empty;
+
+            await using var stream = document.Open();
+            using var reader = new StreamReader(stream);
+            var xml = await reader.ReadToEndAsync();
+            var text = System.Text.RegularExpressions.Regex.Replace(xml, "<[^>]+>", " ");
+            return TrimPreview(System.Net.WebUtility.HtmlDecode(text));
+        }
     }
     catch
     {
@@ -3338,6 +3625,7 @@ static InvoiceDocumentAuditState CaptureInvoiceDocumentAuditState(InvoiceDocumen
 {
     return new InvoiceDocumentAuditState(
         doc.DocType,
+        doc.DocNumber,
         doc.Status,
         doc.CustomerName,
         doc.ProjectName,
@@ -3393,6 +3681,62 @@ static void AddInvoiceDocumentChangeEvents(AppDbContext db, InvoiceDocument doc,
         AddInvoiceDocumentEvent(db, doc, "Saved", doc.Status, doc.Status,
             $"{doc.DocType} saved",
             $"{doc.DocNumber} was saved without a tracked status, money, customer, project, or line-item change.", doc.Total);
+    }
+}
+
+static async Task RepointUnifiedDocumentLedgerLinksAsync(AppDbContext db, InvoiceDocument doc, InvoiceDocumentAuditState before)
+{
+    var oldNumber = before.DocNumber?.Trim();
+    var newNumber = doc.DocNumber?.Trim();
+    if (string.IsNullOrWhiteSpace(oldNumber)
+        || string.IsNullOrWhiteSpace(newNumber)
+        || string.Equals(oldNumber, newNumber, StringComparison.OrdinalIgnoreCase)
+        || !string.Equals(before.DocType, doc.DocType, StringComparison.OrdinalIgnoreCase))
+    {
+        return;
+    }
+
+    var now = DateTime.UtcNow;
+    if (doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase))
+    {
+        var oldSource = $"Unified invoice {oldNumber}";
+        var newSource = $"Unified invoice {newNumber}";
+
+        var invoices = await db.ReceivableInvoices
+            .Where(x => x.SourceProof == oldSource)
+            .ToListAsync();
+        foreach (var invoice in invoices)
+        {
+            invoice.OriginalInvoiceNumber ??= oldNumber;
+            invoice.InvoiceNumber = newNumber;
+            invoice.SourceProof = newSource;
+            invoice.UpdatedAtUtc = now;
+        }
+
+        var sales = await db.Sales
+            .Where(x => x.Platform == "Direct" && x.SourceProof == oldSource)
+            .ToListAsync();
+        foreach (var sale in sales)
+        {
+            sale.InvoiceNumber = newNumber;
+            sale.SourceProof = newSource;
+            sale.UpdatedAtUtc = now;
+        }
+    }
+    else if (doc.DocType.Equals("ESTIMATE", StringComparison.OrdinalIgnoreCase))
+    {
+        var oldSource = $"Unified estimate {oldNumber}";
+        var newSource = $"Unified estimate {newNumber}";
+
+        var jobs = await db.CustomerJobs
+            .Where(x => x.SourceProof == oldSource)
+            .ToListAsync();
+        foreach (var job in jobs)
+        {
+            job.RelatedInvoiceNumber = newNumber;
+            job.SourceProof = newSource;
+            job.UpdatedAtUtc = now;
+        }
     }
 }
 
@@ -3637,37 +3981,89 @@ static async Task EnsureUnifiedInvoiceTablesAsync(AppDbContext db)
     await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_PrinterQueueItems_CustomerJobId\" ON \"PrinterQueueItems\" (\"CustomerJobId\");");
 
     // ── Schema migrations for new fields (safe on existing DBs) ──────────────
-    var alterations = new[]
+    var alterations = new (string Table, string Column, string Sql)[]
     {
         // Expenses
-        "ALTER TABLE \"Expenses\" ADD COLUMN \"TaxBucket\" TEXT NOT NULL DEFAULT 'Operating Expense'",
-        "ALTER TABLE \"Expenses\" ADD COLUMN \"DeductibleStatus\" TEXT NOT NULL DEFAULT 'Yes'",
-        "ALTER TABLE \"Expenses\" ADD COLUMN \"BusinessUsePercent\" TEXT NULL",
-        "ALTER TABLE \"Expenses\" ADD COLUMN \"CountedExpense\" INTEGER NOT NULL DEFAULT 1",
-        "ALTER TABLE \"Expenses\" ADD COLUMN \"TaxCategory\" TEXT NOT NULL DEFAULT 'Other business expense'",
+        ("Expenses", "TaxBucket", "ALTER TABLE \"Expenses\" ADD COLUMN \"TaxBucket\" TEXT NOT NULL DEFAULT 'Operating Expense'"),
+        ("Expenses", "DeductibleStatus", "ALTER TABLE \"Expenses\" ADD COLUMN \"DeductibleStatus\" TEXT NOT NULL DEFAULT 'Yes'"),
+        ("Expenses", "BusinessUsePercent", "ALTER TABLE \"Expenses\" ADD COLUMN \"BusinessUsePercent\" TEXT NULL"),
+        ("Expenses", "CountedExpense", "ALTER TABLE \"Expenses\" ADD COLUMN \"CountedExpense\" INTEGER NOT NULL DEFAULT 1"),
+        ("Expenses", "TaxCategory", "ALTER TABLE \"Expenses\" ADD COLUMN \"TaxCategory\" TEXT NOT NULL DEFAULT 'Other business expense'"),
+        ("Expenses", "PaymentMethod", "ALTER TABLE \"Expenses\" ADD COLUMN \"PaymentMethod\" TEXT NOT NULL DEFAULT 'Unknown / Review'"),
         // Assets
-        "ALTER TABLE \"Assets\" ADD COLUMN \"InServiceDate\" TEXT NULL",
-        "ALTER TABLE \"Assets\" ADD COLUMN \"TaxTreatment\" TEXT NOT NULL DEFAULT 'Review'",
-        "ALTER TABLE \"Assets\" ADD COLUMN \"CountedExpenseThisYear\" INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE \"Assets\" ADD COLUMN \"NotYetExpensed\" TEXT NULL",
+        ("Assets", "InServiceDate", "ALTER TABLE \"Assets\" ADD COLUMN \"InServiceDate\" TEXT NULL"),
+        ("Assets", "TaxTreatment", "ALTER TABLE \"Assets\" ADD COLUMN \"TaxTreatment\" TEXT NOT NULL DEFAULT 'Review'"),
+        ("Assets", "CountedExpenseThisYear", "ALTER TABLE \"Assets\" ADD COLUMN \"CountedExpenseThisYear\" INTEGER NOT NULL DEFAULT 0"),
+        ("Assets", "NotYetExpensed", "ALTER TABLE \"Assets\" ADD COLUMN \"NotYetExpensed\" TEXT NULL"),
+        ("Assets", "PaymentMethod", "ALTER TABLE \"Assets\" ADD COLUMN \"PaymentMethod\" TEXT NOT NULL DEFAULT 'Unknown / Review'"),
+        // Customer work and payment trackers
+        ("CustomerJobs", "PaymentMethod", "ALTER TABLE \"CustomerJobs\" ADD COLUMN \"PaymentMethod\" TEXT NOT NULL DEFAULT 'Unknown / Review'"),
+        ("ReceivableInvoices", "PaymentMethod", "ALTER TABLE \"ReceivableInvoices\" ADD COLUMN \"PaymentMethod\" TEXT NOT NULL DEFAULT 'Unknown / Review'"),
+        ("Bills", "PaymentMethod", "ALTER TABLE \"Bills\" ADD COLUMN \"PaymentMethod\" TEXT NOT NULL DEFAULT 'Unknown / Review'"),
+        ("Bills", "TaxCategory", "ALTER TABLE \"Bills\" ADD COLUMN \"TaxCategory\" TEXT NOT NULL DEFAULT 'Other business expense'"),
+        ("TaxObligations", "PaymentMethod", "ALTER TABLE \"TaxObligations\" ADD COLUMN \"PaymentMethod\" TEXT NOT NULL DEFAULT 'Unknown / Review'"),
         // MakerWorld
-        "ALTER TABLE \"MakerWorldRewards\" ADD COLUMN \"IncomeStatus\" TEXT NOT NULL DEFAULT 'Review'",
+        ("MakerWorldRewards", "IncomeStatus", "ALTER TABLE \"MakerWorldRewards\" ADD COLUMN \"IncomeStatus\" TEXT NOT NULL DEFAULT 'Review'"),
         // Payment-channel tax exports
-        "ALTER TABLE \"Sales\" ADD COLUMN \"PaymentMethod\" TEXT NOT NULL DEFAULT 'Unknown / Review'",
-        "ALTER TABLE \"Sales\" ADD COLUMN \"SalesTaxHandling\" TEXT NOT NULL DEFAULT 'Unknown / Review'",
-        "ALTER TABLE \"InvoiceDocuments\" ADD COLUMN \"PaymentMethod\" TEXT NOT NULL DEFAULT 'Unknown / Review'",
+        ("Sales", "PaymentMethod", "ALTER TABLE \"Sales\" ADD COLUMN \"PaymentMethod\" TEXT NOT NULL DEFAULT 'Unknown / Review'"),
+        ("Sales", "SalesTaxHandling", "ALTER TABLE \"Sales\" ADD COLUMN \"SalesTaxHandling\" TEXT NOT NULL DEFAULT 'Unknown / Review'"),
+        ("InvoiceDocuments", "PaymentMethod", "ALTER TABLE \"InvoiceDocuments\" ADD COLUMN \"PaymentMethod\" TEXT NOT NULL DEFAULT 'Unknown / Review'"),
         // Unified invoice/estimate archive safety
-        "ALTER TABLE \"InvoiceDocuments\" ADD COLUMN \"IsArchived\" INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE \"InvoiceDocuments\" ADD COLUMN \"ArchivedAt\" TEXT NULL",
-        "ALTER TABLE \"InvoiceDocuments\" ADD COLUMN \"ArchiveReason\" TEXT NULL",
+        ("InvoiceDocuments", "IsArchived", "ALTER TABLE \"InvoiceDocuments\" ADD COLUMN \"IsArchived\" INTEGER NOT NULL DEFAULT 0"),
+        ("InvoiceDocuments", "ArchivedAt", "ALTER TABLE \"InvoiceDocuments\" ADD COLUMN \"ArchivedAt\" TEXT NULL"),
+        ("InvoiceDocuments", "ArchiveReason", "ALTER TABLE \"InvoiceDocuments\" ADD COLUMN \"ArchiveReason\" TEXT NULL"),
     };
 
-    foreach (var sql in alterations)
+    foreach (var alteration in alterations)
     {
-        try { await db.Database.ExecuteSqlRawAsync(sql); }
-        catch { /* Column already exists — safe to ignore */ }
+        await AddSqliteColumnIfMissingAsync(db, alteration.Table, alteration.Column, alteration.Sql);
     }
 }
+
+static async Task AddSqliteColumnIfMissingAsync(AppDbContext db, string tableName, string columnName, string sql)
+{
+    if (await SqliteColumnExistsAsync(db, tableName, columnName))
+    {
+        return;
+    }
+
+    await db.Database.ExecuteSqlRawAsync(sql);
+}
+
+static async Task<bool> SqliteColumnExistsAsync(AppDbContext db, string tableName, string columnName)
+{
+    var connection = db.Database.GetDbConnection();
+    var closeAfter = connection.State != System.Data.ConnectionState.Open;
+    if (closeAfter)
+    {
+        await connection.OpenAsync();
+    }
+
+    try
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"PRAGMA table_info({QuoteSqliteIdentifier(tableName)})";
+        await using var reader = await command.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            if (reader.FieldCount > 1 && string.Equals(reader.GetString(1), columnName, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+    finally
+    {
+        if (closeAfter)
+        {
+            await connection.CloseAsync();
+        }
+    }
+}
+
+static string QuoteSqliteIdentifier(string identifier) => "\"" + identifier.Replace("\"", "\"\"") + "\"";
 
 #pragma warning disable CS8321 // Quarantined one-time repair helpers; never run automatically on startup.
 static async Task SeedUnifiedInvoiceDocumentsFromLedgerAsync(AppDbContext db)
@@ -4043,7 +4439,10 @@ static async Task<string> NextInvoiceDocumentNumberAsync(AppDbContext db, string
 
 static void ApplyInvoiceDocumentRequest(InvoiceDocument doc, SaveInvoiceDocumentRequest request)
 {
-    doc.DocNumber = request.DocNumber ?? doc.DocNumber;
+    if (!string.IsNullOrWhiteSpace(request.DocNumber))
+    {
+        doc.DocNumber = request.DocNumber.Trim();
+    }
     doc.DocType = (request.DocType ?? "ESTIMATE").ToUpperInvariant();
     doc.Status = request.Status ?? "Draft";
     doc.CustomerName = request.CustomerName;
@@ -4060,7 +4459,7 @@ static void ApplyInvoiceDocumentRequest(InvoiceDocument doc, SaveInvoiceDocument
     doc.PageSize = request.PageSize;
     doc.DocDate = request.DocDate;
     doc.DueDate = request.DueDate;
-    doc.PaymentMethod = string.IsNullOrWhiteSpace(request.PaymentMethod) ? "Unknown / Review" : request.PaymentMethod;
+    doc.PaymentMethod = NormalizePaymentMethod(request.PaymentMethod);
     doc.PricingGuide = request.PricingGuide;
     doc.TermsNotes = request.TermsNotes;
     doc.StandardTurnaround = request.StandardTurnaround;
@@ -4186,7 +4585,8 @@ static async Task SyncUnifiedInvoiceDocumentToLedgerAsync(AppDbContext db, Invoi
 
     if (doc.DocType == "ESTIMATE")
     {
-        var job = await db.CustomerJobs.FirstOrDefaultAsync(x => x.RelatedInvoiceNumber == doc.DocNumber);
+        var unifiedSource = $"Unified estimate {doc.DocNumber}";
+        var job = await db.CustomerJobs.FirstOrDefaultAsync(x => x.SourceProof == unifiedSource);
         if (job is null)
         {
             job = new CustomerJob
@@ -4194,12 +4594,16 @@ static async Task SyncUnifiedInvoiceDocumentToLedgerAsync(AppDbContext db, Invoi
                 Platform = "Direct",
                 JobType = "Estimate",
                 RelatedInvoiceNumber = doc.DocNumber,
-                SourceProof = $"Unified estimate {doc.DocNumber}",
+                SourceProof = unifiedSource,
                 Notes = "Created from the unified estimate/invoice workspace. Estimate only; not income and not AR."
             };
             db.CustomerJobs.Add(job);
         }
 
+        job.Platform = "Direct";
+        job.JobType = "Estimate";
+        job.RelatedInvoiceNumber = doc.DocNumber;
+        job.SourceProof = unifiedSource;
         job.JobDate = ParseDate(doc.DocDate) ?? job.JobDate;
         job.DueDate = ParseDate(doc.DueDate) ?? job.DueDate;
         job.CustomerName = doc.CustomerName ?? job.CustomerName;
@@ -4212,14 +4616,13 @@ static async Task SyncUnifiedInvoiceDocumentToLedgerAsync(AppDbContext db, Invoi
         job.AmountPaid = null;
         job.InvoiceAmount = null;
         job.NeedsReview = false;
+        job.IsArchived = false;
+        job.UpdatedAtUtc = DateTime.UtcNow;
     }
     else if (doc.DocType == "INVOICE")
     {
         var unifiedSource = $"Unified invoice {doc.DocNumber}";
         var invoice = await db.ReceivableInvoices.FirstOrDefaultAsync(x => x.SourceProof == unifiedSource);
-        invoice ??= await db.ReceivableInvoices.FirstOrDefaultAsync(x =>
-            x.InvoiceNumber == doc.DocNumber
-            && x.CustomerName == (doc.CustomerName ?? string.Empty));
 
         if (invoice is null)
         {
@@ -4245,6 +4648,7 @@ static async Task SyncUnifiedInvoiceDocumentToLedgerAsync(AppDbContext db, Invoi
         invoice.SalesTax = doc.TaxAmount;
         invoice.InvoiceTotal = doc.Total;
         invoice.AmountPaid = doc.AmountPaid;
+        invoice.PaymentMethod = NormalizePaymentMethod(doc.PaymentMethod);
         invoice.IncludeInCashReports = doc.AmountPaid > 0;
         invoice.NeedsReview = doc.AmountPaid < doc.Total && !invoice.Status.Equals("Void", StringComparison.OrdinalIgnoreCase);
 
@@ -4260,16 +4664,18 @@ static async Task SyncInvoicePaymentToSaleAsync(AppDbContext db, InvoiceDocument
     var sale = await db.Sales.FirstOrDefaultAsync(x =>
         x.InvoiceNumber == doc.DocNumber
         && x.Platform == "Direct"
-        && (x.SourceProof == unifiedSource || x.CustomerName == doc.CustomerName));
+        && x.SourceProof == unifiedSource);
 
     if (doc.AmountPaid <= 0 || doc.Status.Equals("Void", StringComparison.OrdinalIgnoreCase))
     {
         if (sale is not null && string.Equals(sale.SourceProof, unifiedSource, StringComparison.OrdinalIgnoreCase))
         {
             sale.IncludeInDashboard = false;
+            sale.IsArchived = true;
             sale.Status = "Draft";
             sale.NeedsReview = false;
             sale.Notes = "Automatically hidden because the unified invoice is unpaid or void.";
+            sale.UpdatedAtUtc = DateTime.UtcNow;
         }
 
         return;
@@ -4292,7 +4698,7 @@ static async Task SyncInvoicePaymentToSaleAsync(AppDbContext db, InvoiceDocument
     sale.SaleDate = ParseDate(doc.DocDate) ?? sale.SaleDate ?? DateTime.Today;
     sale.CustomerName = doc.CustomerName ?? sale.CustomerName;
     sale.ProductName = doc.ProjectName ?? sale.ProductName;
-    sale.PaymentMethod = string.IsNullOrWhiteSpace(doc.PaymentMethod) ? "Unknown / Review" : doc.PaymentMethod;
+    sale.PaymentMethod = NormalizePaymentMethod(doc.PaymentMethod);
     sale.Color = doc.Color ?? sale.Color;
     sale.Quantity = 1;
     sale.ItemSales = allocated.SalesBase;
@@ -4301,7 +4707,9 @@ static async Task SyncInvoicePaymentToSaleAsync(AppDbContext db, InvoiceDocument
     sale.CustomerPaid = doc.AmountPaid;
     sale.Status = doc.AmountPaid >= doc.Total ? "Paid" : "Partial";
     sale.IncludeInDashboard = true;
+    sale.IsArchived = false;
     sale.NeedsReview = false;
+    sale.UpdatedAtUtc = DateTime.UtcNow;
 }
 
 static async Task SyncManualReceivableInvoiceToSaleAsync(AppDbContext db, ReceivableInvoice invoice)
@@ -4317,7 +4725,7 @@ static async Task SyncManualReceivableInvoiceToSaleAsync(AppDbContext db, Receiv
     var sale = await db.Sales.FirstOrDefaultAsync(x =>
         x.Platform == "Direct"
         && x.InvoiceNumber == invoice.InvoiceNumber
-        && (x.SourceProof == sourceProof || x.CustomerName == invoice.CustomerName));
+        && x.SourceProof == sourceProof);
     var paid = invoice.AmountPaid ?? 0;
     var total = invoice.InvoiceTotal ?? 0;
 
@@ -4326,9 +4734,11 @@ static async Task SyncManualReceivableInvoiceToSaleAsync(AppDbContext db, Receiv
         if (sale is not null && string.Equals(sale.SourceProof, sourceProof, StringComparison.OrdinalIgnoreCase))
         {
             sale.IncludeInDashboard = false;
+            sale.IsArchived = true;
             sale.Status = "Draft";
             sale.NeedsReview = false;
             sale.Notes = "Automatically hidden because the receivable invoice is unpaid or void.";
+            sale.UpdatedAtUtc = DateTime.UtcNow;
         }
 
         return;
@@ -4357,6 +4767,7 @@ static async Task SyncManualReceivableInvoiceToSaleAsync(AppDbContext db, Receiv
     sale.SaleDate = invoice.InvoiceDate ?? sale.SaleDate ?? DateTime.Today;
     sale.CustomerName = invoice.CustomerName;
     sale.ProductName = invoice.ProjectName ?? "Receivable invoice";
+    sale.PaymentMethod = NormalizePaymentMethod(invoice.PaymentMethod);
     sale.Quantity = 1;
     sale.ItemSales = allocated.SalesBase;
     sale.ShippingCharged = 0;
@@ -4364,7 +4775,9 @@ static async Task SyncManualReceivableInvoiceToSaleAsync(AppDbContext db, Receiv
     sale.CustomerPaid = paid;
     sale.Status = paid >= total ? "Paid" : "Partial";
     sale.IncludeInDashboard = true;
+    sale.IsArchived = false;
     sale.NeedsReview = false;
+    sale.UpdatedAtUtc = DateTime.UtcNow;
 }
 
 static object ToInvoiceDocumentDto(InvoiceDocument doc) => new
@@ -4556,6 +4969,7 @@ public sealed record InboxSuggestionLane(
 
 public sealed record InvoiceDocumentAuditState(
     string DocType,
+    string? DocNumber,
     string Status,
     string? CustomerName,
     string? ProjectName,
@@ -4589,3 +5003,5 @@ public sealed record TaxSaleExportRow(
     string? SourceProof,
     bool NeedsReview,
     string? Notes);
+
+public partial class Program;

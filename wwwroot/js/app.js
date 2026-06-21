@@ -1,6 +1,8 @@
 const appState = {
   currentPage: 'dashboard',
   modal: { config: null, row: null, mode: 'create' },
+  modalSaveGuard: window.EpataModalSaveState?.createModalSaveGuard?.() || null,
+  modalSaveInFlight: false,
   globalSearchTimer: null,
   invoicePdfModule: null,
   invoiceToolSnapshot: null,
@@ -14,6 +16,8 @@ const appState = {
   aiSlicerDraft: null,
   aiListingDraft: null,
   localAiHeaderTimer: null,
+  localAiActionInFlight: null,
+  asyncActionKeys: new Set(),
   documentIntakePrefill: null,
   timelineQuery: '',
   timelineCustomer: '',
@@ -31,13 +35,39 @@ const appState = {
 
 const sidebarPreferenceKey = 'epataSidebarCollapsed';
 
-const moneyFields = new Set(['itemSales','shippingCharged','salesTaxCollected','customerPaid','platformFees','shippingLabelCost','refunds','estimatedCogs','subtotal','discount','rushFee','salesTax','invoiceTotal','amountPaid','balanceDue','amount','total','openingBalance','currentBalance','cost','giftCardAmount','quoteAmount','invoiceAmount','targetPrice','grams','materialCostPerGram','printHours','machineRatePerHour','packagingCost','designMinutes','rewardValue','pointsValue','notYetExpensed','netBeforeCogs','estNetAfterCogs','estimatedAmount','parkingAndTolls']);
+async function runExclusiveAction(key, busyMessage, action, options = {}) {
+  const actionKey = String(key || 'action');
+  if (appState.asyncActionKeys.has(actionKey)) {
+    if (busyMessage) toast(busyMessage, 'info');
+    return null;
+  }
+
+  appState.asyncActionKeys.add(actionKey);
+  const button = options.button || null;
+  const originalText = button?.textContent;
+  if (button) {
+    button.disabled = true;
+    if (options.busyText) button.textContent = options.busyText;
+  }
+
+  try {
+    return await action();
+  } finally {
+    appState.asyncActionKeys.delete(actionKey);
+    if (button?.isConnected) {
+      button.disabled = false;
+      if (originalText !== undefined) button.textContent = originalText;
+    }
+  }
+}
+
+const moneyFields = new Set(['itemSales','shippingCharged','salesTaxCollected','customerPaid','platformFees','shippingLabelCost','refunds','estimatedCogs','subtotal','discount','rushFee','salesTax','invoiceTotal','amountPaid','balanceDue','amount','total','openingBalance','currentBalance','cost','giftCardAmount','quoteAmount','invoiceAmount','targetPrice','grams','materialCostPerGram','printHours','machineRatePerHour','packagingCost','designMinutes','rewardValue','pointsValue','notYetExpensed','netBeforeCogs','estNetAfterCogs','estimatedAmount','parkingAndTolls','countedDeduction','incomeAmount']);
 const dateFields = new Set(['saleDate','shipByDate','invoiceDate','dueDate','billDate','paymentDate','expenseDate','purchaseDate','warrantyEndDate','rewardDate','documentDate','jobDate','tripDate','paidOrFiledDate','occurredAt','followUpDate','queueDate','scheduledStart','startedAt','estimatedFinish','completedAt','createdAtUtc','updatedAtUtc','createdAt','updatedAt','lastActivity']);
 const dateTimeFields = new Set(['occurredAt','scheduledStart','startedAt','estimatedFinish','completedAt']);
 
 const commonOptions = {
   platform: ['Direct','Etsy','MakerWorld','Local','Other'],
-  paymentMethod: ['Unknown / Review','Cash','Zelle','Venmo','Cash App','PayPal','ACH / Bank Transfer','Check','Credit Card','Debit Card','Etsy Payments','MakerWorld','Online Marketplace','Other Non-Cash'],
+  paymentMethod: ['Unknown / Review','Cash','Check','Zelle','Venmo','Cash App','PayPal','ACH / Bank Transfer','Wire Transfer','Credit Card','Debit Card','Square','Stripe','Etsy Payments','MakerWorld','Online Marketplace','Other Non-Cash'],
   yesNo: ['Yes','No'],
   partyType: ['Customer','Vendor','Both'],
   saleStatus: ['Draft','Paid','Fulfilled','Refunded','Needs Review'],
@@ -76,6 +106,7 @@ const help = {
 };
 
 const proofFieldNames = new Set(['sourceProof', 'receiptProof', 'filePathOrUrl']);
+let pageRenderSequence = 0;
 
 const configs = {
   customerJobs: {
@@ -83,7 +114,7 @@ const configs = {
     title: 'Customer Jobs',
     nav: 'Customer Jobs',
     purpose: 'Track the work itself: leads, Etsy orders, direct custom jobs, design work, prints in progress, and completed jobs. This is your customer/project history.',
-    columns: ['jobDate','customerName','platform','jobName','status','relatedOrderNumber','relatedInvoiceNumber','invoiceAmount','amountPaid','needsReview'],
+    columns: ['jobDate','customerName','platform','jobName','status','paymentMethod','relatedOrderNumber','relatedInvoiceNumber','invoiceAmount','amountPaid','needsReview'],
     fields: [
       f('jobDate','Job Date','date','Date the customer job started or order came in.'),
       f('customerName','Customer Name','text','Who the job is for.'),
@@ -100,6 +131,7 @@ const configs = {
       f('quoteAmount','Quote Amount','number','Amount quoted to the customer, if any.'),
       f('invoiceAmount','Invoice Amount','number','Amount billed or order total.'),
       f('amountPaid','Amount Paid','number','How much the customer has actually paid.'),
+      f('paymentMethod','Payment Method','select','How the customer paid or is expected to pay. Etsy jobs default to Etsy Payments.', commonOptions.paymentMethod),
       f('dueDate','Due Date','date','Promise date or invoice due date.'),
       f('shipByDate','Ship By Date','date','Marketplace ship-by or planned shipping date.'),
       f('sourceProof','Source / Proof','text',help.sourceProof),
@@ -149,7 +181,7 @@ const configs = {
     title: 'AR Ledger Entry / Money Owed Tracker',
     nav: 'AR Ledger',
     purpose: 'Use this to track money a customer owes or paid when there is no builder/PDF invoice document. If you need the printable invoice, use New Invoice instead.',
-    columns: ['invoiceNumber','invoiceDate','dueDate','customerName','projectName','status','invoiceTotal','amountPaid','balanceDue','needsReview'],
+    columns: ['invoiceNumber','invoiceDate','dueDate','customerName','projectName','status','paymentMethod','invoiceTotal','amountPaid','balanceDue','needsReview'],
     fields: [
       f('invoiceNumber','AR / Invoice #','text','The number you are tracking payment against. This does not create a PDF by itself.'),
       f('originalInvoiceNumber','PDF Invoice #, if different','text','Only use this when this AR tracker points to an invoice PDF made somewhere else or with a different number.'),
@@ -165,6 +197,7 @@ const configs = {
       f('salesTax','Sales Tax','number','Tax dollars charged.'),
       f('invoiceTotal','Invoice Total','number','Final invoice total.'),
       f('amountPaid','Amount Paid','number','How much has been paid so far.'),
+      f('paymentMethod','Payment Method','select','How the customer paid. Keep Unknown / Review until the tender is confirmed.', commonOptions.paymentMethod),
       f('sourceProof','Source / Proof','text',help.sourceProof),
       f('externalInvoiceAppUrl','Invoice Source Link','text','Optional reference to an outside invoice source. New estimates and invoices should be created from Estimates or Invoices.'),
       f('includeInCashReports','Include in Cash Reports','checkbox','Turn on once actually paid. Keep off for sent/unpaid invoices.'),
@@ -177,7 +210,7 @@ const configs = {
     title: 'Accounts Payable / Bills',
     nav: 'AP Bills',
     purpose: 'Use Bills for money the business owes but has not fully paid yet: vendor invoices, software renewals, shipping invoices, etc.',
-    columns: ['dueDate','vendorName','category','description','status','total','amountPaid','balanceDue','needsReview'],
+    columns: ['dueDate','vendorName','category','description','status','paymentMethod','total','amountPaid','balanceDue','needsReview'],
     fields: [
       f('vendorName','Vendor Name','text','Who you owe.'),
       f('billNumber','Bill #','text','Vendor invoice/bill number, if any.'),
@@ -192,6 +225,7 @@ const configs = {
       f('amountPaid','Amount Paid','number','Amount already paid.'),
       f('paymentDate','Payment Date','date','Date you paid, if paid.'),
       f('status','Status','select','Bill payment status.', commonOptions.billStatus),
+      f('paymentMethod','Payment Method','select','How you paid or will pay this bill: cash, card, check, bank transfer, etc.', commonOptions.paymentMethod),
       f('paymentAccount','Payment Account','text','Cash, bank, credit card, Etsy balance, etc.'),
       f('sourceProof','Source / Proof','text',help.sourceProof),
       f('taxDeductible','Tax Deductible','checkbox','Most business expenses are deductible, but keep it off for personal/non-business items.'),
@@ -204,12 +238,13 @@ const configs = {
     title: 'Expenses / Paid Purchases',
     nav: 'Expenses',
     purpose: 'Use this for purchases already paid: filament, labels, packaging, tools, software, marketplace fees, ads, and office supplies.',
-    columns: ['expenseDate','vendorName','category','description','total','taxBucket','deductibleStatus','needsReview'],
+    columns: ['expenseDate','vendorName','category','description','paymentMethod','total','taxBucket','deductibleStatus','needsReview'],
     fields: [
       f('expenseDate','Expense Date','date','Date you paid or receipt date.'),
       f('vendorName','Vendor Name','text','Store/vendor name.'),
       f('category','Category','select','Expense category.', commonOptions.categories),
       f('description','Description','text','What you bought.'),
+      f('paymentMethod','Payment Method','select','How you paid: cash, card, check, PayPal, Zelle, etc.', commonOptions.paymentMethod),
       f('paymentAccount','Payment Account','text','Cash, card, Etsy balance, gift card, etc.'),
       f('amount','Amount Before Tax','number','Pre-tax amount.'),
       f('salesTax','Sales Tax','number','Tax paid.'),
@@ -251,7 +286,7 @@ const configs = {
     title: 'Products & Costing',
     nav: 'Products / Costing',
     purpose: 'Estimate what items cost to make. This helps you price repeat items without doing math every time.',
-    columns: ['name','sku','material','grams','printHours','targetPrice','estimatedCost','needsReview'],
+    columns: ['name','sku','material','color','grams','printHours','targetPrice','estimatedCost','needsReview'],
     fields: [
       f('name','Product Name','text','Product or common custom-job type.'),
       f('sku','SKU','text','Your product code.'),
@@ -274,7 +309,7 @@ const configs = {
     title: 'Assets / Equipment',
     nav: 'Assets',
     purpose: 'Track bigger business property: printers, AMS, tools, computers, high-value equipment, and warranty info.',
-    columns: ['purchaseDate','name','vendorName','cost','taxTreatment','countedExpenseThisYear','notYetExpensed','needsReview'],
+    columns: ['purchaseDate','name','vendorName','paymentMethod','cost','taxTreatment','countedExpenseThisYear','notYetExpensed','needsReview'],
     fields: [
       f('name','Asset Name','text','Printer, tool, laptop, AMS, etc.'),
       f('purchaseDate','Purchase Date','date','Date purchased.'),
@@ -282,6 +317,7 @@ const configs = {
       f('vendorName','Vendor','text','Where you bought it.'),
       f('category','Category','text','Equipment, tool, computer, etc.'),
       f('cost','Cost','number','Purchase cost.'),
+      f('paymentMethod','Payment Method','select','How you paid for this asset: card, cash, check, transfer, etc.', commonOptions.paymentMethod),
       f('serialNumber','Serial #','text','Serial number.'),
       f('warrantyEndDate','Warranty End','date','Warranty expiration date.'),
       f('businessUsePercent','Business Use %','number','Usually 100 for business-only equipment.'),
@@ -334,7 +370,7 @@ const configs = {
     title: 'Business Accounts',
     nav: 'Accounts',
     purpose: 'Track where business money moves: Etsy balance, cash, bank account, credit card, gift cards. This is not bank sync, just a clear register reference.',
-    columns: ['name','accountType','institution','last4','openingBalance','currentBalance','isActive'],
+    columns: ['name','accountType','institution','last4','activeStatus','openingBalance','currentBalance'],
     fields: [
       f('name','Account Name','text','Friendly name, like Etsy Payments or Business Checking.'),
       f('accountType','Account Type','select','Kind of account.', commonOptions.accountType),
@@ -425,7 +461,7 @@ const configs = {
     title: 'Tax Obligations / Filing & Payment Tracker',
     nav: 'Tax Obligations',
     purpose: 'Track possible and confirmed tax filings, payments, annual fees, confirmation numbers, and proof. Mark Not Required only after confirming that an obligation does not apply.',
-    columns: ['dueDate','jurisdiction','title','period','status','estimatedAmount','amountPaid','needsReview'],
+    columns: ['dueDate','jurisdiction','title','period','status','paymentMethod','estimatedAmount','amountPaid','needsReview'],
     fields: [
       f('taxYear','Tax Year','number','Year the obligation belongs to.'),
       f('title','Obligation','text','Filing, payment, annual report, fee, or review item.'),
@@ -438,6 +474,7 @@ const configs = {
       f('estimatedAmount','Estimated Amount','number','Working estimate or expected fee.'),
       f('amountPaid','Amount Paid','number','Actual payment amount.'),
       f('paidOrFiledDate','Filed / Paid Date','date','Date filed or paid.'),
+      f('paymentMethod','Payment Method','select','How the tax payment was or will be made.', commonOptions.paymentMethod),
       f('confirmationNumber','Confirmation #','text','Agency confirmation or payment reference.'),
       f('proofReference','Proof / Receipt','text','Saved filing receipt, payment confirmation, or document path.'),
       f('officialUrl','Official URL','text','Official agency page or filing portal.'),
@@ -529,6 +566,15 @@ function f(name, label, type, tip, options = null, span = null) {
   return { name, label, type, tip, options, span };
 }
 
+function defaultPaymentMethod(row = {}) {
+  const existing = String(row.paymentMethod || '').trim();
+  if (existing) return existing;
+  const platform = String(row.platform || '').trim().toLowerCase();
+  if (platform === 'etsy') return 'Etsy Payments';
+  if (platform.includes('makerworld')) return 'MakerWorld';
+  return 'Unknown / Review';
+}
+
 function qs(sel) { return document.querySelector(sel); }
 function qsa(sel) { return [...document.querySelectorAll(sel)]; }
 window.openLedgerEntityRecord = openLedgerEntityRecord;
@@ -578,7 +624,7 @@ function formatValue(value, key) {
 function badgeFor(value, needsReview = false) {
   const v = (value || '').toString().toLowerCase();
   let cls = '';
-  if (needsReview || v.includes('review') || v.includes('unpaid') || v.includes('open') || v.includes('sent')) cls = 'warn';
+  if (needsReview || v.includes('review') || v.includes('unpaid') || v.includes('open') || v.includes('sent') || v.includes('due today') || v.includes('due soon') || v.includes('no due date')) cls = 'warn';
   if (v.includes('paid') || v.includes('fulfilled') || v.includes('done') || v.includes('completed')) cls = 'good';
   if (v.includes('void') || v.includes('cancel') || v.includes('refunded') || v.includes('overdue')) cls = 'bad';
   return `<span class="badge ${cls}">${escapeHtml(value ?? '')}</span>`;
@@ -586,11 +632,19 @@ function badgeFor(value, needsReview = false) {
 function escapeHtml(v) {
   return String(v ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 }
-function toast(message) {
-  const el = qs('#toast');
-  el.textContent = message;
-  el.classList.remove('hidden');
-  setTimeout(() => el.classList.add('hidden'), 3200);
+function toast(message, type = 'info', duration = 3200) {
+  if (window.EpataToastStack?.showToast) {
+    window.EpataToastStack.showToast(message, { type, duration });
+    return;
+  }
+
+  const container = qs('#toast-container') || qs('#toast');
+  if (!container) return;
+  const item = document.createElement('div');
+  item.className = `toast ${type}`;
+  item.textContent = message;
+  container.appendChild(item);
+  setTimeout(() => item.remove(), duration);
 }
 
 function bindTooltips() {
@@ -657,9 +711,13 @@ function updateSidebarToggle() {
   const toggle = qs('#sidebarToggle');
   if (!toggle) return;
   const mobile = isMobileSidebar();
-  const expanded = mobile
+  const expanded = window.EpataSidebarState?.sidebarExpandedState({
+    isMobile: mobile,
+    sidebarOpen: document.body.classList.contains('sidebar-open'),
+    sidebarCollapsed: document.body.classList.contains('sidebar-collapsed')
+  }) ?? (mobile
     ? document.body.classList.contains('sidebar-open')
-    : !document.body.classList.contains('sidebar-collapsed');
+    : !document.body.classList.contains('sidebar-collapsed'));
   toggle.setAttribute('aria-expanded', String(expanded));
   toggle.title = mobile
     ? (expanded ? 'Close menu' : 'Open menu')
@@ -678,16 +736,20 @@ function toggleSidebar() {
     document.body.classList.toggle('sidebar-open');
   } else {
     const collapsed = document.body.classList.toggle('sidebar-collapsed');
-    localStorage.setItem(sidebarPreferenceKey, String(collapsed));
+    window.EpataSidebarState?.persistSidebarCollapsed(localStorage, sidebarPreferenceKey, collapsed)
+      ?? localStorage.setItem(sidebarPreferenceKey, String(collapsed));
   }
   updateSidebarToggle();
 }
 
 function initializeSidebar() {
   const saved = localStorage.getItem(sidebarPreferenceKey);
-  const startCollapsed = saved === null
+  const startCollapsed = window.EpataSidebarState?.resolveSidebarCollapsed(
+    saved,
+    window.matchMedia('(max-width: 1120px)').matches
+  ) ?? (saved === null
     ? window.matchMedia('(max-width: 1120px)').matches
-    : saved === 'true';
+    : saved === 'true');
   document.body.classList.toggle('sidebar-collapsed', startCollapsed);
   qs('#sidebarToggle')?.addEventListener('click', toggleSidebar);
   qs('#sidebarScrim')?.addEventListener('click', closeMobileSidebar);
@@ -701,7 +763,12 @@ function initializeSidebar() {
 async function showPage(page, options = {}) {
   const previousPage = appState.currentPage;
   const pageChanged = previousPage !== page;
-  if (pageChanged && !options.skipHistory && previousPage) {
+  if (window.EpataNavigationHistory?.nextPageHistory) {
+    appState.pageHistory = window.EpataNavigationHistory.nextPageHistory(appState.pageHistory, previousPage, page, {
+      skipHistory: options.skipHistory,
+      maxLength: 60,
+    });
+  } else if (pageChanged && !options.skipHistory && previousPage) {
     const last = appState.pageHistory[appState.pageHistory.length - 1];
     if (last !== previousPage) appState.pageHistory.push(previousPage);
     if (appState.pageHistory.length > 60) appState.pageHistory.shift();
@@ -717,6 +784,7 @@ async function showPage(page, options = {}) {
   }
 
   appState.currentPage = page;
+  const renderSequence = ++pageRenderSequence;
   syncBrowserHistory(page, options);
   updateBackButton();
   toggleMergedInvoiceStyles(enteringInvoiceTool);
@@ -734,39 +802,55 @@ async function showPage(page, options = {}) {
   }
 
   const el = qs('#app');
+  const renderTarget = guardedRenderTarget(el, renderSequence);
   el.innerHTML = `<div class="card"><p>Loading...</p></div>`;
   try {
-    if (page === 'dashboard') await renderDashboard(el);
-    else if (page === 'globalSearch') await renderGlobalSearch(el);
-    else if (page === 'quickAdd') renderQuickAdd(el);
-    else if (page === 'invoiceCenter') await renderMergedInvoiceTool(el, 'dashboard', '', appState.invoiceToolSnapshot);
-    else if (page === 'estimates') await renderMergedInvoiceTool(el, 'builder', 'ESTIMATE', appState.invoiceToolSnapshot);
-    else if (page === 'invoices') await renderMergedInvoiceTool(el, 'builder', 'INVOICE', appState.invoiceToolSnapshot);
-    else if (page === 'pricingCalculator') await renderMergedInvoiceTool(el, 'calculator', '', appState.invoiceToolSnapshot);
-    else if (page === 'invoiceRecords') await renderMergedInvoiceTool(el, 'records', '', appState.invoiceToolSnapshot);
-    else if (page === 'jobTimeline') await renderJobTimeline(el);
-    else if (page === 'communications') await renderCommunicationTimeline(el);
-    else if (page === 'printerQueue') await renderPrinterQueue(el);
-    else if (page === 'aiEstimate') await renderAiEstimateIntake(el);
-    else if (page === 'aiOperations') await renderAiOperations(el);
-    else if (page === 'aiReview') await renderAiReviewCenter(el);
-    else if (page === 'actions') await renderActionCenter(el);
-    else if (page === 'localAi') await renderLocalAi(el);
-    else if (page === 'customers') await renderRelationshipDirectory(el, 'customer');
-    else if (page === 'vendors') await renderRelationshipDirectory(el, 'vendor');
-    else if (page === 'ledgerMap') renderLedgerMap(el);
-    else if (page === 'workflowGuide') renderWorkflowGuide(el);
-    else if (page === 'documentIntake') renderDocumentIntake(el);
-    else if (page.startsWith('customerDetail:')) await renderPersonDetail(el, 'customer', decodeURIComponent(page.split(':').slice(1).join(':')));
-    else if (page.startsWith('vendorDetail:')) await renderPersonDetail(el, 'vendor', decodeURIComponent(page.split(':').slice(1).join(':')));
-    else if (page === 'taxPrep') await renderTaxPrep(el);
-    else if (page === 'importExport') renderImportExport(el);
-    else if (page === 'admin') await renderAdmin(el);
-    else if (page === 'help') renderHelp(el);
-    else await renderEntity(el, configs[page]);
+    if (page === 'dashboard') await renderDashboard(renderTarget);
+    else if (page === 'globalSearch') await renderGlobalSearch(renderTarget);
+    else if (page === 'quickAdd') renderQuickAdd(renderTarget);
+    else if (page === 'invoiceCenter') await renderMergedInvoiceTool(renderTarget, 'dashboard', '', appState.invoiceToolSnapshot);
+    else if (page === 'estimates') await renderMergedInvoiceTool(renderTarget, 'builder', 'ESTIMATE', appState.invoiceToolSnapshot);
+    else if (page === 'invoices') await renderMergedInvoiceTool(renderTarget, 'builder', 'INVOICE', appState.invoiceToolSnapshot);
+    else if (page === 'pricingCalculator') await renderMergedInvoiceTool(renderTarget, 'calculator', '', appState.invoiceToolSnapshot);
+    else if (page === 'invoiceRecords') await renderMergedInvoiceTool(renderTarget, 'records', '', appState.invoiceToolSnapshot);
+    else if (page === 'jobTimeline') await renderJobTimeline(renderTarget);
+    else if (page === 'communications') await renderCommunicationTimeline(renderTarget);
+    else if (page === 'printerQueue') await renderPrinterQueue(renderTarget);
+    else if (page === 'aiEstimate') await renderAiEstimateIntake(renderTarget);
+    else if (page === 'aiOperations') await renderAiOperations(renderTarget);
+    else if (page === 'aiReview') await renderAiReviewCenter(renderTarget);
+    else if (page === 'actions') await renderActionCenter(renderTarget);
+    else if (page === 'localAi') await renderLocalAi(renderTarget);
+    else if (page === 'customers') await renderRelationshipDirectory(renderTarget, 'customer');
+    else if (page === 'vendors') await renderRelationshipDirectory(renderTarget, 'vendor');
+    else if (page === 'ledgerMap') renderLedgerMap(renderTarget);
+    else if (page === 'workflowGuide') renderWorkflowGuide(renderTarget);
+    else if (page === 'documentIntake') renderDocumentIntake(renderTarget);
+    else if (page.startsWith('customerDetail:')) await renderPersonDetail(renderTarget, 'customer', decodeURIComponent(page.split(':').slice(1).join(':')));
+    else if (page.startsWith('vendorDetail:')) await renderPersonDetail(renderTarget, 'vendor', decodeURIComponent(page.split(':').slice(1).join(':')));
+    else if (page === 'taxPrep') await renderTaxPrep(renderTarget);
+    else if (page === 'importExport') renderImportExport(renderTarget);
+    else if (page === 'admin') await renderAdmin(renderTarget);
+    else if (page === 'help') renderHelp(renderTarget);
+    else await renderEntity(renderTarget, configs[page]);
   } catch (err) {
-    el.innerHTML = `<div class="card"><h2>Something broke</h2><p>${escapeHtml(err.message)}</p></div>`;
+    if (renderSequence === pageRenderSequence) {
+      el.innerHTML = `<div class="card"><h2>Something broke</h2><p>${escapeHtml(err.message)}</p></div>`;
+    }
   }
+}
+
+function guardedRenderTarget(el, sequence) {
+  return {
+    get innerHTML() {
+      return el.innerHTML;
+    },
+    set innerHTML(value) {
+      if (sequence === pageRenderSequence) {
+        el.innerHTML = value;
+      }
+    }
+  };
 }
 
 function invoiceRouteView(page) {
@@ -902,7 +986,7 @@ async function renderDashboard(el) {
       </div>
       <div class="card">
         <h3>Open Payables</h3>
-        ${smallTable(data.openBills, ['vendorName','description','dueDate','balanceDue','status'])}
+        ${smallTable(data.openBills, ['urgency','vendorName','description','dueDate','balanceDue','status'])}
       </div>
     </div>
     <div class="grid two">
@@ -1047,7 +1131,7 @@ function formatCompact(value) {
 }
 function smallTable(rows, cols) {
   if (!rows || rows.length === 0) return emptyState('Nothing here yet.', 'This area will fill in as records are added.');
-  return `<div class="table-wrap"><table><thead><tr>${cols.map(c=>`<th>${labelize(c)}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${cols.map(c=>`<td>${c.toLowerCase().includes('status') || c === 'priority' ? badgeFor(r[c], r.needsReview) : formatValue(r[c], c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+  return `<div class="table-wrap"><table><thead><tr>${cols.map(c=>`<th>${labelize(c)}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${cols.map(c=>`<td>${c.toLowerCase().includes('status') || c === 'priority' || c === 'urgency' ? badgeFor(r[c], r.needsReview) : formatValue(r[c], c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
 }
 
 function navIcon(name) {
@@ -1261,7 +1345,7 @@ function renderTimelineEvent(event) {
   const exactLabel = event.exactTimeLabel || when.exact;
   const fullLabel = event.exactTimeLabel ? `${event.kind}: ${event.exactTimeLabel}` : when.full;
   const status = event.status || 'Open';
-  return `<button class="timeline-event ${event.needsReview ? 'needs-review' : ''}" onclick="showPage('${escapeHtml(event.routePage)}')">
+  return `<button class="timeline-event ${event.needsReview ? 'needs-review' : ''}" data-timeline-route="${escapeAttr(event.routePage || '')}" data-timeline-id="${Number(event.recordId || 0)}" onclick="openTimelineEvent('${escapeAttr(event.routePage || '')}', ${Number(event.recordId || 0)})">
     <span class="timeline-dot"></span>
     <time title="${escapeHtml(fullLabel)}"><b>${escapeHtml(relativeLabel)}</b><span>${escapeHtml(exactLabel)}</span></time>
     <strong><span>${escapeHtml(event.kind)} · ${escapeHtml(event.title)}</span>${badgeFor(status, event.needsReview)}</strong>
@@ -1330,19 +1414,30 @@ async function renderCommunicationTimeline(el) {
 
 function renderCommunicationCard(row) {
   const when = formatTimelineDateTime(row.occurredAt || row.updatedAtUtc);
-  const followUpOpen = row.followUpStatus === 'Open';
-  const overdue = followUpOpen && row.followUpDate && new Date(`${String(row.followUpDate).substring(0, 10)}T23:59:59`) < new Date();
-  const reference = [row.relatedJobNumber, row.relatedOrderNumber, row.relatedInvoiceNumber].filter(Boolean).join(' · ');
-  return `<article class="communication-card ${overdue ? 'overdue' : ''}">
-    <div class="communication-rail"><span>${escapeHtml(row.direction || 'Note')}</span><i></i></div>
+  const plan = window.EpataCommunicationState?.communicationCardPlan(row) || {
+    direction: row.direction || 'Note',
+    customerName: row.customerName || '',
+    channel: row.channel || '',
+    subject: row.subject || `${row.channel || 'Communication'} with ${row.customerName || 'customer'}`,
+    summary: row.summary || '',
+    followUpStatus: row.followUpStatus || '',
+    followUpDate: row.followUpDate || '',
+    followUpOpen: row.followUpStatus === 'Open',
+    followUpBadge: row.followUpStatus === 'Open' ? 'Follow-up open' : '',
+    overdue: row.followUpStatus === 'Open' && row.followUpDate && new Date(`${String(row.followUpDate).substring(0, 10)}T23:59:59`) < new Date(),
+    reference: [row.relatedJobNumber, row.relatedOrderNumber, row.relatedInvoiceNumber].filter(Boolean).join(' · '),
+    hasLongSummary: String(row.summary || '').length > 280
+  };
+  return `<article class="communication-card ${plan.overdue ? 'overdue' : ''}">
+    <div class="communication-rail"><span>${escapeHtml(plan.direction)}</span><i></i></div>
     <div class="communication-main">
       <div class="card-header-lite">
-        <div><h3>${escapeHtml(row.subject || `${row.channel || 'Communication'} with ${row.customerName}`)}</h3><p class="muted">${escapeHtml(row.customerName)} · ${escapeHtml(row.channel || '')} · <span title="${escapeHtml(when.full)}">${escapeHtml(when.relative || when.exact)}</span></p></div>
-        <div class="actions">${badgeFor(row.direction || 'Note', row.needsReview)}${followUpOpen ? `<span class="badge ${overdue ? 'bad' : 'warn'}">${overdue ? 'Follow-up overdue' : 'Follow-up open'}</span>` : ''}<button class="ghost-button" onclick="openCommunication(${Number(row.id)})">Edit</button></div>
+        <div><h3>${escapeHtml(plan.subject)}</h3><p class="muted">${escapeHtml(plan.customerName)} · ${escapeHtml(plan.channel)} · <span title="${escapeHtml(when.full)}">${escapeHtml(when.relative || when.exact)}</span></p></div>
+        <div class="actions">${badgeFor(plan.direction, row.needsReview)}${plan.followUpOpen ? `<span class="badge ${plan.overdue ? 'bad' : 'warn'}">${escapeHtml(plan.followUpBadge)}</span>` : ''}<button class="ghost-button" onclick="openCommunication(${Number(row.id)})">Edit</button></div>
       </div>
-      <p class="communication-summary">${escapeHtml(row.summary || '')}</p>
-      ${reference ? `<small class="communication-reference">Linked: ${escapeHtml(reference)}</small>` : ''}
-      ${row.followUpDate ? `<small class="communication-reference">Follow-up: ${escapeHtml(formatShortDate(row.followUpDate))} · ${escapeHtml(row.followUpStatus)}</small>` : ''}
+      <p class="communication-summary ${plan.hasLongSummary ? 'long-summary' : ''}">${escapeHtml(plan.summary)}</p>
+      ${plan.reference ? `<small class="communication-reference">Linked: ${escapeHtml(plan.reference)}</small>` : ''}
+      ${plan.followUpDate ? `<small class="communication-reference">Follow-up: ${escapeHtml(formatShortDate(plan.followUpDate))} · ${escapeHtml(plan.followUpStatus)}</small>` : ''}
     </div>
   </article>`;
 }
@@ -1399,7 +1494,7 @@ async function renderPrinterQueue(el) {
     <section class="printer-board">
       ${columns.map(([status, items]) => `<section class="printer-board-column">
         <div class="printer-board-column-head"><h3>${escapeHtml(status)}</h3><span class="badge">${items.length}</span></div>
-        <div class="printer-board-cards">${items.length ? items.map(renderPrinterQueueCard).join('') : '<p class="muted">Nothing here.</p>'}</div>
+        <div class="printer-board-cards">${items.length ? items.map(renderPrinterQueueCard).join('') : `<div class="empty-state compact"><div class="empty-title">No ${escapeHtml(status.toLowerCase())} prints.</div><div class="empty-desc">Queue items will appear here when their status changes.</div></div>`}</div>
       </section>`).join('')}
     </section>`;
 }
@@ -1427,7 +1522,7 @@ window.queueSelectedCustomerJob = () => {
   const id = Number(qs('#printerQueueJobSelect')?.value || 0);
   const job = appState.printerQueueJobs.find(item => Number(item.id) === id);
   if (!job) return toast('Choose a Customer Job first.');
-  quickOpen('printerQueue', 'queue', {
+  const prefill = window.EpataJobWorkflowState?.printerQueuePrefillFromJob(job) || {
     customerJobId: job.id,
     customerName: job.customerName,
     jobName: job.jobName,
@@ -1437,12 +1532,32 @@ window.queueSelectedCustomerJob = () => {
     material: job.material,
     color: job.color,
     notes: job.description
-  });
+  };
+  quickOpen('printerQueue', 'queue', prefill);
 };
 
 window.openPrinterQueueItem = id => {
   const row = appState.printerQueueRows.find(item => Number(item.id) === Number(id));
   if (row) openModal(configs.printerQueue, row);
+};
+
+window.openTimelineEvent = async (routePage, recordId) => {
+  const target = window.EpataJobWorkflowState?.timelineEventTarget({ routePage, recordId })
+    || { kind: 'page', page: routePage || '', configKey: '', rowId: Number(recordId || 0) };
+  if (target.kind === 'modal' && configs[target.configKey]) {
+    await showPage(target.page);
+    const rows = await api(`/api/${configs[target.configKey].route}`);
+    const row = rows.find(item => Number(item.id) === Number(target.rowId));
+    if (row) {
+      openModal(configs[target.configKey], row);
+      return;
+    }
+    toast('The linked row is not available.');
+    return;
+  }
+  if (target.kind === 'page' && target.page) {
+    await showPage(target.page);
+  }
 };
 
 window.updatePrinterQueueStatus = async (id, status) => {
@@ -1547,7 +1662,7 @@ async function renderEntity(el, config) {
           <option value="">All records</option>
           <option value="needs-review">Needs review</option>
           <option value="open">Open / sent / unpaid</option>
-          <option value="paid">Paid / done / completed</option>
+          <option value="paid">Paid / done / refunded</option>
         </select>
         <span class="badge">${rows.length} active rows</span>
       </div>
@@ -1694,20 +1809,30 @@ async function renderPersonDetail(el, mode, name) {
     api('/api/audit-documents')
   ]);
   const party = parties.find(p => sameName(p.name, name) && (isCustomer ? ['customer','both'].includes(String(p.partyType || '').toLowerCase()) : ['vendor','both'].includes(String(p.partyType || '').toLowerCase())));
-  const sections = isCustomer
+  const detailPlan = isCustomer
+    ? window.EpataRelationshipDirectory?.customerDetailSectionPlan?.(name, { sales, invoices, docs, jobs, communications, auditDocs })
+    : window.EpataRelationshipDirectory?.vendorDetailSectionPlan?.(name, { expenses, bills, assets, auditDocs });
+  const fallbackDetailPlan = isCustomer
     ? [
-        ['Sales', 'sales', configs.sales, sales.filter(r => sameName(r.customerName, name))],
-        ['AR Invoices', 'receivables', configs.receivables, invoices.filter(r => sameName(r.customerName, name))],
-        ['Estimate / Invoice PDFs', null, null, docs.filter(r => sameName(r.customerName, name))],
-        ['Jobs', 'customerJobs', configs.customerJobs, jobs.filter(r => sameName(r.customerName, name))],
-        ['Communications', 'communications', configs.communications, communications.filter(r => sameName(r.customerName, name))]
+        { title: 'Sales', configKey: 'sales', rows: sales.filter(r => sameName(r.customerName, name)) },
+        { title: 'AR Invoices', configKey: 'receivables', rows: invoices.filter(r => sameName(r.customerName, name)) },
+        { title: 'Estimate / Invoice PDFs', configKey: '', rows: docs.filter(r => sameName(r.customerName, name)) },
+        { title: 'Jobs', configKey: 'customerJobs', rows: jobs.filter(r => sameName(r.customerName, name)) },
+        { title: 'Communications', configKey: 'communications', rows: communications.filter(r => sameName(r.customerName, name)) },
+        { title: 'Proof / Audit Docs', configKey: 'auditDocs', rows: auditDocs.filter(r => JSON.stringify(r).toLowerCase().includes(name.toLowerCase())) }
       ]
     : [
-        ['Expenses', 'expenses', configs.expenses, expenses.filter(r => sameName(r.vendorName, name))],
-        ['Bills / AP', 'bills', configs.bills, bills.filter(r => sameName(r.vendorName, name))],
-        ['Assets', 'assets', configs.assets, assets.filter(r => sameName(r.vendorName, name))]
+        { title: 'Expenses', configKey: 'expenses', rows: expenses.filter(r => sameName(r.vendorName, name)) },
+        { title: 'Bills / AP', configKey: 'bills', rows: bills.filter(r => sameName(r.vendorName, name)) },
+        { title: 'Assets', configKey: 'assets', rows: assets.filter(r => sameName(r.vendorName, name)) },
+        { title: 'Proof / Audit Docs', configKey: 'auditDocs', rows: auditDocs.filter(r => JSON.stringify(r).toLowerCase().includes(name.toLowerCase())) }
       ];
-  const proofRows = auditDocs.filter(r => JSON.stringify(r).toLowerCase().includes(name.toLowerCase()));
+  const plannedSections = detailPlan || fallbackDetailPlan;
+  const proofSection = plannedSections.find(section => section.title === 'Proof / Audit Docs') || { rows: [] };
+  const proofRows = proofSection.rows || [];
+  const sections = plannedSections
+    .filter(section => section.title !== 'Proof / Audit Docs')
+    .map(section => [section.title, section.configKey || null, section.configKey ? configs[section.configKey] : null, section.rows || []]);
   el.innerHTML = `
     <div class="page-head"><div><h2>${escapeHtml(name)}</h2><p>${isCustomer ? 'Customer activity across sales, AR, estimates/invoices, jobs, and proof.' : 'Vendor activity across expenses, bills, assets, and proof.'}</p></div>
       <div class="actions">
@@ -1752,8 +1877,15 @@ function renderPersonBusinessCard(party, isCustomer, name) {
 }
 
 window.openPersonContact = async (name, isCustomer, id) => {
-  if (Number(id) > 0) return openLedgerEntityRecord('parties', Number(id));
-  openModal(configs.parties, { name, partyType: isCustomer ? 'Customer' : 'Vendor', defaultPlatform: isCustomer ? 'Direct' : 'Vendor' }, true);
+  const target = window.EpataRelationshipDirectory?.personContactTarget?.(name, isCustomer, id) || {
+    kind: Number(id) > 0 ? 'edit' : 'new',
+    configKey: 'parties',
+    rowId: Number(id || 0),
+    row: { name, partyType: isCustomer ? 'Customer' : 'Vendor', defaultPlatform: isCustomer ? 'Direct' : 'Vendor' },
+    isNew: true
+  };
+  if (target.kind === 'edit') return openLedgerEntityRecord(target.configKey, Number(target.rowId));
+  openModal(configs[target.configKey], target.row, target.isNew);
 };
 
 async function renderRelationshipDirectory(el, mode) {
@@ -1776,8 +1908,8 @@ async function renderRelationshipDirectory(el, mode) {
   if (!tablePageState[key]) tablePageState[key] = { page: 0, pageSize: 25, sortColumn: 'lastActivity', sortDir: 'desc' };
   const state = tablePageState[key];
   const cols = isCustomer
-    ? ['name','linkedRows','sources','salesTotal','invoiceTotal','openAr','lastActivity']
-    : ['name','linkedRows','sources','expenseTotal','openAp','assetTotal','lastActivity'];
+    ? ['name','linkedRows','sources','nameStatus','salesTotal','invoiceTotal','openAr','lastActivity']
+    : ['name','linkedRows','sources','nameStatus','expenseTotal','openAp','assetTotal','lastActivity'];
 
   el.innerHTML = `
     <div class="page-head">
@@ -1803,55 +1935,15 @@ async function renderRelationshipDirectory(el, mode) {
 }
 
 function buildCustomerRows(parties, sales, invoices, docs, jobs, communications = []) {
-  const map = new Map();
-  const add = (name, source, row, amount = 0, open = 0) => {
-    const clean = String(name || '').trim();
-    if (!clean) return;
-    const key = clean.toLowerCase();
-    const item = map.get(key) || { name: clean, sources: new Set(), linkedRows: 0, salesTotal: 0, invoiceTotal: 0, openAr: 0, lastActivity: '' };
-    item.sources.add(source);
-    item.linkedRows += 1;
-    if (source === 'Sales') item.salesTotal += Number(amount || 0);
-    if (source === 'AR' || source === 'PDF Docs') item.invoiceTotal += Number(amount || 0);
-    item.openAr += Number(open || 0);
-    item.lastActivity = latestDate(item.lastActivity, row.updatedAtUtc || row.updatedAt || row.invoiceDate || row.saleDate || row.jobDate || row.documentDate || row.date);
-    map.set(key, item);
-  };
-  parties.filter(p => ['customer','both'].includes(String(p.partyType || '').toLowerCase())).forEach(p => add(p.name, 'People', p));
-  sales.forEach(r => add(r.customerName, 'Sales', r, r.customerPaid));
-  invoices.forEach(r => add(r.customerName, 'AR', r, r.invoiceTotal, ['Paid','Void'].includes(r.status) ? 0 : r.balanceDue));
-  docs.forEach(r => add(r.customerName, 'PDF Docs', r, r.total));
-  jobs.forEach(r => add(r.customerName, 'Jobs', r, r.invoiceAmount));
-  communications.forEach(r => add(r.customerName, 'Communications', r));
-  return [...map.values()].map(row => ({ ...row, sources: [...row.sources].join(', ') }));
+  return window.EpataRelationshipDirectory.buildCustomerRows(parties, sales, invoices, docs, jobs, communications);
 }
 
 function buildVendorRows(parties, expenses, bills, assets) {
-  const map = new Map();
-  const add = (name, source, row, amount = 0, open = 0, asset = 0) => {
-    const clean = String(name || '').trim();
-    if (!clean) return;
-    const key = clean.toLowerCase();
-    const item = map.get(key) || { name: clean, sources: new Set(), linkedRows: 0, expenseTotal: 0, openAp: 0, assetTotal: 0, lastActivity: '' };
-    item.sources.add(source);
-    item.linkedRows += 1;
-    item.expenseTotal += Number(amount || 0);
-    item.openAp += Number(open || 0);
-    item.assetTotal += Number(asset || 0);
-    item.lastActivity = latestDate(item.lastActivity, row.updatedAtUtc || row.updatedAt || row.expenseDate || row.dueDate || row.purchaseDate || row.date);
-    map.set(key, item);
-  };
-  parties.filter(p => ['vendor','both'].includes(String(p.partyType || '').toLowerCase())).forEach(p => add(p.name, 'People', p));
-  expenses.forEach(r => add(r.vendorName, 'Expenses', r, r.total));
-  bills.forEach(r => add(r.vendorName, 'AP', r, 0, ['Paid','Void'].includes(r.status) ? 0 : r.balanceDue));
-  assets.forEach(r => add(r.vendorName, 'Assets', r, 0, 0, r.cost));
-  return [...map.values()].map(row => ({ ...row, sources: [...row.sources].join(', ') }));
+  return window.EpataRelationshipDirectory.buildVendorRows(parties, expenses, bills, assets);
 }
 
 function latestDate(a, b) {
-  if (!b) return a || '';
-  if (!a) return b;
-  return new Date(b).getTime() > new Date(a).getTime() ? b : a;
+  return window.EpataRelationshipDirectory.latestDate(a, b);
 }
 
 function renderRelationshipTable(rows, cols, mode, state, filter) {
@@ -1914,6 +2006,11 @@ function renderRelationshipTable(rows, cols, mode, state, filter) {
 
 function relationshipCell(row, key, mode) {
   if (key === 'name') return `<button class="table-link" onclick="showPage('${mode}Detail:${encodeURIComponent(row.name)}')">${escapeHtml(row.name)}</button>`;
+  if (key === 'nameStatus') {
+    return row.duplicateNameWarning
+      ? `<span class="badge warn" title="${escapeAttr(row.duplicateNameWarning)}">${escapeHtml(row.nameStatus)}</span>`
+      : `<span class="badge good">${escapeHtml(row.nameStatus || 'OK')}</span>`;
+  }
   if (moneyFields.has(key) || ['salesTotal','invoiceTotal','openAr','expenseTotal','openAp','assetTotal'].includes(key)) return escapeHtml(formatMoney(row[key]));
   if (key === 'lastActivity') return escapeHtml(formatShortDate(row[key]));
   return escapeHtml(formatValue(row[key], key));
@@ -1925,28 +2022,36 @@ function relationshipSection(title, configKey, config, rows, mode = '', name = '
   const stateArg = escapeAttr(encodeURIComponent(stateKey));
   if (!tablePageState[stateKey]) tablePageState[stateKey] = { page: 0, pageSize: 10 };
   const state = tablePageState[stateKey];
-  const pageSize = state.pageSize || 10;
-  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
-  if (state.page >= totalPages) state.page = totalPages - 1;
-  if (state.page < 0) state.page = 0;
-  const pageRows = rows.slice(state.page * pageSize, (state.page + 1) * pageSize);
-  const startRow = rows.length ? (state.page * pageSize) + 1 : 0;
-  const endRow = Math.min(rows.length, (state.page + 1) * pageSize);
+  const pageModel = window.EpataRelationshipDirectory?.relationshipSectionPage?.(rows, state) || (() => {
+    const pageSize = state.pageSize || 10;
+    const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+    const page = Math.min(Math.max(0, state.page || 0), totalPages - 1);
+    return {
+      page,
+      pageSize,
+      totalPages,
+      startRow: rows.length ? (page * pageSize) + 1 : 0,
+      endRow: Math.min(rows.length, (page + 1) * pageSize),
+      pageRows: rows.slice(page * pageSize, (page + 1) * pageSize)
+    };
+  })();
+  state.page = pageModel.page;
+  state.pageSize = pageModel.pageSize;
   const pager = rows.length ? `
     <div class="table-pager relationship-section-pager">
-      <span class="pager-info">Showing ${startRow}-${endRow} of ${rows.length} rows &nbsp;|&nbsp; Page ${state.page + 1} of ${totalPages}</span>
+      <span class="pager-info">Showing ${pageModel.startRow}-${pageModel.endRow} of ${rows.length} rows &nbsp;|&nbsp; Page ${state.page + 1} of ${pageModel.totalPages}</span>
       <span class="pager-controls">
         <button class="ghost-button pager-btn" onclick="setRelationshipSectionPage('${stateArg}','first')" ${state.page === 0 ? 'disabled' : ''}>«</button>
         <button class="ghost-button pager-btn" onclick="setRelationshipSectionPage('${stateArg}','prev')" ${state.page === 0 ? 'disabled' : ''}>‹ Prev</button>
         <select class="pager-size" onchange="setRelationshipSectionPageSize('${stateArg}', this.value)">
-          ${[10,25,50,100].map(n => `<option value="${n}"${n === pageSize ? ' selected' : ''}>${n} / page</option>`).join('')}
+          ${[10,25,50,100].map(n => `<option value="${n}"${n === pageModel.pageSize ? ' selected' : ''}>${n} / page</option>`).join('')}
         </select>
-        <button class="ghost-button pager-btn" onclick="setRelationshipSectionPage('${stateArg}','next')" ${state.page >= totalPages - 1 ? 'disabled' : ''}>Next ›</button>
-        <button class="ghost-button pager-btn" onclick="setRelationshipSectionPage('${stateArg}','last')" ${state.page >= totalPages - 1 ? 'disabled' : ''}>»</button>
+        <button class="ghost-button pager-btn" onclick="setRelationshipSectionPage('${stateArg}','next')" ${state.page >= pageModel.totalPages - 1 ? 'disabled' : ''}>Next ›</button>
+        <button class="ghost-button pager-btn" onclick="setRelationshipSectionPage('${stateArg}','last')" ${state.page >= pageModel.totalPages - 1 ? 'disabled' : ''}>»</button>
       </span>
     </div>` : '';
   return `<section class="card relationship-section"><div class="card-header-lite"><h3>${escapeHtml(title)}</h3><div class="relationship-actions">${relationshipSectionActions(title, mode, name)}<span class="badge">${rows.length}</span></div></div>
-    ${rows.length ? `<div class="table-wrap"><table><thead><tr>${cols.map(c => `<th>${labelize(c)}</th>`).join('')}<th></th></tr></thead><tbody>${pageRows.map(row => `<tr>${cols.map(c => `<td>${cell(row, c)}</td>`).join('')}<td>${config && configKey ? `<button class="ghost-button" onclick="openModal(configs.${configKey}, ${escapeAttr(JSON.stringify(row))})">Open</button>` : recordOpenButton(row)}</td></tr>`).join('')}</tbody></table></div>${pager}` : emptyState('No linked rows.', 'Nothing has been tied to this name yet.')}</section>`;
+    ${rows.length ? `<div class="table-wrap"><table><thead><tr>${cols.map(c => `<th>${labelize(c)}</th>`).join('')}<th></th></tr></thead><tbody>${pageModel.pageRows.map(row => `<tr>${cols.map(c => `<td>${cell(row, c)}</td>`).join('')}<td>${relationshipOpenButton(config && configKey ? configKey : null, row)}</td></tr>`).join('')}</tbody></table></div>${pager}` : emptyState('No linked rows.', 'Nothing has been tied to this name yet.')}</section>`;
 }
 
 window.setRelationshipSectionPage = (stateKey, action) => {
@@ -2007,11 +2112,21 @@ function vendorLedgerExplainer() {
 }
 
 function recordOpenButton(row) {
-  if (row?.sourceKind === 'receivable') {
-    return `<button class="ghost-button" onclick="openLedgerEntityRecord('receivables', ${Number(row.sourceId || row.id)})">Open AR</button>`;
+  return relationshipOpenButton(null, row);
+}
+
+function relationshipOpenButton(configKey, row) {
+  const target = window.EpataRelationshipDirectory?.relationshipLinkedRowTarget?.(configKey, row) || { kind: 'none' };
+  const id = Number(target.rowId || 0);
+  const label = escapeHtml(target.label || 'Open');
+  if (target.kind === 'modal' && target.configKey && configs[target.configKey]) {
+    return `<button class="ghost-button" data-rel-open-kind="modal" data-rel-open-config="${escapeAttr(target.configKey)}" data-rel-open-id="${id}" onclick="openModal(configs.${target.configKey}, ${escapeAttr(JSON.stringify(row))})">${label}</button>`;
   }
-  if (row?.id) {
-    return `<button class="ghost-button" onclick="showPage('invoiceRecords')">Open Records</button>`;
+  if (target.kind === 'ledger' && target.configKey && id > 0) {
+    return `<button class="ghost-button" data-rel-open-kind="ledger" data-rel-open-config="${escapeAttr(target.configKey)}" data-rel-open-id="${id}" onclick="openLedgerEntityRecord('${escapeAttr(target.configKey)}', ${id})">${label}</button>`;
+  }
+  if (target.kind === 'page' && target.page) {
+    return `<button class="ghost-button" data-rel-open-kind="page" data-rel-open-page="${escapeAttr(target.page)}" data-rel-open-id="${id}" onclick="showPage('${escapeAttr(target.page)}')">${label}</button>`;
   }
   return '';
 }
@@ -2065,6 +2180,7 @@ function compareCellValue(a, b, column) {
 
 function sortValue(row, column) {
   if (column === 'priority') return ({ Low: 1, Normal: 2, High: 3 }[row[column]] ?? 0);
+  if (column === 'activeStatus') return row.isActive === false ? 1 : 0;
   if (column === 'status' || column.toLowerCase().includes('status')) {
     return ({ Overdue: 0, Open: 1, Unpaid: 1, Sent: 2, Partial: 3, Waiting: 4, Draft: 5, Lead: 6, Quoted: 7, 'In Progress': 8, Paid: 9, Done: 10, Completed: 10, Void: 11, Cancelled: 11 }[row[column]] ?? String(row[column] || ''));
   }
@@ -2088,22 +2204,9 @@ function sortableHeader(config, state, column) {
 }
 
 function renderEntityTable(config, rows, filter) {
-  const f = (filter || '').toLowerCase();
   const statusFilter = qs('#statusFilter')?.value || '';
-  const filtered = rows.filter(r => {
-    const blob = JSON.stringify(r).toLowerCase();
-    if (f && !blob.includes(f)) return false;
-    if (statusFilter === 'needs-review') return r.needsReview === true;
-    if (statusFilter === 'open') return /open|sent|unpaid|partial|waiting|lead|quoted|progress/.test(blob);
-    if (statusFilter === 'paid') return /paid|done|completed|fulfilled/.test(blob);
-    return true;
-  });
   const cols = config.columns;
   const tableArea = qs('#tableArea');
-  if (filtered.length === 0) {
-    tableArea.innerHTML = emptyState('No matching rows.', 'Clear the search or change the filter.');
-    return;
-  }
 
   const key = config.route;
   if (!tablePageState[key]) tablePageState[key] = { page: 0, pageSize: 25, ...defaultSortFor(config) };
@@ -2114,25 +2217,36 @@ function renderEntityTable(config, rows, filter) {
     state._lastFilter = filter;
     state._lastStatus = statusFilter;
   }
-  const sorted = sortRows(filtered, config, state);
-  const pageSize = state.pageSize;
-  const totalPages = Math.ceil(sorted.length / pageSize);
-  if (state.page >= totalPages) state.page = totalPages - 1;
-  const pageRows = sorted.slice(state.page * pageSize, (state.page + 1) * pageSize);
+  const model = window.EpataEntityTableState?.buildEntityTableModel(rows, {
+    filter,
+    statusFilter,
+    state,
+    sortRows: filteredRows => sortRows(filteredRows, config, state),
+  }) || fallbackEntityTableModel(rows, config, state, filter, statusFilter);
+  state.page = model.page;
+  const filtered = model.filteredRows;
+  if (filtered.length === 0) {
+    tableArea.innerHTML = emptyState('No matching rows.', 'Clear the search or change the filter.');
+    return;
+  }
+  const sorted = model.sortedRows;
+  const pageRows = model.pageRows;
+  const totalPages = model.totalPages;
 
-  const startRow = filtered.length ? (state.page * pageSize) + 1 : 0;
-  const endRow = Math.min(filtered.length, (state.page + 1) * pageSize);
+  const startRow = model.startRow;
+  const endRow = model.endRow;
+  const pageSize = model.pageSize;
   const pagerHtml = `
     <div class="table-pager">
       <span class="pager-info">Showing ${startRow}-${endRow} of ${filtered.length} rows &nbsp;|&nbsp; Page ${state.page + 1} of ${totalPages}</span>
       <span class="pager-controls">
-        <button class="ghost-button pager-btn" id="pgFirst" ${state.page === 0 ? 'disabled' : ''}>«</button>
+        <button class="ghost-button pager-btn" id="pgFirst" aria-label="First page" ${state.page === 0 ? 'disabled' : ''}>«</button>
         <button class="ghost-button pager-btn" id="pgPrev" ${state.page === 0 ? 'disabled' : ''}>‹ Prev</button>
         <select id="pgSize" class="pager-size">
           ${[25,50,100].map(n => `<option value="${n}"${n === pageSize ? ' selected' : ''}>${n} / page</option>`).join('')}
         </select>
         <button class="ghost-button pager-btn" id="pgNext" ${state.page >= totalPages - 1 ? 'disabled' : ''}>Next ›</button>
-        <button class="ghost-button pager-btn" id="pgLast" ${state.page >= totalPages - 1 ? 'disabled' : ''}>»</button>
+        <button class="ghost-button pager-btn" id="pgLast" aria-label="Last page" ${state.page >= totalPages - 1 ? 'disabled' : ''}>»</button>
       </span>
     </div>`;
 
@@ -2155,14 +2269,42 @@ function renderEntityTable(config, rows, filter) {
     renderEntityTable(config, rows, filter);
   });
   qsa('[data-edit]').forEach(btn => btn.onclick = () => openModal(config, sorted.find(r => r.id == btn.dataset.edit)));
-  qsa('[data-reviewed]').forEach(btn => btn.onclick = () => markReviewed(config, sorted.find(r => r.id == btn.dataset.reviewed)));
-  qsa('[data-delete]').forEach(btn => btn.onclick = () => archiveRow(config, btn.dataset.delete));
+  qsa('[data-reviewed]').forEach(btn => btn.onclick = () => markReviewed(config, sorted.find(r => r.id == btn.dataset.reviewed), btn));
+  qsa('[data-delete]').forEach(btn => btn.onclick = () => archiveRow(config, btn.dataset.delete, btn));
 
   qs('#pgFirst')?.addEventListener('click', () => { state.page = 0; renderEntityTable(config, rows, filter); });
   qs('#pgPrev')?.addEventListener('click', () => { state.page = Math.max(0, state.page - 1); renderEntityTable(config, rows, filter); });
   qs('#pgNext')?.addEventListener('click', () => { state.page = Math.min(totalPages - 1, state.page + 1); renderEntityTable(config, rows, filter); });
   qs('#pgLast')?.addEventListener('click', () => { state.page = totalPages - 1; renderEntityTable(config, rows, filter); });
   qs('#pgSize')?.addEventListener('change', e => { state.pageSize = Number(e.target.value); state.page = 0; renderEntityTable(config, rows, filter); });
+}
+
+function fallbackEntityTableModel(rows, config, state, filter, statusFilter) {
+  const term = String(filter || '').toLowerCase();
+  const filteredRows = rows.filter(row => {
+    const blob = JSON.stringify(row).toLowerCase();
+    const status = String(row.status || '').toLowerCase();
+    if (term && !blob.includes(term)) return false;
+    if (statusFilter === 'needs-review') return row.needsReview === true || status.includes('review');
+    if (statusFilter === 'open') return /open|sent|unpaid|partial|waiting|lead|quoted|progress/.test(blob);
+    if (statusFilter === 'paid') return /paid|done|completed|fulfilled|refunded/.test(blob);
+    return true;
+  });
+  const sortedRows = sortRows(filteredRows, config, state);
+  const pageSize = Math.max(1, Number(state.pageSize) || 25);
+  const totalPages = Math.max(1, Math.ceil(sortedRows.length / pageSize));
+  const page = Math.min(Math.max(0, Number(state.page) || 0), totalPages - 1);
+  return {
+    filteredRows,
+    sortedRows,
+    pageRows: sortedRows.slice(page * pageSize, (page + 1) * pageSize),
+    page,
+    pageSize,
+    totalPages,
+    startRow: sortedRows.length ? (page * pageSize) + 1 : 0,
+    endRow: Math.min(sortedRows.length, (page + 1) * pageSize),
+    totalRows: sortedRows.length,
+  };
 }
 
 function summarizeMoney(rows, config) {
@@ -2183,6 +2325,7 @@ function cell(row, key) {
   if (key === 'vendorName' && row[key]) {
     return `<button class="table-link" onclick="event.stopPropagation(); showPage('vendorDetail:${encodeURIComponent(row[key])}')">${escapeHtml(row[key])}</button>`;
   }
+  if (key === 'activeStatus') return badgeFor(row.isActive === false ? 'Inactive' : 'Active');
   if (key === 'needsReview') return row.needsReview ? badgeFor('Needs Review', true) : badgeFor('OK');
   if (key.toLowerCase().includes('status') || key === 'priority') return badgeFor(row[key], row.needsReview);
   if (key === 'estimatedCost') {
@@ -2212,21 +2355,30 @@ function labelize(name) {
 }
 
 function renderQuickAdd(el) {
+  const quickAddCards = window.EpataQuickAdd?.quickAddCards?.() || [
+    { type: 'modal', title: 'Estimate Sent (External)', description: 'You sent a quote made outside this app and are waiting for approval. The built-in Estimates builder tracks these automatically.', config: 'customerJobs', kind: 'estimateSent' },
+    { type: 'page', title: 'New Estimate PDF', description: 'Build a real customer estimate with calculator, line items, and PDF preview.', page: 'estimates' },
+    { type: 'page', title: 'New Invoice PDF', description: 'Build a real customer invoice with line items, AR sync, and PDF preview.', page: 'invoices' },
+    { type: 'modal', title: 'Etsy Sale', description: 'A paid Etsy order or marketplace sale.', config: 'sales', kind: 'etsy' },
+    { type: 'page', title: 'AI Upload Paid Marketplace Order', description: 'Upload an Etsy/marketplace order PDF or screenshot, review the extracted Sale, then save it with proof.', page: 'aiOperations' },
+    { type: 'modal', title: 'Direct Paid Sale', description: 'Customer already paid you directly.', config: 'sales', kind: 'directPaid' },
+    { type: 'modal', title: 'Open Invoice / AR', description: 'You sent a direct invoice and are waiting for payment.', config: 'receivables', kind: 'invoice' },
+    { type: 'modal', title: 'Bill / AP', description: 'You owe a vendor and have not paid yet.', config: 'bills', kind: 'bill' },
+    { type: 'modal', title: 'Paid Expense', description: 'You already bought supplies, labels, software, etc.', config: 'expenses', kind: 'expense' },
+    { type: 'modal', title: 'Equipment / Asset Purchase', description: 'A printer, AMS, durable tool, computer, or higher-value item that needs tax-treatment review.', config: 'assets', kind: 'assetPurchase' },
+    { type: 'modal', title: 'Customer / Vendor Contact', description: 'Add a customer, vendor, or both so future ledgers can link back to the right person.', config: 'parties', kind: 'partyContact' },
+    { type: 'modal', title: 'Product / Costing Row', description: 'Start a reusable product or costing record for pricing, material, and repeat work.', config: 'products', kind: 'productCosting' },
+    { type: 'modal', title: 'Action Item', description: 'Create a follow-up task for cleanup, collection, tax review, production, or proof work.', config: 'actions', kind: 'actionItem' },
+    { type: 'modal', title: 'Audit Doc / Proof Index', description: 'Manually index a proof file, receipt, PDF, screenshot, or local path.', config: 'auditDocs', kind: 'auditDoc' },
+    { type: 'modal', title: 'Log Customer Communication', description: 'Record an email, text, call, approval, question, or follow-up.', config: 'communications', kind: 'communication' },
+    { type: 'page', title: 'Open Printer Queue', description: 'Schedule active jobs, assign printers, and track production progress.', page: 'printerQueue' },
+  ];
   el.innerHTML = `
     <div class="page-head"><div><h2>Quick Add</h2><p>Use this for simple ledger events: paid sale, unpaid invoice entered outside the builder, paid expense, vendor bill, or manual quote record.</p></div><div class="actions"><button class="ghost-button" onclick="showPage('estimates')">New Estimate</button><button class="ghost-button" onclick="showPage('invoices')">New Invoice</button><button class="ghost-button" onclick="showPage('workflowGuide')">Workflow Guide</button></div></div>
     <div class="quick-grid">
-      ${quickCard('Estimate Sent (External)','You sent a quote made outside this app and are waiting for approval. The built-in Estimates builder tracks these automatically.','customerJobs','estimateSent')}
-      ${quickLinkCard('New Estimate PDF','Build a real customer estimate with calculator, line items, and PDF preview.','estimates')}
-      ${quickLinkCard('New Invoice PDF','Build a real customer invoice with line items, AR sync, and PDF preview.','invoices')}
-      ${quickCard('Etsy Sale','A paid Etsy order or marketplace sale.','sales','etsy')}
-      ${quickLinkCard('AI Upload Paid Marketplace Order','Upload an Etsy/marketplace order PDF or screenshot, review the extracted Sale, then save it with proof.','aiOperations')}
-      ${quickCard('Direct Paid Sale','Customer already paid you directly.','sales','directPaid')}
-      ${quickCard('Open Invoice / AR','You sent a direct invoice and are waiting for payment.','receivables','invoice')}
-      ${quickCard('Bill / AP','You owe a vendor and have not paid yet.','bills','bill')}
-      ${quickCard('Paid Expense','You already bought supplies, labels, software, etc.','expenses','expense')}
-      ${quickCard('Equipment / Asset Purchase','A printer, AMS, durable tool, computer, or higher-value item that needs tax-treatment review.','assets','assetPurchase')}
-      ${quickCard('Log Customer Communication','Record an email, text, call, approval, question, or follow-up.','communications','communication')}
-      ${quickLinkCard('Open Printer Queue','Schedule active jobs, assign printers, and track production progress.','printerQueue')}
+      ${quickAddCards.map(card => card.type === 'page'
+        ? quickLinkCard(card.title, card.description, card.page)
+        : quickCard(card.title, card.description, card.config, card.kind)).join('')}
     </div>
     <div class="grid two">
       <div class="card"><h3>Clean Books Rule</h3><p><b>Sales</b> are money coming in. <b>AR invoices</b> are money customers owe you. <b>AP bills</b> are money you owe. <b>Expenses</b> are things already paid. <b>Customer Jobs</b> track the work itself.</p></div>
@@ -2237,7 +2389,7 @@ function renderQuickAdd(el) {
 }
 
 function quickLinkCard(title, desc, page) {
-  return `<button class="quick-card" data-page="${page}"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(desc)}</span></button>`;
+  return `<button class="quick-card" data-page="${escapeAttr(page)}"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(desc)}</span></button>`;
 }
 
 function renderLedgerMap(el) {
@@ -2611,23 +2763,29 @@ function renderWorkflowGuide(el) {
 }
 
 function quickCard(title, text, config, kind) {
-  return `<button class="quick-card" data-config="${config}" data-kind="${kind}"><strong>${title}</strong><span>${text}</span></button>`;
+  return `<button class="quick-card" data-config="${escapeAttr(config)}" data-kind="${escapeAttr(kind)}"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(text)}</span></button>`;
 }
 function quickOpen(configKey, kind, overrides = {}) {
   const config = configs[configKey];
   const today = new Date().toISOString().substring(0,10);
   const presets = {
-    estimateSent: { platform: 'Direct', status: 'Quoted', jobDate: today, jobType: 'Estimate', needsReview: false, notes: 'Estimate entered manually. Do not count as income or AR until approved/invoiced.' },
+    estimateSent: { platform: 'Direct', status: 'Quoted', jobDate: today, jobType: 'Estimate', paymentMethod: 'Unknown / Review', needsReview: false, notes: 'Estimate entered manually. Do not count as income or AR until approved/invoiced.' },
     etsy: { platform: 'Etsy', paymentMethod: 'Etsy Payments', status: 'Paid', saleDate: today, quantity: 1, includeInDashboard: true, needsReview: true, notes: 'Remember to enter Etsy fees, actual label cost, packaging, and COGS.' },
     directPaid: { platform: 'Direct', paymentMethod: 'Unknown / Review', status: 'Paid', saleDate: today, quantity: 1, includeInDashboard: true },
-    invoice: { status: 'Sent', invoiceDate: today, includeInCashReports: false, needsReview: false },
-    bill: { status: 'Unpaid', billDate: today, taxDeductible: true },
-    expense: { expenseDate: today, taxDeductible: true, taxBucket: 'Review', deductibleStatus: 'Review', countedExpense: true, businessUsePercent: 100, needsReview: true, notes: 'Classify as COGS/Materials, Operating Expense, Asset, or Memo Only before filing.' },
-    assetPurchase: { purchaseDate: today, inServiceDate: today, category: 'Equipment', businessUsePercent: 100, taxTreatment: 'Review', countedExpenseThisYear: false, needsReview: true, notes: 'Review with tax preparer before choosing Section 179, De Minimis Expense, or Depreciation.' },
+    invoice: { status: 'Sent', invoiceDate: today, paymentMethod: 'Unknown / Review', includeInCashReports: false, needsReview: false },
+    bill: { status: 'Unpaid', billDate: today, paymentMethod: 'Unknown / Review', taxDeductible: true },
+    expense: { expenseDate: today, paymentMethod: 'Unknown / Review', taxDeductible: true, taxBucket: 'Review', deductibleStatus: 'Review', countedExpense: true, businessUsePercent: 100, needsReview: true, notes: 'Classify as COGS/Materials, Operating Expense, Asset, or Memo Only before filing.' },
+    assetPurchase: { purchaseDate: today, inServiceDate: today, category: 'Equipment', paymentMethod: 'Unknown / Review', businessUsePercent: 100, taxTreatment: 'Review', countedExpenseThisYear: false, needsReview: true, notes: 'Review with tax preparer before choosing Section 179, De Minimis Expense, or Depreciation.' },
+    partyContact: { partyType: 'Customer', defaultPlatform: 'Direct' },
+    productCosting: { category: '3D Printed Product', material: 'PLA', needsReview: true },
+    actionItem: { area: 'General', priority: 'Normal', status: 'Open' },
+    auditDoc: { documentDate: today, documentType: 'Other', needsReview: true },
     communication: { occurredAt: new Date().toISOString().substring(0,16), direction: 'Outgoing', channel: 'Email', followUpStatus: 'None', needsReview: false },
     queue: { queueDate: today, priority: 'Normal', status: 'Queued', quantity: 1, plateCount: 1, progressPercent: 0, failureCount: 0, needsReview: false }
   };
-  openModal(config, { ...(presets[kind] || {}), ...overrides }, true);
+  const preset = window.EpataQuickAdd?.quickAddPreset?.(kind) || presets[kind] || {};
+  const row = window.EpataQuickAdd?.applyQuickAddOverrides?.(preset, overrides) || { ...preset, ...overrides };
+  openModal(config, row, true);
 }
 
 async function handleInboxSuggestion(suggestion) {
@@ -2647,13 +2805,16 @@ async function handleInboxSuggestion(suggestion) {
 }
 
 function openModal(config, row, presetOnly = false) {
+  appState.modalSaveGuard?.reset?.();
+  appState.modalSaveInFlight = false;
   appState.modal = { config, row: row || {}, mode: row && !presetOnly && row.id ? 'edit' : 'create' };
   qs('#modalTitle').textContent = `${appState.modal.mode === 'edit' ? 'Edit' : 'Add'} ${config.title}`;
   qs('#modalHelp').textContent = config.purpose;
   const form = qs('#modalForm');
   form.innerHTML = `${modalIntro(config, row || {})}${config.fields.map(field => renderField(field, row || {})).join('')}`;
-  qs('#modalBackdrop').classList.remove('hidden');
-  qs('#modal').classList.remove('hidden');
+  window.EpataModalLifecycle?.openModalSurface(qs('#modal'), qs('#modalBackdrop'), {
+    preferredSelectors: ['#modalForm input, #modalForm select, #modalForm textarea', '#modalSave', '#modalClose']
+  }) || (qs('#modalBackdrop').classList.remove('hidden'), qs('#modal').classList.remove('hidden'));
   initProofPickers(config);
   initMoneyFormCalculators(config);
 }
@@ -2670,7 +2831,7 @@ function modalIntro(config, row) {
     </section>`;
   }
   if (config.route !== 'receivable-invoices') return '';
-  const customer = escapeAttr(row.customerName || '');
+  const receivablePayload = escapeAttr(encodeURIComponent(JSON.stringify(row || {})));
   return `<section class="modal-guide full" aria-label="AR ledger explanation">
     <div class="guide-main">
       <span class="eyebrow">Plain English</span>
@@ -2681,7 +2842,7 @@ function modalIntro(config, row) {
       <div class="guide-choice good">
         <strong>Need a printable invoice?</strong>
         <p>Use the invoice builder. It creates the customer PDF and also updates AR for you.</p>
-        <button class="primary-button" type="button" onclick="closeModal(); startCustomerDocument('${customer}','INVOICE')">Make PDF Invoice</button>
+        <button class="primary-button" type="button" onclick="closeModal(); startReceivablePdfInvoice('${receivablePayload}')">Make PDF Invoice</button>
       </div>
       <div class="guide-choice">
         <strong>Already have an invoice elsewhere?</strong>
@@ -2696,15 +2857,19 @@ function modalIntro(config, row) {
 }
 
 function renderField(field, row) {
-  const value = row[field.name];
+  const value = field.name === 'paymentMethod' ? defaultPaymentMethod(row) : row[field.name];
   const full = field.span === 'full' || field.type === 'textarea';
   const label = `<label for="field_${field.name}">${field.label} <span class="tip" data-tip="${escapeHtml(field.tip || '')}">?</span></label>`;
   if (field.type === 'checkbox') {
     return `<div class="form-field ${full ? 'full' : ''}"><label class="check-row"><input id="field_${field.name}" name="${field.name}" type="checkbox" ${value ? 'checked' : ''}> ${field.label} <span class="tip" data-tip="${escapeHtml(field.tip || '')}">?</span></label></div>`;
   }
   if (field.type === 'select') {
-    const options = (field.options || []).map(o => `<option value="${escapeHtml(o)}" ${value === o ? 'selected' : ''}>${escapeHtml(o)}</option>`).join('');
-    return `<div class="form-field ${full ? 'full' : ''}">${label}<select id="field_${field.name}" name="${field.name}"><option value=""></option>${options}</select></div>`;
+    const selectOptions = [...(field.options || [])];
+    if (value && !selectOptions.includes(value)) selectOptions.unshift(value);
+    const options = selectOptions.map(o => `<option value="${escapeHtml(o)}" ${value === o ? 'selected' : ''}>${escapeHtml(o)}</option>`).join('');
+    const required = field.name === 'paymentMethod' ? ' required' : '';
+    const blank = field.name === 'paymentMethod' ? '' : '<option value=""></option>';
+    return `<div class="form-field ${full ? 'full' : ''}">${label}<select id="field_${field.name}" name="${field.name}"${required}>${blank}${options}</select></div>`;
   }
   if (field.type === 'textarea') {
     return `<div class="form-field full">${label}<textarea id="field_${field.name}" name="${field.name}">${escapeHtml(value ?? '')}</textarea></div>`;
@@ -2715,7 +2880,7 @@ function renderField(field, row) {
       ? String(value).substring(0,10)
       : (value ?? '');
   if (proofFieldNames.has(field.name)) {
-    return `<div class="form-field ${full ? 'full' : ''} proof-field">${label}<div class="proof-control"><input id="field_${field.name}" name="${field.name}" type="${field.type}" value="${escapeHtml(inputValue)}" placeholder="Upload a proof file or paste a OneDrive/local path"><button class="ghost-button" type="button" data-proof-upload="${field.name}">Attach File</button><input class="hidden" id="proof_file_${field.name}" type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.txt,.csv,.json,.md,application/pdf,image/*,text/*"></div><small class="proof-help">Saves a copy into UploadedDocs, creates an Audit Doc, then fills this field with the saved local path.</small></div>`;
+    return `<div class="form-field ${full ? 'full' : ''} proof-field">${label}<div class="proof-control"><input id="field_${field.name}" name="${field.name}" type="${field.type}" value="${escapeHtml(inputValue)}" placeholder="Upload a proof file or paste a OneDrive/local path"><button class="ghost-button" type="button" data-proof-upload="${field.name}">Attach File</button><input class="hidden" id="proof_file_${field.name}" type="file" aria-label="Attach proof file for ${escapeAttr(field.label || field.name)}" accept=".pdf,.png,.jpg,.jpeg,.webp,.txt,.csv,.json,.md,application/pdf,image/*,text/*"></div><small class="proof-help">Saves a copy into UploadedDocs, creates an Audit Doc, then fills this field with the saved local path.</small></div>`;
   }
   return `<div class="form-field ${full ? 'full' : ''}">${label}<input id="field_${field.name}" name="${field.name}" type="${field.type}" step="0.01" value="${escapeHtml(inputValue)}"></div>`;
 }
@@ -2787,6 +2952,15 @@ function proofRelatedNumber() {
 }
 
 async function saveModal() {
+  const guard = appState.modalSaveGuard;
+  if (guard ? !guard.tryStart() : appState.modalSaveInFlight) return;
+  if (!guard) appState.modalSaveInFlight = true;
+  const saveButton = qs('#modalSave');
+  const originalSaveText = saveButton?.textContent || 'Save';
+  if (saveButton) {
+    saveButton.disabled = true;
+    saveButton.textContent = 'Saving...';
+  }
   const { config, row, mode } = appState.modal;
   const payload = { ...(row || {}) };
   config.fields.forEach(field => {
@@ -2797,6 +2971,9 @@ async function saveModal() {
     else if (field.type === 'date') payload[field.name] = input.value || null;
     else payload[field.name] = input.value || null;
   });
+  if (config.fields.some(field => field.name === 'paymentMethod')) {
+    payload.paymentMethod = defaultPaymentMethod(payload);
+  }
   try {
     if (mode === 'edit') {
       await api(`/api/${config.route}/${payload.id}`, { method: 'PUT', body: JSON.stringify(payload) });
@@ -2804,25 +2981,47 @@ async function saveModal() {
       delete payload.id;
       await api(`/api/${config.route}`, { method: 'POST', body: JSON.stringify(payload) });
     }
-    closeModal();
-    toast('Saved.');
-    await showPage(appState.currentPage);
+    const outcome = window.EpataModalSaveState?.modalSaveOutcome({ ok: true }) || {
+      closeModal: true,
+      refreshPage: true,
+      toastMessage: 'Saved.',
+    };
+    if (outcome.closeModal) closeModal();
+    toast(outcome.toastMessage, outcome.toastType || 'success');
+    if (outcome.refreshPage) await showPage(appState.currentPage);
   } catch (err) {
-    toast(`Save failed: ${err.message}`);
+    const outcome = window.EpataModalSaveState?.modalSaveOutcome({ ok: false, error: err }) || {
+      closeModal: false,
+      refreshPage: false,
+      toastMessage: `Save failed: ${err.message}`,
+      toastType: 'error',
+    };
+    toast(outcome.toastMessage, outcome.toastType || 'error');
+  } finally {
+    guard?.finish?.();
+    appState.modalSaveInFlight = false;
+    if (saveButton) {
+      saveButton.disabled = false;
+      saveButton.textContent = originalSaveText;
+    }
   }
 }
 
-async function archiveRow(config, id) {
-  if (!confirm('Archive this row? It will be hidden but not permanently deleted.')) return;
-  await api(`/api/${config.route}/${id}`, { method: 'DELETE' });
-  toast('Archived.');
-  await showPage(appState.currentPage);
+async function archiveRow(config, id, button = null) {
+  return runExclusiveAction(`archive:${config.route}:${id}`, 'Archive already in progress.', async () => {
+    if (!confirm('Archive this row? It will be hidden but not permanently deleted.')) return;
+    await api(`/api/${config.route}/${id}`, { method: 'DELETE' });
+    toast('Archived.');
+    await showPage(appState.currentPage);
+  }, { button, busyText: 'Archiving...' });
 }
-async function markReviewed(config, row) {
+async function markReviewed(config, row, button = null) {
   if (!row) return;
-  await api(`/api/${config.route}/${row.id}`, { method: 'PUT', body: JSON.stringify({ ...row, needsReview: false }) });
-  toast('Marked reviewed.');
-  await showPage(appState.currentPage);
+  return runExclusiveAction(`review:${config.route}:${row.id}`, 'Review update already in progress.', async () => {
+    await api(`/api/${config.route}/${row.id}`, { method: 'PUT', body: JSON.stringify({ ...row, needsReview: false }) });
+    toast('Marked reviewed.');
+    await showPage(appState.currentPage);
+  }, { button, busyText: 'Saving...' });
 }
 
 window.openAuditDocFile = async id => {
@@ -2855,8 +3054,10 @@ window.openAuditDocFile = async id => {
 };
 
 function closeModal() {
-  qs('#modalBackdrop').classList.add('hidden');
-  qs('#modal').classList.add('hidden');
+  window.EpataModalLifecycle?.closeModalSurface(qs('#modal'), qs('#modalBackdrop')) || (
+    qs('#modalBackdrop').classList.add('hidden'),
+    qs('#modal').classList.add('hidden')
+  );
 }
 
 window.openDashboardBreakdown = key => {
@@ -2864,27 +3065,19 @@ window.openDashboardBreakdown = key => {
   if (!breakdown) return toast('This dashboard breakdown is not available yet.');
   qs('#breakdownModalTitle').textContent = breakdown.title || 'Dashboard Breakdown';
   qs('#breakdownModalHelp').textContent = breakdown.formula || '';
-  const rows = breakdown.items || [];
-  const total = breakdown.money ? formatMoney(breakdown.total) : `${Number(breakdown.total || 0)} row${Number(breakdown.total || 0) === 1 ? '' : 's'}`;
-  qs('#breakdownModalBody').innerHTML = `
-    <div class="breakdown-summary"><span>${escapeHtml(breakdown.formula || '')}<br>${rows.length} contributing record${rows.length === 1 ? '' : 's'}.</span><strong>${escapeHtml(total)}</strong></div>
-    ${rows.length ? `<div class="table-wrap"><table><thead><tr><th>Date</th><th>Source</th><th>Record</th><th>Why it counts</th><th>Contribution</th><th></th></tr></thead><tbody>
-      ${rows.map(row => {
-        const amount = Number(row.amount || 0);
-        const amountLabel = breakdown.money ? formatMoney(amount) : String(amount);
-        return `<tr>
-          <td>${escapeHtml(formatShortDate(row.date))}</td>
-          <td>${escapeHtml(row.sourceType || '')}</td>
-          <td><strong>${escapeHtml(row.label || '')}</strong></td>
-          <td>${escapeHtml(row.detail || '')}</td>
-          <td class="breakdown-amount ${amount < 0 ? 'negative' : 'positive'}">${escapeHtml(amountLabel)}</td>
-          <td><button class="ghost-button compact-action" type="button" onclick="openDashboardBreakdownRecord('${escapeAttr(row.route)}',${Number(row.id)})">Open</button></td>
-        </tr>`;
-      }).join('')}
-    </tbody></table></div>` : emptyState('No contributing records.', 'This total is currently zero.')}
-  `;
-  qs('#breakdownModalBackdrop').classList.remove('hidden');
-  qs('#breakdownModal').classList.remove('hidden');
+  const dashboardRenderer = window.EpataDashboardState?.createDashboardRenderer?.({
+    escapeHtml,
+    escapeAttr,
+    formatMoney,
+    formatShortDate,
+    emptyState
+  });
+  qs('#breakdownModalBody').innerHTML = dashboardRenderer
+    ? dashboardRenderer.renderBreakdownBody(breakdown)
+    : emptyState('Breakdown unavailable.', 'Refresh the page and try again.');
+  window.EpataModalLifecycle?.openModalSurface(qs('#breakdownModal'), qs('#breakdownModalBackdrop'), {
+    preferredSelectors: ['#breakdownModalBody button', '#breakdownModalDone', '#breakdownModalClose']
+  }) || (qs('#breakdownModalBackdrop').classList.remove('hidden'), qs('#breakdownModal').classList.remove('hidden'));
 };
 
 window.openDashboardBreakdownRecord = async (route, id) => {
@@ -2893,8 +3086,10 @@ window.openDashboardBreakdownRecord = async (route, id) => {
 };
 
 function closeDashboardBreakdown() {
-  qs('#breakdownModalBackdrop').classList.add('hidden');
-  qs('#breakdownModal').classList.add('hidden');
+  window.EpataModalLifecycle?.closeModalSurface(qs('#breakdownModal'), qs('#breakdownModalBackdrop')) || (
+    qs('#breakdownModalBackdrop').classList.add('hidden'),
+    qs('#breakdownModal').classList.add('hidden')
+  );
 }
 
 function renderDocumentIntake(el) {
@@ -2915,7 +3110,7 @@ function renderDocumentIntake(el) {
         <div class="upload-zone" id="uploadZone">
           <div class="upload-mark">⇪</div>
           <strong>Drop files here or choose them below</strong>
-          <input id="docFiles" type="file" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.txt,.csv,.json,.md,application/pdf,image/*,text/*">
+          <input id="docFiles" type="file" aria-label="Choose proof files to upload" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.txt,.csv,.json,.md,application/pdf,image/*,text/*">
           <div class="form-grid" style="width:100%; padding:0;">
             <div class="form-field">
               <label for="relatedType">Related Area</label>
@@ -3439,6 +3634,10 @@ function renderAiMarketplaceOrderResult(result) {
   const customerMatches = result.possibleCustomerMatches || [];
   const mixedOrders = result.detectedOrderNumbers || [];
   const field = (name, label, type = 'text', value = sale[name] ?? '') => `<label>${escapeHtml(label)}<input id="marketplace_${name}" type="${type}" step="0.01" value="${escapeHtml(type === 'date' && value ? String(value).substring(0,10) : value)}"></label>`;
+  const paymentMethodValue = defaultPaymentMethod(sale);
+  const paymentMethodOptions = [...commonOptions.paymentMethod];
+  if (paymentMethodValue && !paymentMethodOptions.includes(paymentMethodValue)) paymentMethodOptions.unshift(paymentMethodValue);
+  const paymentMethodField = `<label>Payment Method<select id="marketplace_paymentMethod" required>${paymentMethodOptions.map(option => `<option value="${escapeHtml(option)}" ${option === paymentMethodValue ? 'selected' : ''}>${escapeHtml(option)}</option>`).join('')}</select></label>`;
   const customerField = (name, label, type = 'text', value = customer[name] ?? '') => `<label>${escapeHtml(label)}<input id="marketplace_customer_${name}" type="${type}" value="${escapeHtml(value)}"></label>`;
   return `
     ${renderOperationReceipt(result.receipt)}
@@ -3449,6 +3648,7 @@ function renderAiMarketplaceOrderResult(result) {
     <div class="card-header-lite"><h3>Paid Sale</h3><span class="badge">Revenue record</span></div>
     <div class="local-ai-form marketplace-review-form">
       ${field('platform','Platform')}
+      ${paymentMethodField}
       ${field('orderNumber','Order Number')}
       ${field('saleDate','Order / Sale Date','date')}
       ${field('customerName','Customer / Buyer')}
@@ -3566,7 +3766,11 @@ async function postAiOperationFiles(path, sourceText, sourceUrls, files, sourceN
 
 function bindProductDraftButton() {
   const button = qs('#openAiProductDraftBtn');
-  if (button) button.onclick = () => openModal(configs.products, appState.aiProductImportDraft.product, true);
+  if (button) button.onclick = () => {
+    const plan = window.EpataAiProductDraft?.openProductDraftPlan(appState.aiProductImportDraft)
+      ?? { configKey: 'products', row: appState.aiProductImportDraft.product, isNew: true };
+    openModal(configs[plan.configKey], plan.row, plan.isNew);
+  };
 }
 
 function updateMarketplaceOrderDraftFromInputs() {
@@ -3574,11 +3778,12 @@ function updateMarketplaceOrderDraftFromInputs() {
   if (!result?.sale) return;
   const sale = result.sale;
   const numberFields = ['quantity','itemSales','shippingCharged','salesTaxCollected','customerPaid','platformFees','shippingLabelCost','estimatedCogs'];
-  ['platform','orderNumber','saleDate','customerName','productName','quantity','itemSales','shippingCharged','salesTaxCollected','customerPaid','platformFees','shippingLabelCost','estimatedCogs','trackingNumber'].forEach(name => {
+  ['platform','paymentMethod','orderNumber','saleDate','customerName','productName','quantity','itemSales','shippingCharged','salesTaxCollected','customerPaid','platformFees','shippingLabelCost','estimatedCogs','trackingNumber'].forEach(name => {
     const input = qs(`#marketplace_${name}`);
     if (!input) return;
     sale[name] = numberFields.includes(name) ? (input.value === '' ? null : Number(input.value)) : (input.value || null);
   });
+  sale.paymentMethod = defaultPaymentMethod(sale);
   result.customer ||= {};
   ['name','email','phone','address1','address2','city','state','postalCode','country','etsyUsername','defaultPlatform'].forEach(name => {
     const input = qs(`#marketplace_customer_${name}`);
@@ -3593,6 +3798,7 @@ function updateMarketplaceOrderDraftFromInputs() {
     result.job.relatedOrderNumber = sale.orderNumber;
     result.job.jobName = sale.productName;
     result.job.productName = sale.productName;
+    result.job.paymentMethod = sale.paymentMethod;
     result.job.invoiceAmount = sale.customerPaid;
     result.job.amountPaid = sale.customerPaid;
   }
@@ -3848,8 +4054,17 @@ async function saveLocalAiSettings(showToast = true) {
 
 async function runLocalAiAction(action) {
   const button = qs(action === 'start' ? '#startLocalAiBtn' : '#stopLocalAiBtn');
-  button.disabled = true;
-  button.textContent = action === 'start' ? 'Starting LM Studio...' : 'Stopping Local AI...';
+  const startButton = qs('#startLocalAiBtn');
+  const stopButton = qs('#stopLocalAiBtn');
+  if (appState.localAiActionInFlight) {
+    toast(`Local AI ${appState.localAiActionInFlight} is already in progress.`);
+    return;
+  }
+  appState.localAiActionInFlight = action;
+  const originalText = button?.textContent || (action === 'start' ? 'Start Local AI' : 'Stop Local AI');
+  if (startButton) startButton.disabled = true;
+  if (stopButton) stopButton.disabled = true;
+  if (button) button.textContent = action === 'start' ? 'Starting LM Studio...' : 'Stopping Local AI...';
   try {
     if (action === 'start') await saveLocalAiSettings(false);
     const result = await api(`/api/ai/local/${action}`, { method: 'POST', body: '{}' });
@@ -3858,8 +4073,11 @@ async function runLocalAiAction(action) {
     await showPage('localAi', { replace: true });
   } catch (err) {
     toast(`Local AI ${action} failed: ${friendlyApiError(err.message)}`);
-    button.disabled = false;
-    button.textContent = action === 'start' ? 'Start Local AI' : 'Stop Local AI';
+  } finally {
+    appState.localAiActionInFlight = null;
+    if (startButton?.isConnected) startButton.disabled = false;
+    if (stopButton?.isConnected) stopButton.disabled = false;
+    if (button?.isConnected) button.textContent = originalText || (action === 'start' ? 'Start Local AI' : 'Stop Local AI');
   }
 }
 
@@ -3918,12 +4136,14 @@ async function renderGlobalSearch(el) {
 
   const entries = await Promise.all(Object.entries(configs).map(async ([key, config]) => {
     const rows = await api(`/api/${config.route}`);
-    return rows
+    return { key, config, rows };
+  }));
+  const results = window.EpataGlobalSearch?.searchRowsByConfig
+    ? window.EpataGlobalSearch.searchRowsByConfig(entries, query, 8)
+    : entries.flatMap(({ key, config, rows }) => rows
       .filter(row => JSON.stringify(row).toLowerCase().includes(query))
       .slice(0, 8)
-      .map(row => ({ key, config, row }));
-  }));
-  const results = entries.flat();
+      .map(row => ({ key, config, row })));
   el.innerHTML = `
     <div class="page-head"><div><h2>Search Results</h2><p>${results.length} result${results.length === 1 ? '' : 's'} for "${escapeHtml(query)}".</p></div><div class="actions"><button class="ghost-button" onclick="showPage('aiOperations'); setTimeout(()=>document.getElementById('aiLedgerSearchCard')?.scrollIntoView({behavior:'smooth'}),120)">Ask the Ledger with AI</button></div></div>
     <div class="search-results">
@@ -3932,9 +4152,13 @@ async function renderGlobalSearch(el) {
 }
 
 function resultCard({ key, config, row }) {
-  const title = row.customerName || row.vendorName || row.name || row.title || row.invoiceNumber || row.orderNumber || row.fileName || config.title;
-  const subtitle = [row.invoiceNumber, row.orderNumber, row.relatedRecordNumber, row.status, row.platform].filter(Boolean).join(' · ');
-  return `<button class="result-card" onclick="showPage('${key}')">
+  const title = window.EpataGlobalSearch?.resultTitle?.(row, config.title)
+    ?? (row.customerName || row.vendorName || row.name || row.title || row.invoiceNumber || row.orderNumber || row.fileName || config.title);
+  const subtitleParts = window.EpataGlobalSearch?.resultSubtitleParts?.(row)
+    ?? [row.invoiceNumber, row.orderNumber, row.relatedRecordNumber, row.status, row.platform].filter(Boolean);
+  const subtitle = subtitleParts.join(' · ');
+  const openCall = window.EpataGlobalSearch?.resultOpenCall?.(key, row) ?? `showPage('${key}')`;
+  return `<button class="result-card" onclick="${escapeAttr(openCall)}">
     <span class="badge">${escapeHtml(config.nav || config.title)}</span>
     <strong>${escapeHtml(title)}</strong>
     <small>${escapeHtml(subtitle || 'Open table')}</small>
@@ -3989,14 +4213,37 @@ async function renderMergedInvoiceTool(el, initialView = 'dashboard', newType = 
 
   const prefill = appState.invoiceToolPrefill;
   appState.invoiceToolPrefill = null;
-  const module = await import('/invoice-builder/js/app.js?v=23');
+  const module = await import('/invoice-builder/js/app.js?v=37');
   await module.init({ initialView, restoreSnapshot, newType, prefill });
 }
 
 async function startCustomerDocument(name, type) {
   appState.invoiceToolSnapshot = null;
-  appState.invoiceToolPrefill = { customerName: name };
+  appState.invoiceToolPrefill = {
+    docType: type || 'ESTIMATE',
+    customerName: name,
+    preparedFor: name
+  };
   await showPage(type === 'INVOICE' ? 'invoices' : 'estimates', { resetInvoiceTool: true });
+}
+
+async function startReceivablePdfInvoice(encodedRow) {
+  let row = {};
+  try {
+    row = JSON.parse(decodeURIComponent(encodedRow || '')) || {};
+  } catch {
+    row = {};
+  }
+  const fallbackPrefill = {
+    docType: 'INVOICE',
+    docStatus: 'Draft',
+    customerName: row.customerName || '',
+    preparedFor: row.customerName || '',
+    projectName: row.projectName || row.invoiceNumber || ''
+  };
+  appState.invoiceToolSnapshot = null;
+  appState.invoiceToolPrefill = window.EpataInvoicePrefill?.invoicePrefillFromReceivable(row) || fallbackPrefill;
+  await showPage('invoices', { resetInvoiceTool: true });
 }
 
 async function openDocumentIntakeWithPrefill(relatedType, relatedNumber = '') {
@@ -4130,7 +4377,7 @@ async function renderInvoiceWorkspace(el, typeFocus = '') {
     </div>`;
   qs('#newEstimateBtn').onclick = () => openInvoiceEditor(null, 'ESTIMATE');
   qs('#newInvoiceBtn').onclick = () => openInvoiceEditor(null, 'INVOICE');
-  qs('#legacyImportBtn').onclick = importLegacyInvoicesOnce;
+  qs('#legacyImportBtn').onclick = event => importLegacyInvoicesOnce(event.currentTarget);
   qs('#invoiceSearch').oninput = () => filterInvoiceDocs(docs);
   qs('#invoiceTypeFilter').onchange = () => filterInvoiceDocs(docs);
   bindInvoiceDocButtons();
@@ -4299,14 +4546,16 @@ async function createEstimateFromCalculator() {
   renderInvoiceEditor(doc);
 }
 
-async function importLegacyInvoicesOnce() {
-  try {
-    const result = await api('/api/invoice-documents/import-from-legacy', { method: 'POST', body: '{}' });
-    toast(`Imported ${result.imported} old document(s).`);
-    await showPage('invoiceCenter');
-  } catch (err) {
-    toast(`Import failed: ${err.message}`);
-  }
+async function importLegacyInvoicesOnce(button = qs('#legacyImportBtn')) {
+  return runExclusiveAction('legacy-invoice-import', 'Legacy import already in progress.', async () => {
+    try {
+      const result = await api('/api/invoice-documents/import-from-legacy', { method: 'POST', body: '{}' });
+      toast(`Imported ${result.imported} old document(s).`);
+      await showPage('invoiceCenter');
+    } catch (err) {
+      toast(`Import failed: ${err.message}`);
+    }
+  }, { button, busyText: 'Importing...' });
 }
 
 async function openInvoiceEditor(id = null, requestedType = 'ESTIMATE') {
@@ -4324,6 +4573,7 @@ async function newInvoiceDocument(type) {
     customerName: '', customerPhone: '', customerEmail: '', customerAddress: '',
     projectName: '', material: '', color: '', infill: '', projectDescription: '', projectNotes: '',
     subtotal: 0, discountAmount: 0, rushAmount: 0, taxAmount: 0, total: 0, amountPaid: 0, balance: 0,
+    paymentMethod: 'Unknown / Review',
     calcTaxRate: 0, termsNotes: type === 'INVOICE' ? 'Payment due by the due date shown above.' : 'Estimate is valid for 14 days unless otherwise noted.',
     pricingGuide: '', standardTurnaround: '', rushTurnaround: '',
     lineItems: [{ sortOrder: 1, description: '', details: '', quantity: 1, rate: 0, amount: 0 }]
@@ -4372,6 +4622,7 @@ function renderInvoiceEditor(doc) {
           ${invoiceInput('rushAmount','Rush Fee',doc.rushAmount,'number')}
           ${invoiceInput('calcTaxRate','Tax %',doc.calcTaxRate,'number')}
           ${invoiceInput('amountPaid','Amount Paid',doc.amountPaid,'number')}
+          ${invoiceSelect('paymentMethod','Payment Method',doc.paymentMethod || 'Unknown / Review', commonOptions.paymentMethod, true)}
         </div>
         <section class="entity-strip invoice-total-strip">
           <div><span>Subtotal</span><strong id="invoiceSubtotal">$0.00</strong></div>
@@ -4418,8 +4669,8 @@ function invoiceInput(name, label, value = '', type = 'text') {
 function invoiceTextarea(name, label, value = '') {
   return `<label class="full"><span>${label}</span><textarea name="${name}" rows="3">${escapeHtml(value ?? '')}</textarea></label>`;
 }
-function invoiceSelect(name, label, value, options) {
-  return `<label><span>${label}</span><select name="${name}">${options.map(o => `<option value="${o}" ${o === value ? 'selected' : ''}>${o}</option>`).join('')}</select></label>`;
+function invoiceSelect(name, label, value, options, required = false) {
+  return `<label><span>${label}</span><select name="${name}"${required ? ' required' : ''}>${options.map(o => `<option value="${escapeHtml(o)}" ${o === value ? 'selected' : ''}>${escapeHtml(o)}</option>`).join('')}</select></label>`;
 }
 
 function renderInvoiceLines() {
@@ -4433,7 +4684,7 @@ function renderInvoiceLines() {
       <input data-line-field="quantity" type="number" min="0" step="0.01" value="${Number(line.quantity ?? 1)}">
       <input data-line-field="rate" type="number" min="0" step="0.01" value="${Number(line.rate ?? 0)}">
       <strong>${formatMoney(line.amount)}</strong>
-      <button class="icon-button" type="button" data-remove-line="${index}" title="Remove line">×</button>
+      <button class="icon-button" type="button" data-remove-line="${index}" title="Remove line" aria-label="Remove line item">×</button>
     </div>`).join('');
   qsa('[data-line-field]').forEach(input => input.oninput = handleInvoiceLineChange);
   qsa('[data-remove-line]').forEach(btn => btn.onclick = () => {
@@ -4463,23 +4714,23 @@ function bindInvoiceEditor() {
     form._lineItems.push({ sortOrder: form._lineItems.length + 1, description: '', details: '', quantity: 1, rate: 0, amount: 0 });
     renderInvoiceLines();
   };
-  qs('#saveInvoiceDocBtn').onclick = saveInvoiceDocument;
+  qs('#saveInvoiceDocBtn').onclick = event => saveInvoiceDocument(event.currentTarget);
   qs('#previewInvoiceDocBtn').onclick = () => printInvoiceDocument(true);
   qs('#printInvoiceDocBtn').onclick = () => printInvoiceDocument(false);
   qsa('.compact-calc input').forEach(input => input.oninput = updateInvoicePreview);
   qs('#pushInlineCalcBtn').onclick = pushInlineCalculatorToLine;
   const duplicate = qs('#duplicateInvoiceDocBtn');
-  if (duplicate) duplicate.onclick = duplicateInvoiceDocument;
+  if (duplicate) duplicate.onclick = event => duplicateInvoiceDocument(event.currentTarget);
   const convert = qs('#convertInvoiceDocBtn');
-  if (convert) convert.onclick = convertEstimateToInvoice;
+  if (convert) convert.onclick = event => convertEstimateToInvoice(event.currentTarget);
   const del = qs('#deleteInvoiceDocBtn');
-  if (del) del.onclick = deleteInvoiceDocument;
+  if (del) del.onclick = event => deleteInvoiceDocument(event.currentTarget);
 }
 
 function collectInvoiceDocument() {
   const form = qs('#invoiceDocForm');
   const data = Object.fromEntries(new FormData(form).entries());
-  qsa('.invoice-totals input').forEach(input => data[input.name] = input.value);
+  qsa('.invoice-totals input, .invoice-totals select').forEach(input => data[input.name] = input.value);
   qsa('.compact-calc input').forEach(input => data[input.name] = input.value);
   const lines = (form._lineItems || []).map((line, index) => ({
     id: line.id || null,
@@ -4503,6 +4754,7 @@ function collectInvoiceDocument() {
   return {
     ...data,
     status: !isInvoice && data.status === 'Paid' ? 'Accepted' : status,
+    paymentMethod: data.paymentMethod || 'Unknown / Review',
     subtotal, discountAmount, rushAmount, calcTaxRate, taxAmount, total, amountPaid,
     balance: isInvoice ? Math.max(0, total - amountPaid) : 0,
     calcGrams: nonNegative(data.calcGrams), calcHours: nonNegative(data.calcHours),
@@ -4591,40 +4843,49 @@ function invoicePreviewHtml(doc) {
   </article>`;
 }
 
-async function saveInvoiceDocument() {
+async function saveInvoiceDocument(button = qs('#saveInvoiceDocBtn')) {
   const form = qs('#invoiceDocForm');
-  const id = form.dataset.id;
-  const doc = collectInvoiceDocument();
-  const saved = await api(id ? `/api/invoice-documents/${id}` : '/api/invoice-documents', {
-    method: id ? 'PUT' : 'POST',
-    body: JSON.stringify(doc)
-  });
-  toast(`${saved.docType === 'INVOICE' ? 'Invoice' : 'Estimate'} saved.`);
-  renderInvoiceEditor(saved);
+  const id = form.dataset.id || 'new';
+  return runExclusiveAction(`invoice-doc-save:${id}`, 'Save already in progress.', async () => {
+    const doc = collectInvoiceDocument();
+    const saved = await api(id !== 'new' ? `/api/invoice-documents/${id}` : '/api/invoice-documents', {
+      method: id !== 'new' ? 'PUT' : 'POST',
+      body: JSON.stringify(doc)
+    });
+    toast(`${saved.docType === 'INVOICE' ? 'Invoice' : 'Estimate'} saved.`);
+    renderInvoiceEditor(saved);
+  }, { button, busyText: 'Saving...' });
 }
 
-async function duplicateInvoiceDocument() {
+async function duplicateInvoiceDocument(button = qs('#duplicateInvoiceDocBtn')) {
   const id = qs('#invoiceDocForm').dataset.id;
   if (!id) return;
-  const copy = await api(`/api/invoice-documents/${id}/duplicate`, { method: 'POST', body: '{}' });
-  toast('Document duplicated.');
-  renderInvoiceEditor(copy);
+  return runExclusiveAction(`invoice-doc-duplicate:${id}`, 'Duplicate already in progress.', async () => {
+    const copy = await api(`/api/invoice-documents/${id}/duplicate`, { method: 'POST', body: '{}' });
+    toast('Document duplicated.');
+    renderInvoiceEditor(copy);
+  }, { button, busyText: 'Duplicating...' });
 }
 
-async function convertEstimateToInvoice() {
+async function convertEstimateToInvoice(button = qs('#convertInvoiceDocBtn')) {
   const id = qs('#invoiceDocForm').dataset.id;
   if (!id) return;
-  const invoice = await api(`/api/invoice-documents/${id}/convert-to-invoice`, { method: 'POST', body: '{}' });
-  toast('Estimate converted to invoice.');
-  renderInvoiceEditor(invoice);
+  return runExclusiveAction(`invoice-doc-convert:${id}`, 'Conversion already in progress.', async () => {
+    const invoice = await api(`/api/invoice-documents/${id}/convert-to-invoice`, { method: 'POST', body: '{}' });
+    toast('Estimate converted to invoice.');
+    renderInvoiceEditor(invoice);
+  }, { button, busyText: 'Converting...' });
 }
 
-async function deleteInvoiceDocument() {
+async function deleteInvoiceDocument(button = qs('#deleteInvoiceDocBtn')) {
   const id = qs('#invoiceDocForm').dataset.id;
-  if (!id || !confirm('Archive this estimate/invoice? It will be hidden from normal records and totals, but kept in the database.')) return;
-  await api(`/api/invoice-documents/${id}`, { method: 'DELETE' });
-  toast('Document archived.');
-  await showPage('invoiceCenter');
+  if (!id) return;
+  return runExclusiveAction(`invoice-doc-archive:${id}`, 'Archive already in progress.', async () => {
+    if (!confirm('Archive this estimate/invoice? It will be hidden from normal records and totals, but kept in the database.')) return;
+    await api(`/api/invoice-documents/${id}`, { method: 'DELETE' });
+    toast('Document archived.');
+    await showPage('invoiceCenter');
+  }, { button, busyText: 'Archiving...' });
 }
 
 async function printInvoiceDocument(preview = false) {
@@ -4670,6 +4931,8 @@ async function renderTaxPrep(el) {
   const reviewExpenses = expenses.filter(x => equalsText(x.deductibleStatus, 'Review') || equalsText(x.taxBucket, 'Review') || x.needsReview);
   const assetExpenses = expenses.filter(x => equalsText(x.taxBucket, 'Asset'));
   const expensedAssets = assets.filter(isFullyExpensedAsset);
+  const assetHandlingRows = window.EpataTaxPrepState?.taxPrepAssetHandlingRows(assets, assetExpenses) ?? taxPrepAssetHandlingRows(assets, assetExpenses);
+  const rewardIncomeRows = window.EpataTaxPrepState?.taxPrepRewardIncomeRows(rewards) ?? taxPrepRewardIncomeRows(rewards);
   const makerWorldIncome = Number(summary.makerWorldIncome || 0);
   const deductibleTotal = Number(summary.operatingExpenseDeductions || 0) + Number(summary.cogsMaterialExpenseDeductions || 0) + Number(summary.expensedAssets || 0) + Number(summary.mileageDeductionEstimate || 0) + Number(summary.parkingAndTolls || 0);
   const filingIncome = Number(summary.grossReceipts || 0) + makerWorldIncome;
@@ -4733,7 +4996,7 @@ async function renderTaxPrep(el) {
     </div>
     <div class="card">
       <div class="card-header-lite"><h3>Accountant / Tax Software Export Package</h3><span class="badge good">One ZIP</span></div>
-      <p>The ${taxYear} package includes a summary, obligations, sales, NJ sales-tax review, expenses, assets, mileage, rewards, and proof index. It is an organized handoff, not a completed return.</p>
+      <p>The ${taxYear} package includes a summary, obligations, sales, NJ sales-tax review, expenses, bills/AP, assets, mileage, rewards, and proof index. It is an organized handoff, not a completed return.</p>
       <div class="actions">
         <a class="primary-button" href="/api/export/tax-package?year=${taxYear}">Download ${taxYear} Tax Package</a>
         <a class="ghost-button" href="/api/export/tax-sales?year=${taxYear}&paymentGroup=all">Export ${taxYear} Sales</a>
@@ -4790,6 +5053,18 @@ async function renderTaxPrep(el) {
       <div class="card">
         <div class="card-header-lite"><h3>AP/Bills By Category</h3><span class="badge">${yearBills.length} rows</span></div>
         ${moneyGroupTable(billGroups)}
+      </div>
+    </div>
+    <div class="grid two">
+      <div class="card">
+        <div class="card-header-lite"><h3>Asset Tax Handling</h3><span class="badge">${assetHandlingRows.length} rows</span></div>
+        <p>Assets stay separate from ordinary expenses. Only rows marked expensed this year with Section 179 or De Minimis treatment feed the asset deduction total.</p>
+        ${smallTable(assetHandlingRows, ['name','taxTreatment','taxPrepHandling','cost','businessUsePercent','countedDeduction'])}
+      </div>
+      <div class="card">
+        <div class="card-header-lite"><h3>MakerWorld Reward Income Status</h3><span class="badge warn">${makerWorldIncome > 0 ? formatMoney(makerWorldIncome) : 'Review'}</span></div>
+        <p>Gift-card value counts as income only when Income Status is set to Yes - Count as income. Points are shown for review and are not added again as dollars.</p>
+        ${smallTable(rewardIncomeRows, ['rewardDate','rewardType','incomeStatus','giftCardAmount','pointsChange','incomeAmount'])}
       </div>
     </div>
     <div class="card">
@@ -4936,13 +5211,15 @@ async function generateTaxCalendar(year) {
 
 function syncBrowserHistory(page, options = {}) {
   if (!window.history?.pushState) return;
-  if (options.fromPop) return;
+  const navHistory = window.EpataNavigationHistory;
   const url = new URL(window.location.href);
-  url.hash = page === 'dashboard' ? '' : `#${encodeURIComponent(page)}`;
+  url.hash = navHistory?.pageHash?.(page) ?? (page === 'dashboard' ? '' : `#${encodeURIComponent(page)}`);
   const state = { page };
   appState.suppressPopState = true;
-  if (options.replace || !history.state?.page) history.replaceState(state, '', url);
-  else if (appState.currentPage !== history.state?.page) history.pushState(state, '', url);
+  const mode = navHistory?.browserHistoryMode?.(appState.currentPage, history.state?.page, options)
+    ?? (options.fromPop ? 'none' : options.replace || !history.state?.page ? 'replace' : appState.currentPage !== history.state?.page ? 'push' : 'none');
+  if (mode === 'replace') history.replaceState(state, '', url);
+  else if (mode === 'push') history.pushState(state, '', url);
   appState.suppressPopState = false;
 }
 
@@ -4953,8 +5230,10 @@ function updateBackButton() {
 }
 
 async function goBack() {
-  const previous = appState.pageHistory.pop() || 'dashboard';
-  await showPage(previous, { skipHistory: true, replace: true });
+  const target = window.EpataNavigationHistory?.popBackTarget?.(appState.pageHistory, 'dashboard')
+    ?? { page: appState.pageHistory.pop() || 'dashboard', history: appState.pageHistory };
+  appState.pageHistory = target.history;
+  await showPage(target.page, { skipHistory: true, replace: true });
 }
 
 function saveTaxEstimateSetting(key, value) {
@@ -5040,6 +5319,61 @@ function isFullyExpensedAsset(x) {
   if (x.countedExpenseThisYear !== true) return false;
   return equalsText(x.taxTreatment, 'Section 179') || equalsText(x.taxTreatment, 'De Minimis Expense');
 }
+
+function percentLabel(value) {
+  return `${Math.min(100, Math.max(0, Number(value ?? 100))).toFixed(0)}%`;
+}
+
+function taxPrepAssetHandlingRows(assets = [], assetExpenses = []) {
+  const assetRows = assets.map(asset => {
+    const counted = isFullyExpensedAsset(asset);
+    const treatment = asset.taxTreatment || 'Review';
+    let handling = 'Asset review';
+    if (counted) handling = 'Asset deduction';
+    else if (equalsText(treatment, 'Depreciation')) handling = 'Asset/depreciation review';
+    else if (equalsText(treatment, 'Not Deductible')) handling = 'Excluded asset';
+
+    return {
+      name: asset.name || asset.vendorName || `Asset #${asset.id}`,
+      taxTreatment: treatment,
+      taxPrepHandling: handling,
+      cost: asset.cost,
+      businessUsePercent: percentLabel(asset.businessUsePercent),
+      countedDeduction: counted ? taxAssetAmount(asset) : 0,
+      needsReview: asset.needsReview || equalsText(treatment, 'Review') || equalsText(treatment, 'Depreciation')
+    };
+  });
+
+  const expenseRows = assetExpenses.map(expense => ({
+    name: expense.description || expense.vendorName || `Expense #${expense.id}`,
+    taxTreatment: 'Expense marked Asset',
+    taxPrepHandling: 'Excluded from ordinary expenses',
+    cost: expense.total ?? expense.amount,
+    businessUsePercent: percentLabel(expense.businessUsePercent),
+    countedDeduction: 0,
+    needsReview: expense.needsReview || equalsText(expense.deductibleStatus, 'Review')
+  }));
+
+  return [...assetRows, ...expenseRows].sort((a, b) => String(a.name).localeCompare(String(b.name)));
+}
+
+function taxPrepRewardIncomeRows(rewards = []) {
+  return rewards
+    .map(reward => {
+      const countsAsIncome = equalsText(reward.incomeStatus, 'Yes - Count as income');
+      return {
+        rewardDate: reward.rewardDate,
+        rewardType: reward.rewardType,
+        incomeStatus: reward.incomeStatus || 'Review',
+        giftCardAmount: reward.giftCardAmount,
+        pointsChange: reward.pointsChange ?? 0,
+        incomeAmount: countsAsIncome ? Number(reward.giftCardAmount || 0) : 0,
+        needsReview: reward.needsReview || equalsText(reward.incomeStatus, 'Review')
+      };
+    })
+    .sort((a, b) => String(a.rewardDate || '').localeCompare(String(b.rewardDate || '')));
+}
+
 function groupMoney(rows, key, pick) {
   const map = new Map();
   rows.forEach(row => {
@@ -5061,6 +5395,8 @@ function taxPaymentExport(title, detail, group, year = appState.taxYear) {
 }
 
 async function uploadDocuments() {
+  const button = qs('#uploadDocsBtn');
+  return runExclusiveAction('document-intake-upload', 'Document upload already in progress.', async () => {
   const files = qs('#docFiles').files;
   const out = qs('#uploadResult');
   if (!files || files.length === 0) {
@@ -5085,6 +5421,7 @@ async function uploadDocuments() {
     out.innerHTML = `<div class="help-item"><strong>Upload failed</strong><p>${escapeHtml(err.message)}</p></div>`;
     toast(`Upload failed: ${err.message}`);
   }
+  }, { button, busyText: 'Uploading...' });
 }
 
 function renderUploadResult(result) {
@@ -5558,6 +5895,10 @@ qs('#breakdownModalDone').onclick = closeDashboardBreakdown;
 qs('#breakdownModalBackdrop').onclick = closeDashboardBreakdown;
 
 document.addEventListener('keydown', e => {
+  if (e.key === 'Tab') {
+    if (window.EpataModalLifecycle?.trapModalFocus?.(qs('#modal'), e)) return;
+    if (window.EpataModalLifecycle?.trapModalFocus?.(qs('#breakdownModal'), e)) return;
+  }
   if (e.key === 'Escape') {
     closeModal();
     closeDashboardBreakdown();
@@ -5573,10 +5914,19 @@ api('/api/app-info').then(info => {
 }).catch(() => {});
 window.addEventListener('popstate', event => {
   if (appState.suppressPopState) return;
-  const page = event.state?.page || decodeURIComponent(location.hash.replace(/^#/, '')) || 'dashboard';
-  if (appState.pageHistory[appState.pageHistory.length - 1] === page) appState.pageHistory.pop();
+  const page = window.EpataNavigationHistory?.pageFromStateOrHash?.(event.state, location.hash)
+    ?? (event.state?.page || decodeURIComponent(location.hash.replace(/^#/, '')) || 'dashboard');
+  appState.pageHistory = window.EpataNavigationHistory?.historyAfterPop?.(appState.pageHistory, page)
+    ?? (() => {
+      const stack = appState.pageHistory;
+      if (stack[stack.length - 1] === page) stack.pop();
+      return stack;
+    })();
   showPage(page, { skipHistory: true, fromPop: true });
 });
-const initialPage = decodeURIComponent(location.hash.replace(/^#/, '')) || 'dashboard';
-history.replaceState?.({ page: initialPage }, '', initialPage === 'dashboard' ? location.pathname : `#${encodeURIComponent(initialPage)}`);
+const initialPage = window.EpataNavigationHistory?.pageFromStateOrHash?.(null, location.hash)
+  ?? (decodeURIComponent(location.hash.replace(/^#/, '')) || 'dashboard');
+const initialHash = window.EpataNavigationHistory?.pageHash?.(initialPage)
+  ?? (initialPage === 'dashboard' ? '' : `#${encodeURIComponent(initialPage)}`);
+history.replaceState?.({ page: initialPage }, '', initialPage === 'dashboard' ? location.pathname : initialHash);
 showPage(initialPage, { replace: true, skipHistory: true });

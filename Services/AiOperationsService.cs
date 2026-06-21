@@ -847,6 +847,7 @@ public sealed class AiOperationsService(
         JobType = "Print",
         Status = "Paid",
         ProductName = sale.ProductName,
+        PaymentMethod = sale.PaymentMethod,
         Color = sale.Color,
         Description = $"Completed paid marketplace order {sale.OrderNumber}.",
         InvoiceAmount = sale.CustomerPaid,
@@ -1004,6 +1005,7 @@ public sealed class AiOperationsService(
         job.JobType = Trim(string.IsNullOrWhiteSpace(job.JobType) ? "Print" : job.JobType, 80);
         job.Status = "Paid";
         job.ProductName = TrimNullable(string.IsNullOrWhiteSpace(job.ProductName) ? sale.ProductName : job.ProductName, 220);
+        job.PaymentMethod = Trim(sale.PaymentMethod, 80);
         job.Color = TrimNullable(string.IsNullOrWhiteSpace(job.Color) ? sale.Color : job.Color, 80);
         job.InvoiceAmount = sale.CustomerPaid;
         job.AmountPaid = sale.CustomerPaid;

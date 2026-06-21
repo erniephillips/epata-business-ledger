@@ -17,6 +17,9 @@ public class Asset : AuditableEntity
 
     public decimal? Cost { get; set; }
 
+    [MaxLength(80)]
+    public string PaymentMethod { get; set; } = "Unknown / Review";
+
     [MaxLength(120)]
     public string? SerialNumber { get; set; }
 

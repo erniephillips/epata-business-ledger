@@ -21,15 +21,8 @@ public sealed class LocalAiService(AppDbContext db, HttpClient httpClient)
 
     public async Task<LocalAiSettings> GetSettingsAsync(CancellationToken cancellationToken = default)
     {
-        var values = await db.AppSettings.AsNoTracking()
-            .Where(x => x.Key.StartsWith("LocalAi:"))
-            .ToDictionaryAsync(x => x.Key, x => x.Value, cancellationToken);
-        return new LocalAiSettings(
-            NormalizeBaseUrl(values.GetValueOrDefault("LocalAi:BaseUrl")),
-            NormalizeModelPath(values.GetValueOrDefault("LocalAi:ModelPath")),
-            NormalizeIdentifier(values.GetValueOrDefault("LocalAi:ModelIdentifier")),
-            ClampInt(values.GetValueOrDefault("LocalAi:ContextLength"), DefaultContextLength, 2048, 131072),
-            ClampInt(values.GetValueOrDefault("LocalAi:IdleUnloadSeconds"), DefaultIdleUnloadSeconds, 60, 86400));
+        var values = await GetSettingValuesAsync(cancellationToken);
+        return BuildSettings(values);
     }
 
     public async Task<LocalAiSettings> SaveSettingsAsync(SaveLocalAiSettingsRequest request, CancellationToken cancellationToken = default)
@@ -52,11 +45,12 @@ public sealed class LocalAiService(AppDbContext db, HttpClient httpClient)
 
     public async Task<LocalAiStatus> GetStatusAsync(bool includeAvailableModels = true, CancellationToken cancellationToken = default)
     {
-        var settings = await GetSettingsAsync(cancellationToken);
+        var values = await GetSettingValuesAsync(cancellationToken);
+        var settings = BuildStatusSettings(values, out var configurationWarning, out var selectedModelPath);
         var status = new LocalAiStatus
         {
             BaseUrl = settings.BaseUrl,
-            SelectedModelPath = settings.ModelPath,
+            SelectedModelPath = selectedModelPath ?? settings.ModelPath,
             ModelIdentifier = settings.ModelIdentifier,
             ContextLength = settings.ContextLength,
             IdleUnloadSeconds = settings.IdleUnloadSeconds,
@@ -102,6 +96,13 @@ public sealed class LocalAiService(AppDbContext db, HttpClient httpClient)
             status.Message = status.LmsInstalled
                 ? "LM Studio is installed, but its local server is off."
                 : "LM Studio or its lms command-line tool was not found.";
+        }
+
+        if (!string.IsNullOrWhiteSpace(configurationWarning))
+        {
+            status.ModelReady = false;
+            status.State = "Setup needs attention";
+            status.Message = configurationWarning;
         }
 
         return status;
@@ -471,6 +472,67 @@ public sealed class LocalAiService(AppDbContext db, HttpClient httpClient)
 
     private static string ModelsRoot() => Path.GetFullPath(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".lmstudio", "models"));
 
+    private async Task<Dictionary<string, string?>> GetSettingValuesAsync(CancellationToken cancellationToken)
+        => await db.AppSettings.AsNoTracking()
+            .Where(x => x.Key.StartsWith("LocalAi:"))
+            .ToDictionaryAsync(x => x.Key, x => x.Value, cancellationToken);
+
+    private static LocalAiSettings BuildSettings(IReadOnlyDictionary<string, string?> values) =>
+        new(
+            NormalizeBaseUrl(values.GetValueOrDefault("LocalAi:BaseUrl")),
+            NormalizeModelPath(values.GetValueOrDefault("LocalAi:ModelPath")),
+            NormalizeIdentifier(values.GetValueOrDefault("LocalAi:ModelIdentifier")),
+            ClampInt(values.GetValueOrDefault("LocalAi:ContextLength"), DefaultContextLength, 2048, 131072),
+            ClampInt(values.GetValueOrDefault("LocalAi:IdleUnloadSeconds"), DefaultIdleUnloadSeconds, 60, 86400));
+
+    private static LocalAiSettings BuildStatusSettings(
+        IReadOnlyDictionary<string, string?> values,
+        out string? configurationWarning,
+        out string? selectedModelPath)
+    {
+        configurationWarning = null;
+        selectedModelPath = null;
+
+        var baseUrl = TryNormalizeSetting(
+            () => NormalizeBaseUrl(values.GetValueOrDefault("LocalAi:BaseUrl")),
+            DefaultBaseUrl,
+            ref configurationWarning);
+
+        var rawModelPath = values.GetValueOrDefault("LocalAi:ModelPath");
+        var modelPath = TryNormalizeSetting(
+            () => NormalizeModelPath(rawModelPath),
+            null,
+            ref configurationWarning);
+        selectedModelPath = modelPath ?? CleanPathForDisplay(rawModelPath);
+
+        return new(
+            baseUrl,
+            modelPath,
+            TryNormalizeSetting(
+                () => NormalizeIdentifier(values.GetValueOrDefault("LocalAi:ModelIdentifier")),
+                DefaultIdentifier,
+                ref configurationWarning),
+            ClampInt(values.GetValueOrDefault("LocalAi:ContextLength"), DefaultContextLength, 2048, 131072),
+            ClampInt(values.GetValueOrDefault("LocalAi:IdleUnloadSeconds"), DefaultIdleUnloadSeconds, 60, 86400));
+    }
+
+    private static T TryNormalizeSetting<T>(Func<T> normalize, T fallback, ref string? configurationWarning)
+    {
+        try
+        {
+            return normalize();
+        }
+        catch (Exception ex) when (ex is InvalidOperationException
+            or ArgumentException
+            or IOException
+            or NotSupportedException
+            or UnauthorizedAccessException)
+        {
+            configurationWarning ??= ex.Message;
+            return fallback;
+        }
+    }
+
     private static string NormalizeBaseUrl(string? value)
     {
         var cleaned = string.IsNullOrWhiteSpace(value) ? DefaultBaseUrl : value.Trim().TrimEnd('/');
@@ -502,6 +564,20 @@ public sealed class LocalAiService(AppDbContext db, HttpClient httpClient)
             throw new InvalidOperationException("Choose a downloaded GGUF model from the local LM Studio models folder.");
         }
         return path;
+    }
+
+    private static string? CleanPathForDisplay(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+
+        try
+        {
+            return Path.GetFullPath(value.Trim());
+        }
+        catch
+        {
+            return value.Trim();
+        }
     }
 
     private static string NormalizeIdentifier(string? value)

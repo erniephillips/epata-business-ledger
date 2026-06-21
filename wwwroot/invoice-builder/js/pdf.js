@@ -27,7 +27,7 @@ export function renderInvoiceHtml(input, options = {}) {
   const statusStamp = buildStatusStamp(d.status);
   const rows = buildRows(d);
   const autoPrintScript = options.autoPrint
-    ? `<script>window.addEventListener('load',()=>setTimeout(()=>window.print(),250));<\/script>`
+    ? `\n  <script>window.addEventListener('load',()=>setTimeout(()=>window.print(),250));<\/script>`
     : '';
 
   return `<!DOCTYPE html>
@@ -36,7 +36,7 @@ export function renderInvoiceHtml(input, options = {}) {
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>${esc(d.docNumber || title)} - EPATA 3D Prints</title>
-  ${invoiceStyles()}
+  ${invoiceStyles(d.brandColor, d.pageSize)}
 </head>
 
 <body class="bg-body-secondary text-body">
@@ -196,19 +196,20 @@ export function renderInvoiceHtml(input, options = {}) {
         </section>
       </div>
     </footer>
-  </main>
-  ${autoPrintScript}
+  </main>${autoPrintScript}
 </body>
 </html>`;
 }
 
-function invoiceStyles() {
+function invoiceStyles(brandColor, pageSize) {
+  const safeBrandColor = normalizeBrandColor(brandColor);
+  const page = pageMetrics(pageSize);
   return `<style>
     :root {
-      --epata-blue: #17499b;
+      --epata-blue: ${safeBrandColor};
       --epata-text: #111111;
-      --epata-page-w: 1024px;
-      --epata-page-h: 1414px;
+      --epata-page-w: ${page.width}px;
+      --epata-page-h: ${page.height}px;
     }
 
     * { box-sizing: border-box; }
@@ -241,7 +242,7 @@ function invoiceStyles() {
     .epata-content-space {
       position: relative;
       flex: 1 0 auto;
-      min-height: 1064px;
+      min-height: calc(var(--epata-page-h) - 350px);
     }
 
     .epata-blue-line {
@@ -557,6 +558,8 @@ function invoiceStyles() {
 
     .panel-body p {
       margin-bottom: 8px;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
 
     .detail-grid {
@@ -566,6 +569,14 @@ function invoiceStyles() {
       row-gap: 9px;
       font-size: 13px;
       line-height: 1.25;
+    }
+
+    .detail-grid > div,
+    .small-panel .panel-body,
+    .footer-line {
+      min-width: 0;
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
 
     .summary-row {
@@ -615,6 +626,10 @@ function invoiceStyles() {
       border-color: #cfd9ea;
     }
 
+    .estimate-table thead {
+      display: table-header-group;
+    }
+
     .estimate-table thead th {
       color: var(--epata-blue);
       font-weight: 900;
@@ -629,6 +644,13 @@ function invoiceStyles() {
       vertical-align: top;
       border-color: #cfd9ea;
       background: rgba(255,255,255,.34);
+      overflow-wrap: anywhere;
+      word-break: break-word;
+    }
+
+    .estimate-table tbody tr {
+      break-inside: avoid;
+      page-break-inside: avoid;
     }
 
     .estimate-table .num-col {
@@ -660,6 +682,11 @@ function invoiceStyles() {
     .small-panel ul {
       padding-left: 16px;
       margin-bottom: 0;
+    }
+
+    .small-panel li {
+      overflow-wrap: anywhere;
+      word-break: break-word;
     }
 
     .ai-use-disclosure {
@@ -735,11 +762,18 @@ function invoiceStyles() {
       }
 
       @page {
-        size: auto;
+        size: ${page.printSize};
         margin: 0;
       }
     }
   </style>`;
+}
+
+function pageMetrics(pageSize) {
+  const normalized = normalizePageSize(pageSize);
+  if (normalized === 'LETTER') return { width: 1024, height: 1325, printSize: 'letter portrait' };
+  if (normalized === 'LEGAL') return { width: 1024, height: 1688, printSize: 'legal portrait' };
+  return { width: 1024, height: 1414, printSize: 'A4 portrait' };
 }
 
 function buildRows(d) {
@@ -801,6 +835,7 @@ const ESTIMATE_ACCEPTED_TERMS = `- This estimate has been accepted.
 function normalizeData(input) {
   const d = { ...(input || {}) };
   d.docType = String(d.docType || 'ESTIMATE').toUpperCase();
+  d.pageSize = normalizePageSize(d.pageSize);
   d.status = d.status || 'Draft';
   // Migrate legacy values so old saved data still renders correctly.
   if (d.docType === 'ESTIMATE' && d.status === 'Paid')     d.status = 'Accepted';
@@ -823,6 +858,7 @@ function normalizeData(input) {
   }
   d.docRushPercent = num(d.docRushPercent);
   d.docTaxRate = num(d.docTaxRate);
+  d.brandColor = normalizeBrandColor(d.brandColor);
   d.businessName = String(d.businessName || 'EPATA 3D PRINTS').toUpperCase();
   d.businessLocation = d.businessLocation || 'Based in New Jersey';
   d.businessEmail = d.businessEmail || 'epata.llc.co@gmail.com';
@@ -853,6 +889,11 @@ Material Notes
   );
   d.termsNotes = (!current || KNOWN_DEFAULTS.has(current)) ? ideal : d.termsNotes;
   return d;
+}
+
+function normalizePageSize(pageSize) {
+  const normalized = String(pageSize || 'A4').trim().toUpperCase();
+  return ['A4', 'LETTER', 'LEGAL'].includes(normalized) ? normalized : 'A4';
 }
 
 function pickDefaultTerms(docType, status) {
@@ -1068,6 +1109,11 @@ function displayWebsite(value) {
 function num(value) {
   const n = Number(value ?? 0);
   return Number.isFinite(n) ? n : 0;
+}
+
+function normalizeBrandColor(value) {
+  const color = String(value || '').trim();
+  return /^#[0-9a-f]{6}$/i.test(color) ? color : '#17499b';
 }
 
 function formatTaxRate(value) {

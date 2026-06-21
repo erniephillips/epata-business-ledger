@@ -20,14 +20,17 @@ export function setVal(id, v) {
 }
 
 // ── Formatting ────────────────────────────────────────
-export function money(n) {
+export function roundCurrency(n) {
   const num = typeof n === 'string' ? parseFloat(n) : n;
-  return isNaN(num) ? '$0.00' : '$' + num.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  return isNaN(num) ? 0 : Math.round((num + Number.EPSILON) * 100) / 100;
+}
+
+export function money(n) {
+  return '$' + roundCurrency(n).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 
 export function plainMoney(n) {
-  const num = typeof n === 'string' ? parseFloat(n) : n;
-  return isNaN(num) ? '0.00' : num.toFixed(2);
+  return roundCurrency(n).toFixed(2);
 }
 
 export function escapeHtml(v) {
@@ -59,11 +62,22 @@ export function fmtDateTime(iso) {
 }
 
 // ── Toast notifications ───────────────────────────────
-export function toast(msg, type = 'info', duration = 3000) {
+export function toast(msg, type = 'info', duration = 3000, options = {}) {
+  if (typeof duration === 'object' && duration !== null) {
+    options = duration;
+    duration = 3000;
+  }
   const container = el('toast-container');
   if (!container) return;
+  const key = typeof options === 'string' ? options : options?.key;
+  if (key) {
+    Array.from(container.children)
+      .find(node => node.dataset?.toastKey === key)
+      ?.remove();
+  }
   const t = document.createElement('div');
   t.className = `toast ${type}`;
+  if (key) t.dataset.toastKey = key;
   const icon = type === 'success' ? '✓' : type === 'error' ? '✕' : 'ℹ';
   t.innerHTML = `<span>${icon}</span><span>${escapeHtml(msg)}</span>`;
   container.appendChild(t);
@@ -75,6 +89,7 @@ export function statusBadge(status) {
   const map = {
     Draft:    'status-draft',
     Sent:     'status-sent',
+    Partial:  'status-sent',
     Paid:     'status-paid',
     Accepted: 'status-paid',   // shares the green "closed" styling
     Void:     'status-void',
@@ -85,7 +100,7 @@ export function statusBadge(status) {
 export function typeBadge(type) {
   return type === 'INVOICE'
     ? `<span class="badge badge-purple">${type}</span>`
-    : `<span class="badge badge-blue">${type ?? 'ESTIMATE'}</span>`;
+    : `<span class="badge badge-blue">${escapeHtml(type ?? 'ESTIMATE')}</span>`;
 }
 
 // ── Logo (base64 embedded for PDF use) ───────────────

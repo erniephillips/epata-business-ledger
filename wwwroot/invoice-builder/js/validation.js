@@ -3,6 +3,11 @@
 const PHONE_IDS = new Set(['customerPhone', 'businessPhone']);
 const EMAIL_IDS = new Set(['customerEmail', 'businessEmail']);
 const URL_IDS = new Set(['businessWebsite']);
+const REQUIRED_DOCUMENT_FIELDS = {
+  docDate: 'Document date',
+  customerName: 'Customer name',
+  paymentMethod: 'Payment method',
+};
 
 const TEXT_LIMITS = {
   docNumber: 80,
@@ -102,6 +107,49 @@ export function validateSettingsInputs() {
   ]);
 }
 
+export function validateDocumentState(state = {}) {
+  const docType = String(state.docType || 'ESTIMATE').toUpperCase();
+  if (!['ESTIMATE', 'INVOICE'].includes(docType)) {
+    return invalidState('docType', 'Document type must be Estimate or Invoice.');
+  }
+
+  for (const [field, label] of Object.entries(REQUIRED_DOCUMENT_FIELDS)) {
+    if (!String(state[field] ?? '').trim()) {
+      return invalidState(field, `${label} is required.`);
+    }
+  }
+
+  const docNumber = String(state.docNumber || '').trim();
+  if (docNumber && !/^[A-Z0-9]+(?:-[A-Z0-9]+)*$/.test(docNumber)) {
+    return invalidState('docNumber', 'Document number can only use uppercase letters, numbers, and single hyphens.');
+  }
+
+  if (!isCompleteOrBlankUsPhone(state.customerPhone)) {
+    return invalidState('customerPhone', 'Enter a complete 10-digit US phone number in the format (555) 123-4567.');
+  }
+
+  if (!isBlankOrValidEmail(state.customerEmail)) {
+    return invalidState('customerEmail', 'Enter a valid email address or leave email blank.');
+  }
+
+  return { valid: true };
+}
+
+export function normalizeNumberValue(id, value, options = {}) {
+  if (value === '') return '';
+  const number = Number(value);
+  if (!Number.isFinite(number)) return '';
+
+  const [min, max] = numberLimitsForDescriptor(id, options.classNames || []);
+  const step = Number(options.step);
+  let normalized = Math.min(max, Math.max(min, number));
+  if (Number.isFinite(step) && step > 0) {
+    normalized = min + Math.round((normalized - min) / step) * step;
+    normalized = Number(normalized.toFixed(decimalPlaces(step)));
+  }
+  return normalized;
+}
+
 export function formatUsPhone(value) {
   let digits = String(value ?? '').replace(/\D/g, '');
   if (digits.length === 11 && digits.startsWith('1')) digits = digits.slice(1);
@@ -110,6 +158,20 @@ export function formatUsPhone(value) {
   if (digits.length < 4) return `(${digits}`;
   if (digits.length < 7) return `(${digits.slice(0, 3)}) ${digits.slice(3)}`;
   return `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}`;
+}
+
+export function isCompleteOrBlankUsPhone(value) {
+  const digits = String(value ?? '').replace(/\D/g, '');
+  return digits.length === 0 || digits.length === 10 || (digits.length === 11 && digits.startsWith('1'));
+}
+
+export function normalizeEmail(value) {
+  return sanitizeText(value, TEXT_LIMITS.customerEmail).trim().toLowerCase();
+}
+
+export function isBlankOrValidEmail(value) {
+  const clean = normalizeEmail(value);
+  return !clean || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clean);
 }
 
 function validateNodes(nodes) {
@@ -168,6 +230,10 @@ function configureNode(node) {
   if (!(node instanceof HTMLInputElement || node instanceof HTMLTextAreaElement)) return;
   if (node instanceof HTMLInputElement && ['file', 'hidden', 'color', 'checkbox'].includes(node.type)) return;
 
+  if (Object.hasOwn(REQUIRED_DOCUMENT_FIELDS, node.id)) {
+    node.required = true;
+  }
+
   if (PHONE_IDS.has(node.id)) {
     node.inputMode = 'tel';
     node.maxLength = 14;
@@ -216,41 +282,40 @@ function normalizeNode(node) {
     return;
   }
 
-  if (EMAIL_IDS.has(node.id)) node.value = sanitizeText(node.value, node.maxLength).trim().toLowerCase();
+  if (EMAIL_IDS.has(node.id)) node.value = normalizeEmail(node.value);
   else if (URL_IDS.has(node.id)) node.value = sanitizeText(node.value, node.maxLength).trim();
   else if (node.id === 'docNumber') node.value = node.value.replace(/^-+|-+$/g, '');
   else if (isPlainTextNode(node)) node.value = sanitizeText(node.value, node.maxLength);
 }
 
 function setPhoneValidity(node) {
-  const digits = node.value.replace(/\D/g, '');
-  node.setCustomValidity(!digits.length || digits.length === 10
+  node.setCustomValidity(isCompleteOrBlankUsPhone(node.value)
     ? ''
     : 'Enter a complete 10-digit US phone number in the format (555) 123-4567.');
 }
 
 function normalizeNumber(node) {
   if (node.value === '') return;
-  const value = Number(node.value);
-  if (!Number.isFinite(value)) {
+  const normalized = normalizeNumberValue(node.id, node.value, {
+    classNames: [...node.classList],
+    step: node.step,
+  });
+  if (normalized === '') {
     node.value = '';
     return;
-  }
-
-  const [min, max] = numberLimitsFor(node);
-  const step = Number(node.step);
-  let normalized = Math.min(max, Math.max(min, value));
-  if (Number.isFinite(step) && step > 0) {
-    normalized = min + Math.round((normalized - min) / step) * step;
-    normalized = Number(normalized.toFixed(decimalPlaces(step)));
   }
   node.value = String(normalized);
 }
 
 function numberLimitsFor(node) {
-  if (node.classList.contains('item-qty')) return [0, 1_000_000];
-  if (node.classList.contains('item-rate')) return [0, 1_000_000_000];
-  return NUMBER_LIMITS[node.id] || [0, 1_000_000_000];
+  return numberLimitsForDescriptor(node.id, [...node.classList]);
+}
+
+function numberLimitsForDescriptor(id, classNames = []) {
+  const classes = new Set(classNames);
+  if (classes.has('item-qty')) return [0, 1_000_000];
+  if (classes.has('item-rate')) return [0, 1_000_000_000];
+  return NUMBER_LIMITS[id] || [0, 1_000_000_000];
 }
 
 function textLimitFor(node) {
@@ -272,6 +337,17 @@ function sanitizeText(value, maxLength) {
 function decimalPlaces(value) {
   const text = String(value);
   return text.includes('.') ? text.length - text.indexOf('.') - 1 : 0;
+}
+
+function invalidState(field, message) {
+  return {
+    valid: false,
+    field,
+    view: ['grams', 'gramRate', 'hours', 'hourRate', 'designHours', 'designRate', 'setupFee', 'postFee', 'rush', 'discount', 'taxRate', 'minimum'].includes(field)
+      ? 'calculator'
+      : 'builder',
+    message,
+  };
 }
 
 function fieldLabel(node) {

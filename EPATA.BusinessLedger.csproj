@@ -13,11 +13,15 @@
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
     <PackageReference Include="PdfPig" Version="0.1.14" />
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="3.50.3" />
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Remove="tests\**" />
     <Content Remove="publish-win-x64\**" />
+    <Content Remove="tests\**" />
     <None Remove="publish-win-x64\**" />
+    <None Remove="tests\**" />
   </ItemGroup>
 
   <ItemGroup>

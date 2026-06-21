@@ -3,33 +3,60 @@
 //  .NET 10 SPA Entry Point
 // ═══════════════════════════════════════════════════════
 
-import { api }                                    from './api.js?v=4';
+import { api }                                    from './api.js?v=5';
 import { el, toast, money, setVal, textVal,
          fmtDateTime, statusBadge, typeBadge,
-         debounce, todayStr }                     from './utils.js?v=2';
+         debounce, escapeHtml, todayStr }         from './utils.js?v=4';
 import { initCalculator, calculate, getCalcState,
-         restoreCalcState, pushToBuilder,
-         applyConfigDefaults, syncDifficultyButtons } from './calculator.js?v=3';
+         restoreCalcState, pushToBuilder, buildDefaultCalculatorState,
+         applyConfigDefaults, syncDifficultyButtons } from './calculator.js?v=5';
 import { initBuilder, addLineItem, removeLineItem,
          getLineItems, updateTotals, captureState,
-         restoreState, getFormData, newDocument } from './builder.js?v=5';
+         restoreState, getFormData, newDocument,
+         remapStatusForDocType } from './builder.js?v=11';
 import { initRecords, refreshRecords, loadRecord,
          duplicateRecord, deleteRecord, exportCsv,
          getRecords, convertEstimateToInvoice,
-         restoreRecord }                          from './records.js?v=10';
-import { generatePdf, renderInvoiceHtml }         from './pdf.js?v=3';
+         restoreRecord }                          from './records.js?v=12';
+import { buildSaveRequestPlan, canReuseInFlightSave, getSaveIntent } from './save-intent.js?v=2';
+import { activeRecordBarText, buildSaveFailureUiState,
+         emptyActiveRecordIdentity, identityAfterArchivedRecord,
+         identityFromDocument, normalizeActiveRecordIdentity } from './document-session.js?v=1';
+import { generatePdf, renderInvoiceHtml }         from './pdf.js?v=5';
+import { buildProductOptionsHtml, buildSelectedProductPatch,
+         findProductByName }                      from './product-lookups.js?v=1';
 import { initInputValidation, normalizeDocumentInputs, normalizeSettingsInputs,
          validateCalculatorInputs, validateDocumentInputs,
-         validateSettingsInputs } from './validation.js?v=2';
+         validateSettingsInputs } from './validation.js?v=4';
 
 // ── State ─────────────────────────────────────────────
 let activeRecordId  = null;
+let activeRecordType = null;
+let activeRecordNumber = null;
 let apiReady        = false;
 let appConfig       = {};
 let autoSaveTimer   = null;
 let saveInFlight    = null;
+let saveInFlightIntent = null;
+let documentSessionVersion = 0;
 let productLookups  = [];
+const actionInFlight = new Set();
 const AUTOSAVE_MS   = 30_000;
+
+async function runExclusiveToolAction(key, busyMessage, action) {
+  const actionKey = String(key || 'tool-action');
+  if (actionInFlight.has(actionKey)) {
+    toast(busyMessage || 'Action already in progress.', 'info');
+    return null;
+  }
+
+  actionInFlight.add(actionKey);
+  try {
+    return await action();
+  } finally {
+    actionInFlight.delete(actionKey);
+  }
+}
 
 // ── Init ──────────────────────────────────────────────
 export async function init(initialView = 'dashboard') {
@@ -38,7 +65,7 @@ export async function init(initialView = 'dashboard') {
 
   // Expose global handlers for inline onclick attributes
   window._builderUpdate  = () => { updateTotals(); refreshInvoicePreview(); scheduleAutoSave(); };
-  window._removeLineItem = removeLineItem;
+  window._removeLineItem = removeLineItemAndRefresh;
   window._loadRecord     = (id) => onLoadRecord(id);
   window._dupeRecord     = (id) => onDuplicateRecord(id);
   window._convertEstimate = (id) => onConvertEstimate(id);
@@ -47,9 +74,10 @@ export async function init(initialView = 'dashboard') {
   window._copyText       = copyText;
   window._invoiceToolSnapshot = createDocumentSnapshot;
   window._invoiceToolShowView = showView;
+  window._invoiceToolIsSaving = () => !!saveInFlight;
 
   // Override the shim — expose addLineItem globally for onclick handlers
-  window.addLineItem     = addLineItem;
+  window.addLineItem     = addLineItemAndRefresh;
   window.el              = el;
 
   // Nav
@@ -69,6 +97,8 @@ export async function init(initialView = 'dashboard') {
   on('btnImportDb',     () => el('importDbFile')?.click());
   on('btnExportCsv',    () => exportCsv());
   on('importDbFile',    (e) => onImportDb(e));
+  on('btnImportPdfDraft', () => el('invoicePdfImportFile')?.click());
+  on('invoicePdfImportFile', (e) => onImportPdfDraft(e));
   on('btnSaveSettings', () => saveSettings());
 
   // Records init
@@ -148,7 +178,7 @@ export async function init(initialView = 'dashboard') {
     } else {
       const startType = options.newType || 'ESTIMATE';
       const num = await api.nextNumber(startType).then(r => r.number).catch(() => '');
-      activeRecordId = null;
+      clearActiveRecordIdentity();
       startCleanDocument(startType, num);
       applyDocumentPrefill(options.prefill);
       setDbStatus(`Ready — new ${startType === 'INVOICE' ? 'invoice' : 'estimate'}`, 'ready');
@@ -200,14 +230,14 @@ async function loadDashboardStats() {
     if (tbody) {
       tbody.innerHTML = rows.length ? rows.map(r => `
         <tr>
-          <td class="doc-number" style="cursor:pointer" onclick="${r.sourceKind === 'receivable' ? `window.openLedgerEntityRecord && window.openLedgerEntityRecord('receivables', ${r.sourceId || r.id})` : `window._loadRecord(${r.id})`}">${r.docNumber||'—'}</td>
+          <td class="doc-number"><button class="record-link" type="button" onclick="${r.sourceKind === 'receivable' ? `window.openLedgerEntityRecord && window.openLedgerEntityRecord('receivables', ${r.sourceId || r.id})` : `window._loadRecord(${r.id})`}">${escapeHtml(r.docNumber || '—')}</button></td>
           <td>${typeBadge(r.docType)}</td>
           <td>${statusBadge(r.status||'Draft')}</td>
           <td>${r.customerName||'—'}</td>
           <td class="num">${money(r.total)}</td>
           <td class="muted">${fmtDateTime(r.updatedAt)}</td>
         </tr>`).join('')
-        : `<tr><td colspan="6"><div class="empty-state" style="padding:30px"><div class="empty-icon">📄</div><div class="empty-title">No records yet</div></div></td></tr>`;
+        : `<tr><td colspan="6"><div class="empty-state" style="padding:30px"><div class="empty-icon">📄</div><div class="empty-title">No records yet</div><div class="empty-desc">Saved estimates and invoices will appear here after you create them.</div></div></td></tr>`;
     }
   } catch (e) {
     console.error('Stats error', e);
@@ -216,6 +246,7 @@ async function loadDashboardStats() {
 
 // ── Document lifecycle ────────────────────────────────
 function onDocumentLoaded(doc) {
+  markDocumentSessionChanged();
   cancelPendingAutoSave();
   // Restore form fields
   restoreState({
@@ -266,7 +297,7 @@ function onDocumentLoaded(doc) {
   normalizeDocumentInputs();
   syncDifficultyButtons();
 
-  activeRecordId = doc.id;
+  setActiveRecordIdentity(doc);
   updateActiveBar();
   refreshInvoicePreview();
 }
@@ -274,13 +305,14 @@ function onDocumentLoaded(doc) {
 async function startNew(type = 'ESTIMATE') {
   const num = apiReady ? await api.nextNumber(type).then(r => r.number).catch(() => '') : '';
   startCleanDocument(type, num);
-  activeRecordId = null;
+  clearActiveRecordIdentity();
   updateActiveBar();
   refreshInvoicePreview();
   showView('builder');
 }
 
 function startCleanDocument(type = 'ESTIMATE', number = '') {
+  markDocumentSessionChanged();
   cancelPendingAutoSave();
   newDocument(type, number);
   restoreCalcState(defaultCalcState());
@@ -310,18 +342,23 @@ function applyDocumentPrefill(prefill = null) {
     docRushPercent: prefill.docRushPercent ?? '',
     docTaxRate: prefill.docTaxRate ?? prefill.calcTaxRate ?? '',
     amountPaid: prefill.amountPaid ?? '',
-    paymentMethod: prefill.paymentMethod || '',
+    paymentMethod: prefill.paymentMethod || 'Unknown / Review',
     pricingGuide: prefill.pricingGuide || '',
     termsNotes: prefill.termsNotes || '',
     standardTurnaround: prefill.standardTurnaround || '',
     rushTurnaround: prefill.rushTurnaround || ''
   };
+  if (fields.docType) {
+    setVal('docType', fields.docType);
+    el('docType')?.dispatchEvent(new Event('change'));
+  }
   Object.entries(fields).forEach(([id, value]) => {
+    if (id === 'docType' || id === 'docStatus') return;
     if (value !== null && value !== undefined && value !== '') setVal(id, value);
   });
-  if (prefill.docType) {
-    const docType = el('docType');
-    docType?.dispatchEvent(new Event('change'));
+  if (fields.docStatus) {
+    const docType = fields.docType || textVal('docType') || 'ESTIMATE';
+    setVal('docStatus', remapStatusForDocType(docType, fields.docStatus));
   }
   if (Array.isArray(prefill.lineItems) && prefill.lineItems.length) {
     const tbody = el('lineItemsBody');
@@ -368,6 +405,8 @@ function createDocumentSnapshot() {
   try {
     return {
       activeRecordId,
+      activeRecordType,
+      activeRecordNumber,
       formData: getFormData(),
       calcState: getCalcState(),
       legacy: captureState(),
@@ -379,6 +418,7 @@ function createDocumentSnapshot() {
 
 function restoreDocumentSnapshot(snapshot) {
   if (!snapshot) return false;
+  markDocumentSessionChanged();
   cancelPendingAutoSave();
   const doc = snapshot.formData || {};
   restoreState({
@@ -420,10 +460,33 @@ function restoreDocumentSnapshot(snapshot) {
   restoreCalcState(snapshot.calcState || {});
   normalizeDocumentInputs();
   syncDifficultyButtons();
-  activeRecordId = snapshot.activeRecordId || null;
+  applyActiveRecordIdentity({
+    activeRecordId: snapshot.activeRecordId || null,
+    activeRecordType: snapshot.activeRecordType || doc.docType || null,
+    activeRecordNumber: snapshot.activeRecordNumber || doc.docNumber || null,
+  });
   updateActiveBar();
   refreshInvoicePreview();
   return true;
+}
+
+function getActiveRecordIdentity() {
+  return normalizeActiveRecordIdentity({ activeRecordId, activeRecordType, activeRecordNumber });
+}
+
+function applyActiveRecordIdentity(identity) {
+  const normalized = normalizeActiveRecordIdentity(identity);
+  activeRecordId = normalized.activeRecordId;
+  activeRecordType = normalized.activeRecordType;
+  activeRecordNumber = normalized.activeRecordNumber;
+}
+
+function setActiveRecordIdentity(doc) {
+  applyActiveRecordIdentity(identityFromDocument(doc));
+}
+
+function clearActiveRecordIdentity() {
+  applyActiveRecordIdentity(emptyActiveRecordIdentity());
 }
 
 async function saveRecord(forceNew = false) {
@@ -437,19 +500,34 @@ async function saveRecord(forceNew = false) {
   }
 
   if (saveInFlight) {
-    toast(`Still saving ${textVal('docNumber') || 'document'}...`, 'info', 1600);
-    return saveInFlight;
+    const requestedIntent = getSaveIntent(forceNew, {
+      activeRecordId,
+      activeRecordType,
+      requestedDocType: textVal('docType') || 'ESTIMATE',
+    });
+    if (canReuseInFlightSave(saveInFlightIntent, requestedIntent)) {
+      toast(`Still saving ${textVal('docNumber') || 'document'}...`, 'info', 1600, { key: 'invoice-save-status' });
+      return saveInFlight;
+    }
+    toast('Finish the current save before starting a different save action.', 'error', 3200);
+    return null;
   }
 
-  saveInFlight = doSaveRecord(forceNew);
+  saveInFlightIntent = getSaveIntent(forceNew, {
+    activeRecordId,
+    activeRecordType,
+    requestedDocType: textVal('docType') || 'ESTIMATE',
+  });
+  saveInFlight = doSaveRecord(forceNew, documentSessionVersion);
   try {
     return await saveInFlight;
   } finally {
     saveInFlight = null;
+    saveInFlightIntent = null;
   }
 }
 
-async function doSaveRecord(forceNew = false) {
+async function doSaveRecord(forceNew = false, saveSessionVersion = documentSessionVersion) {
   setAutoSaveStatus('saving');
   try {
     if (!await ensureApiReady()) {
@@ -473,35 +551,80 @@ async function doSaveRecord(forceNew = false) {
       calcDifficulty:  parseFloat(calcState.difficulty)  || 1,
       calcRush:        parseFloat(calcState.rush)        || 0,
       calcDiscount:    parseFloat(calcState.discount)    || 0,
-      calcTaxRate:     parseFloat(calcState.taxRate)     || 0,
+      calcTaxRate:     parseFloat(formData.docTaxRate)   || parseFloat(calcState.taxRate) || 0,
       json: JSON.stringify(legacy),
     };
 
-    let result;
-    if (!forceNew && activeRecordId) {
-      result = await api.update(activeRecordId, body);
-      toast(`Saved ${result.docNumber || body.docNumber || 'document'}`, 'success');
-    } else {
-      result = await api.create(body);
-      activeRecordId = result.id;
-      toast(`Created ${result.docNumber || body.docNumber || 'document'}`, 'success');
-    }
-    if (result?.docNumber) setVal('docNumber', result.docNumber);
+    const preliminaryPlan = buildSaveRequestPlan(forceNew, {
+      activeRecordId,
+      activeRecordType,
+      activeRecordNumber,
+      requestedDocType: body.docType,
+      body,
+    });
+    const needsNewNumber = preliminaryPlan.intent.forceNew || preliminaryPlan.intent.typeChanged;
+    const nextNumber = needsNewNumber ? await api.nextNumber(body.docType).then(r => r.number).catch(() => '') : '';
+    const savePlan = buildSaveRequestPlan(forceNew, {
+      activeRecordId,
+      activeRecordType,
+      activeRecordNumber,
+      requestedDocType: body.docType,
+      body,
+      nextNumber,
+    });
+    const saveBody = savePlan.body;
 
-    updateActiveBar();
+    let result;
+    if (savePlan.action === 'update') {
+      result = await api.update(savePlan.updateId, saveBody);
+      toast(`Saved ${result.docNumber || saveBody.docNumber || 'document'}`, 'success', 3000, { key: 'invoice-save-status' });
+    } else {
+      result = await api.create(saveBody);
+      toast(savePlan.intent.typeChanged
+        ? `Created new ${result.docType === 'INVOICE' ? 'invoice' : 'estimate'} ${result.docNumber}; original unchanged`
+        : `Created ${result.docNumber || saveBody.docNumber || 'document'}`, 'success', 3000, { key: 'invoice-save-status' });
+    }
+
+    const stillActiveSession = saveSessionVersion === documentSessionVersion;
+    if (stillActiveSession) {
+      if (result?.docNumber) setVal('docNumber', result.docNumber);
+      if (result?.docType) setVal('docType', result.docType);
+      if (result) setActiveRecordIdentity(result);
+      updateActiveBar();
+      refreshInvoicePreview();
+    } else {
+      toast(`Saved ${result.docNumber || saveBody.docNumber || 'document'} in the background; current record unchanged`, 'success', 3000);
+    }
     await refreshRecords();
-    refreshInvoicePreview();
-    setAutoSaveStatus('saved');
+    if (stillActiveSession) {
+      setAutoSaveStatus('saved');
+      setDbStatus(`Ready — saved ${result.docNumber || saveBody.docNumber || 'document'}`, 'ready');
+    } else {
+      setDbStatus('Ready', 'ready');
+    }
     apiReady = true;
-    setDbStatus(`Ready — saved ${result.docNumber || body.docNumber || 'document'}`, 'ready');
     return result;
   } catch (err) {
-    toast('Save failed: ' + err.message, 'error');
+    const failureState = buildSaveFailureUiState({
+      identity: getActiveRecordIdentity(),
+      activeBarText: el('activeRecordText')?.textContent || '',
+    });
+    const stillActiveSession = saveSessionVersion === documentSessionVersion;
+    toast('Save failed: ' + err.message, 'error', 3000, { key: 'invoice-save-status' });
     apiReady = false;
-    setDbStatus('Save failed', 'error');
-    setAutoSaveStatus('');
+    if (stillActiveSession) {
+      setDbStatus(failureState.dbStatusText, failureState.dbStatusState);
+      setAutoSaveStatus(failureState.autoSaveStatus);
+    } else {
+      setDbStatus('Server needs attention; current record unchanged', 'error');
+    }
     throw err;
   }
+}
+
+function markDocumentSessionChanged() {
+  documentSessionVersion += 1;
+  return documentSessionVersion;
 }
 
 async function ensureApiReady() {
@@ -539,6 +662,20 @@ function wireLiveCalculationUpdates() {
   el('projectName')?.addEventListener('change', applySelectedProduct);
 }
 
+function addLineItemAndRefresh(item = {}) {
+  addLineItem(item);
+  updateTotals();
+  refreshInvoicePreview();
+  scheduleAutoSave();
+}
+
+function removeLineItemAndRefresh(btn) {
+  removeLineItem(btn);
+  updateTotals();
+  refreshInvoicePreview();
+  scheduleAutoSave();
+}
+
 async function loadProductLookups() {
   const res = await fetch('/api/lookups');
   if (!res.ok) return;
@@ -546,50 +683,33 @@ async function loadProductLookups() {
   productLookups = data.products || [];
   const list = el('productOptions');
   if (list) {
-    list.innerHTML = productLookups.map(p => `<option value="${escapeHtml(p.name || '')}">${escapeHtml([p.sku, p.targetPrice ? money(p.targetPrice) : ''].filter(Boolean).join(' · '))}</option>`).join('');
+    list.innerHTML = buildProductOptionsHtml(productLookups);
   }
 }
 
 function applySelectedProduct() {
-  const selected = productLookups.find(p => (p.name || '').toLowerCase() === textVal('projectName').toLowerCase());
+  const selected = findProductByName(productLookups, textVal('projectName'));
   if (!selected) return;
-  if (selected.material) setVal('material', selected.material);
-  if (selected.color) setVal('color', selected.color);
-  if (selected.grams != null) setVal('grams', selected.grams);
-  if (selected.printHours != null) setVal('hours', selected.printHours);
-  if (selected.materialCostPerGram != null) setVal('gramRate', selected.materialCostPerGram);
-  if (selected.machineRatePerHour != null) setVal('hourRate', selected.machineRatePerHour);
-  if (selected.designMinutes != null) setVal('designHours', Number(selected.designMinutes || 0) / 60);
-  if (selected.packagingCost != null && !Number(textVal('postFee') || 0)) setVal('postFee', selected.packagingCost);
-  if (selected.targetPrice != null && !Number(textVal('minimum') || 0)) setVal('minimum', selected.targetPrice);
-  calculate();
   const hasMeaningfulLine = Array.from(document.querySelectorAll('#lineItemsBody tr')).some(row =>
     row.querySelector('.item-desc')?.value?.trim() || Number(row.querySelector('.item-rate')?.value || 0) > 0);
-  if (selected.targetPrice && !hasMeaningfulLine) {
+  const patch = buildSelectedProductPatch(selected, {
+    postFee: textVal('postFee'),
+    minimum: textVal('minimum'),
+    hasMeaningfulLine,
+  });
+  Object.entries(patch.fields).forEach(([field, value]) => setVal(field, value));
+  calculate();
+  if (patch.lineItem) {
     const rows = document.querySelectorAll('#lineItemsBody tr');
     rows.forEach(row => row.remove());
-    addLineItem({ description: selected.name, details: [selected.sku, selected.category, selected.material].filter(Boolean).join(' · '), qty: 1, rate: selected.targetPrice });
+    addLineItem(patch.lineItem);
   }
   updateTotals();
   refreshInvoicePreview();
 }
 
 function defaultCalcState() {
-  return {
-    grams: 0,
-    hours: 0,
-    designHours: 0,
-    setupFee: appConfig.calcSetupFee ?? 0,
-    postFee: appConfig.calcPostFee ?? 0,
-    gramRate: appConfig.calcGramRate ?? 0.05,
-    hourRate: appConfig.calcHourRate ?? 3,
-    designRate: appConfig.calcDesignRate ?? 25,
-    minimum: appConfig.calcMinimum ?? 15,
-    difficulty: 1,
-    rush: 0,
-    discount: 0,
-    taxRate: 0,
-  };
+  return buildDefaultCalculatorState(appConfig);
 }
 
 // ── Auto-save ─────────────────────────────────────────
@@ -641,7 +761,7 @@ function onPushToBuilder() {
   }
 
   const calc = calculate();
-  const selectedProduct = productLookups.find(p => (p.name || '').toLowerCase() === textVal('projectName').toLowerCase());
+  const selectedProduct = findProductByName(productLookups, textVal('projectName'));
   pushToBuilder(calc, getLineItems, addLineItem, {
     productName: textVal('projectName'),
     productDetails: selectedProduct
@@ -676,7 +796,9 @@ function resizePreviewFrame(frame) {
 // ── Records ───────────────────────────────────────────
 async function onLoadRecord(id) {
   try {
-    await loadRecord(id, (newId) => { activeRecordId = newId; });
+    await loadRecord(id, (newId) => {
+      applyActiveRecordIdentity({ ...getActiveRecordIdentity(), activeRecordId: newId });
+    });
     updateActiveBar();
     showView('builder');
   } catch (e) {
@@ -690,25 +812,68 @@ async function onDuplicateRecord(id) {
 
 async function onConvertEstimate(id) {
   try {
-    await convertEstimateToInvoice(id, (doc) => {
-      if (!doc?.id || doc.docType !== 'INVOICE') {
-        throw new Error('The server did not return the new invoice record.');
-      }
-      onLoadRecord(doc.id);
-    });
+    const doc = await convertEstimateToInvoice(id);
+    if (!doc?.id || doc.docType !== 'INVOICE') {
+      throw new Error('The server did not return the new invoice record.');
+    }
+    onDocumentLoaded(doc);
+    showView('builder');
   } catch (e) {
     toast('Invoice creation failed: ' + e.message, 'error');
   }
 }
 
 async function onDeleteRecord(id) {
-  try { await deleteRecord(id, activeRecordId, (newId) => { activeRecordId = newId; updateActiveBar(); }); }
+  try {
+    await deleteRecord(id, activeRecordId, (newId) => {
+      const nextIdentity = newId
+        ? { ...getActiveRecordIdentity(), activeRecordId: newId }
+        : identityAfterArchivedRecord(getActiveRecordIdentity(), id);
+      applyActiveRecordIdentity(nextIdentity);
+      updateActiveBar();
+    });
+  }
   catch (e) { toast('Archive failed: ' + e.message, 'error'); }
 }
 
 async function onRestoreRecord(id) {
   try { await restoreRecord(id); }
   catch (e) { toast('Restore failed: ' + e.message, 'error'); }
+}
+
+async function onImportPdfDraft(event) {
+  const input = event?.target;
+  const file = input?.files?.[0];
+  if (input) input.value = '';
+  if (!file) return;
+
+  return runExclusiveToolAction('pdf-draft-import', 'PDF import already in progress.', async () => {
+  try {
+    if (!await ensureApiReady()) {
+      throw new Error('The invoice API is not responding. Reopen the rebuilt app and try again.');
+    }
+
+    setAutoSaveStatus('saving');
+    const result = await api.importPdfDraft(file);
+    const prefill = result?.prefill;
+    if (!prefill) throw new Error('The server did not return mapped invoice fields.');
+
+    const nextNumber = !prefill.docNumber
+      ? await api.nextNumber(prefill.docType || 'ESTIMATE').then(r => r.number).catch(() => '')
+      : '';
+    startCleanDocument(prefill.docType || 'ESTIMATE', prefill.docNumber || nextNumber);
+    clearActiveRecordIdentity();
+    applyDocumentPrefill(prefill);
+    setAutoSaveStatus('');
+    const warningText = (result.warnings || []).length ? ` Review warnings before saving.` : '';
+    toast(`Mapped ${prefill.docType === 'INVOICE' ? 'invoice' : 'estimate'} PDF into an unsaved draft.${warningText}`, 'success', 7000);
+    setDbStatus(`Ready — imported PDF draft ${textVal('docNumber') || ''}`.trim(), 'ready');
+    showView('builder');
+  } catch (e) {
+    setAutoSaveStatus('');
+    toast('PDF import failed: ' + e.message, 'error', 7000);
+  }
+  });
 }
 
 // ── Settings ──────────────────────────────────────────
@@ -764,14 +929,16 @@ async function onImportDb(e) {
   const file = e.target.files?.[0];
   e.target.value = '';
   if (!file) return;
-  if (!confirm('Importing will replace the current database. Backup first? Continue?')) return;
-  try {
-    await api.importDb(file);
-    await refreshRecords();
-    toast('Database imported successfully', 'success');
-  } catch (err) {
-    toast('Import failed: ' + err.message, 'error');
-  }
+  return runExclusiveToolAction('database-import', 'Database import already in progress.', async () => {
+    if (!confirm('Importing will replace the current database. Backup first? Continue?')) return;
+    try {
+      await api.importDb(file);
+      await refreshRecords();
+      toast('Database imported successfully', 'success');
+    } catch (err) {
+      toast('Import failed: ' + err.message, 'error');
+    }
+  });
 }
 
 // ── UI helpers ────────────────────────────────────────
@@ -779,13 +946,8 @@ function updateActiveBar() {
   const bar = el('activeRecordBar');
   const txt = el('activeRecordText');
   if (!bar || !txt) return;
-  if (activeRecordId) {
-    bar.classList.remove('hidden');
-    txt.textContent = `Editing ${textVal('docNumber') || `#${activeRecordId}`} — Ctrl+S to save`;
-  } else {
-    bar.classList.remove('hidden');
-    txt.textContent = 'New document — Ctrl+S to save';
-  }
+  bar.classList.remove('hidden');
+  txt.textContent = activeRecordBarText(getActiveRecordIdentity(), textVal('docNumber'));
 }
 
 function setDbStatus(msg, state = '') {

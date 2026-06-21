@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>EPATA Estimate & Invoice Builder</title>
   <link rel="stylesheet" href="./css/app.css?v=20260609-ai-full-prefill" />
-  <script type="module" src="./js/app.js?v=10"></script>
+  <script type="module" src="./js/app.js?v=37"></script>
 </head>
 <body>
 <div id="app">
@@ -423,6 +423,7 @@
           <p>Build estimates and invoices with line items</p>
         </div>
         <div class="view-actions">
+          <button class="btn-ghost" id="btnImportPdfDraftBuilder" onclick="document.getElementById('invoicePdfImportFile').click()">AI Import PDF</button>
           <button class="btn-ghost" id="btnPreviewPdf">👁 Preview</button>
           <button class="btn-ghost" id="btnSaveNew">⧉ Save as New</button>
           <button class="btn-ghost" id="btnSaveDraft">💾 Save Draft</button>
@@ -565,17 +566,20 @@
                     <div class="field"><label>Rush (%)</label><input id="docRushPercent" type="number" min="0" max="200" step="5" value="0" /></div>
                     <div class="field"><label>Tax rate (%)</label><input id="docTaxRate" type="number" min="0" max="30" step="0.001" value="0" /></div>
                     <div class="field"><label>Amount paid ($)</label><input id="amountPaid" type="number" min="0" step="0.01" value="0" /></div>
-                    <div class="field"><label>Payment method</label><select id="paymentMethod">
+                    <div class="field"><label>Payment method</label><select id="paymentMethod" required>
                       <option>Unknown / Review</option>
                       <option>Cash</option>
+                      <option>Check</option>
                       <option>Zelle</option>
                       <option>Venmo</option>
                       <option>Cash App</option>
                       <option>PayPal</option>
                       <option>ACH / Bank Transfer</option>
-                      <option>Check</option>
+                      <option>Wire Transfer</option>
                       <option>Credit Card</option>
                       <option>Debit Card</option>
+                      <option>Square</option>
+                      <option>Stripe</option>
                       <option>Etsy Payments</option>
                       <option>MakerWorld</option>
                       <option>Online Marketplace</option>
@@ -660,8 +664,10 @@
         <div class="view-actions">
           <button class="btn-ghost btn-sm" id="btnExportCsv">⬇ CSV</button>
           <button class="btn-ghost btn-sm" id="btnExportDb">⬇ DB Backup</button>
+          <button class="btn-ghost btn-sm" id="btnImportPdfDraft">AI Import PDF</button>
+          <input type="file" id="invoicePdfImportFile" aria-label="Import invoice or estimate PDF" accept=".pdf,application/pdf" style="display:none" />
           <button class="btn-ghost btn-sm" onclick="el('importDbFile').click()">⬆ Import DB</button>
-          <input type="file" id="importDbFile" accept=".sqlite,.db" style="display:none" />
+          <input type="file" id="importDbFile" aria-label="Import database backup file" accept=".sqlite,.db" style="display:none" />
           <button class="btn-ghost" onclick="document.querySelector('.nav-item[data-view=builder]').click();document.getElementById('btnNewEstimate').click()">+ New Estimate</button>
           <button class="btn" onclick="document.querySelector('.nav-item[data-view=builder]').click();document.getElementById('btnNewInvoice').click()">+ New Invoice</button>
         </div>
@@ -696,6 +702,7 @@
             <option value="Draft">Draft</option>
             <option value="Sent">Sent</option>
             <option value="Accepted">Accepted (estimates)</option>
+            <option value="Partial">Partial (invoices)</option>
             <option value="Paid">Paid (invoices)</option>
             <option value="Void">Void</option>
           </select>
@@ -704,7 +711,9 @@
             <option value="created">Sort: Created</option>
             <option value="number">Sort: Number</option>
             <option value="total">Sort: Total</option>
+            <option value="paid">Sort: Paid</option>
             <option value="customer">Sort: Customer</option>
+            <option value="project">Sort: Project</option>
           </select>
           <label class="check-inline" title="Shows records you archived with the red X. Archived rows are kept for audit history but do not count in normal invoice totals.">
             <input type="checkbox" id="recIncludeArchived" />
@@ -740,7 +749,7 @@
         <div class="flex gap-3 mt-3" style="font-size:12.5px;color:#64748b;align-items:center">
           <span>Total records: <strong id="recTotalCount">—</strong></span>
           <span style="color:#cbd5e1">·</span>
-          <span>Invoice revenue: <strong id="recInvoiceTotal">—</strong></span>
+          <span>Active invoice total: <strong id="recInvoiceTotal">—</strong></span>
           <span style="color:#cbd5e1">·</span>
           <span>Unpaid balance: <strong id="recUnpaidBalance">—</strong></span>
         </div>

@@ -13,11 +13,15 @@ public static class CsvExportService
             .ToArray();
 
         var sb = new StringBuilder();
-        sb.AppendLine(string.Join(',', props.Select(p => Escape(p.Name))));
+        sb.AppendLine(string.Join(',', props.Select(p => Escape(p.Name, isUserText: false))));
 
         foreach (var row in rows)
         {
-            var values = props.Select(p => Escape(FormatValue(p.GetValue(row))));
+            var values = props.Select(p =>
+            {
+                var value = p.GetValue(row);
+                return Escape(FormatValue(value), value is string);
+            });
             sb.AppendLine(string.Join(',', values));
         }
 
@@ -35,13 +39,24 @@ public static class CsvExportService
         _ => value.ToString() ?? string.Empty
     };
 
-    private static string Escape(string value)
+    private static string Escape(string value, bool isUserText)
     {
+        if (isUserText && IsFormulaLike(value))
+        {
+            value = $"'{value}";
+        }
+
         if (value.Contains(',') || value.Contains('"') || value.Contains('\n') || value.Contains('\r'))
         {
             return $"\"{value.Replace("\"", "\"\"")}\"";
         }
 
         return value;
+    }
+
+    private static bool IsFormulaLike(string value)
+    {
+        var trimmed = value.TrimStart();
+        return trimmed.Length > 0 && trimmed[0] is '=' or '+' or '-' or '@';
     }
 }

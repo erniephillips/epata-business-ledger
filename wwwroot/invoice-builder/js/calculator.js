@@ -2,12 +2,22 @@
 //  EPATA Invoice Tool — Pricing Calculator
 // ═══════════════════════════════════════════════════════
 
-import { el, val, money, plainMoney } from './utils.js';
+import { el, money, plainMoney } from './utils.js';
 
 const INPUT_IDS = [
   'grams','hours','designHours','setupFee','postFee',
   'gramRate','hourRate','designRate','minimum',
   'difficulty','rush','discount','taxRate',
+];
+
+const CALCULATOR_LINE_DESCRIPTIONS = [
+  'Print setup / file preparation',
+  'Material usage',
+  'Machine print time',
+  'Design / modeling time',
+  'Post-processing / handling',
+  'Material / difficulty surcharge',
+  'Minimum charge adjustment',
 ];
 
 export function initCalculator() {
@@ -33,25 +43,41 @@ export function initCalculator() {
   calculate();
 }
 
-export function calculate() {
-  const setup    = val('setupFee');
-  const post     = val('postFee');
-  const material = val('grams') * val('gramRate');
-  const machine  = val('hours') * val('hourRate');
-  const design   = val('designHours') * val('designRate');
+export function calculatePricingFromState(state = {}) {
+  const setup    = numberFromState(state, 'setupFee');
+  const post     = numberFromState(state, 'postFee');
+  const material = numberFromState(state, 'grams') * numberFromState(state, 'gramRate');
+  const machine  = numberFromState(state, 'hours') * numberFromState(state, 'hourRate');
+  const design   = numberFromState(state, 'designHours') * numberFromState(state, 'designRate');
 
   const baseSubtotal    = setup + post + material + machine + design;
-  const difficultyFactor = val('difficulty') || 1;
-  const rushPercent      = val('rush');
+  const difficultyFactor = numberFromState(state, 'difficulty') || 1;
+  const rushPercent      = numberFromState(state, 'rush');
   const difficultyFee   = baseSubtotal * Math.max(0, difficultyFactor - 1);
   const afterDifficulty = baseSubtotal + difficultyFee;
   const rushFee         = afterDifficulty * Math.max(0, rushPercent / 100);
   const adjustedSubtotal = afterDifficulty + rushFee;
-  const discount         = val('discount');
-  const minimum          = val('minimum');
+  const discount         = numberFromState(state, 'discount');
+  const minimum          = numberFromState(state, 'minimum');
   const taxableAmount    = Math.max(minimum, adjustedSubtotal - discount);
-  const tax              = taxableAmount * (val('taxRate') / 100);
+  const tax              = taxableAmount * (numberFromState(state, 'taxRate') / 100);
   const total            = taxableAmount + tax;
+
+  return {
+    setup, post, material, machine, design,
+    baseSubtotal, difficultyFactor, difficultyFee,
+    rushPercent, rushFactor: 1 + rushPercent / 100, rushFee,
+    adjustedSubtotal, discount, minimum, taxableAmount, tax, total,
+  };
+}
+
+export function calculate() {
+  const state = getCalcState();
+  const calc = calculatePricingFromState(state);
+  const {
+    setup, post, material, machine, design,
+    difficultyFee, rushFee, discount, tax, total,
+  } = calc;
 
   setText('setupOut',    money(setup));
   setText('materialOut', money(material));
@@ -63,19 +89,9 @@ export function calculate() {
   setText('discountOut', difficultyFee > 0 || rushFee > 0 ? '-' + money(discount) : '-' + money(discount));
   setText('taxOut',      money(tax));
   setText('totalOut',    money(total));
-  updateFormulaText({
-    setup, post, material, machine, design,
-    baseSubtotal, difficultyFactor, difficultyFee,
-    rushPercent, rushFee, adjustedSubtotal,
-    discount, minimum, taxableAmount, tax, total,
-  });
+  updateFormulaText(calc, state);
 
-  return {
-    setup, post, material, machine, design,
-    baseSubtotal, difficultyFactor, difficultyFee,
-    rushPercent, rushFactor: 1 + rushPercent / 100, rushFee,
-    adjustedSubtotal, discount, minimum, taxableAmount, tax, total,
-  };
+  return calc;
 }
 
 function setText(id, text) {
@@ -83,18 +99,18 @@ function setText(id, text) {
   if (e) e.textContent = text;
 }
 
-function updateFormulaText(calc) {
-  setText('materialFormula', `(${fmt(val('grams'))}g x $${fmt(val('gramRate'), 3)})`);
-  setText('machineFormula', `(${fmt(val('hours'))}h x $${fmt(val('hourRate'))})`);
-  setText('designFormula', `(${fmt(val('designHours'))}h x $${fmt(val('designRate'))})`);
+function updateFormulaText(calc, state = {}) {
+  setText('materialFormula', `(${fmt(numberFromState(state, 'grams'))}g x $${fmt(numberFromState(state, 'gramRate'), 3)})`);
+  setText('machineFormula', `(${fmt(numberFromState(state, 'hours'))}h x $${fmt(numberFromState(state, 'hourRate'))})`);
+  setText('designFormula', `(${fmt(numberFromState(state, 'designHours'))}h x $${fmt(numberFromState(state, 'designRate'))})`);
   setText('difficultyFormula', calc.difficultyFactor > 1
     ? `(${money(calc.baseSubtotal)} x ${fmt(calc.difficultyFactor - 1, 2)})`
     : '(none)');
   setText('rushFormula', calc.rushPercent > 0
     ? `(${money(calc.baseSubtotal + calc.difficultyFee)} x ${fmt(calc.rushPercent)}%)`
     : '(none)');
-  setText('taxFormula', val('taxRate') > 0
-    ? `(${money(calc.taxableAmount)} x ${fmt(val('taxRate'))}%)`
+  setText('taxFormula', numberFromState(state, 'taxRate') > 0
+    ? `(${money(calc.taxableAmount)} x ${fmt(numberFromState(state, 'taxRate'))}%)`
     : '(none)');
 
   const minimumApplied = calc.taxableAmount === calc.minimum && calc.adjustedSubtotal - calc.discount < calc.minimum;
@@ -135,8 +151,31 @@ function fmt(n, digits = 2) {
   return Number.isInteger(num) ? String(num) : num.toFixed(digits).replace(/0+$/, '').replace(/\.$/, '');
 }
 
+function numberFromState(state, key) {
+  const n = parseFloat(state?.[key]);
+  return isNaN(n) ? 0 : n;
+}
+
 export function getCalcState() {
   return Object.fromEntries(INPUT_IDS.map(id => [id, el(id)?.value ?? '']));
+}
+
+export function buildDefaultCalculatorState(config = {}) {
+  return {
+    grams: 0,
+    hours: 0,
+    designHours: 0,
+    setupFee: config.calcSetupFee ?? 0,
+    postFee: config.calcPostFee ?? 0,
+    gramRate: config.calcGramRate ?? 0.05,
+    hourRate: config.calcHourRate ?? 3,
+    designRate: config.calcDesignRate ?? 25,
+    minimum: config.calcMinimum ?? 15,
+    difficulty: 1,
+    rush: 0,
+    discount: 0,
+    taxRate: 0,
+  };
 }
 
 export function restoreCalcState(state = {}) {
@@ -168,58 +207,45 @@ export function applyConfigDefaults(cfg) {
   calculate();
 }
 
-export function pushToBuilder(calc, lineItemsFn, addLineItemFn, context = {}) {
-  const tbody = el('lineItemsBody');
-  if (!tbody) return;
-
-  // Round computed money values to cents to avoid JS float artifacts
-  // like 30.499999999999993 showing up in rate fields.
+export function buildCalculatorPushPlan(calc, state = {}, context = {}) {
   const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
-  const calcDescriptions = new Set([
-    'Print setup / file preparation',
-    'Material usage',
-    'Machine print time',
-    'Design / modeling time',
-    'Post-processing / handling',
-    'Material / difficulty surcharge',
-    'Minimum charge adjustment',
-  ]);
   const productName = String(context.productName || '').trim();
   const productDetails = String(context.productDetails || '').trim();
+  const grams = numberFromState(state, 'grams');
+  const hours = numberFromState(state, 'hours');
+  const designHours = numberFromState(state, 'designHours');
+  const gramRate = numberFromState(state, 'gramRate');
+  const hourRate = numberFromState(state, 'hourRate');
+  const designRate = numberFromState(state, 'designRate');
+  const rushPercent = numberFromState(state, 'rush');
+  const taxRate = numberFromState(state, 'taxRate');
+  const lineItems = [];
 
-  Array.from(tbody.querySelectorAll('tr')).forEach(row => {
-    const desc = row.querySelector('.item-desc')?.value?.trim() || '';
-    const isSelectedProductRow = productName && desc.toLowerCase() === productName.toLowerCase();
-    if (row.dataset.source === 'calculator' || calcDescriptions.has(desc) || isSelectedProductRow) {
-      row.remove();
-    }
-  });
-
+  const add = (item) => lineItems.push({ ...item, source: 'calculator' });
   const addIf = (cond, desc, details, qty, rate) => {
-    if (cond) addLineItemFn({ desc, details, qty, rate, source: 'calculator' });
+    if (cond) add({ desc, details, qty, rate });
   };
 
-  addLineItemFn({
+  add({
     desc: productName || 'Print setup / file preparation',
     details: productName
       ? [productDetails, 'Calculated quote: slicing, orientation, supports, settings review, and project setup.'].filter(Boolean).join('\n')
       : 'Slicing, orientation, supports, settings review, and project setup.',
     qty: 1,
     rate: r2(calc.setup),
-    source: 'calculator',
   });
 
-  addIf(val('grams') > 0, 'Material usage',
-    `${val('grams')} grams × ${plainMoney(val('gramRate'))}/g`,
-    val('grams'), val('gramRate'));
+  addIf(grams > 0, 'Material usage',
+    `${grams} grams × ${plainMoney(gramRate)}/g`,
+    grams, gramRate);
 
-  addIf(val('hours') > 0, 'Machine print time',
-    `${val('hours')} print hours × ${plainMoney(val('hourRate'))}/hr`,
-    val('hours'), val('hourRate'));
+  addIf(hours > 0, 'Machine print time',
+    `${hours} print hours × ${plainMoney(hourRate)}/hr`,
+    hours, hourRate);
 
-  addIf(val('designHours') > 0, 'Design / modeling time',
-    `${val('designHours')} design hours × ${plainMoney(val('designRate'))}/hr`,
-    val('designHours'), val('designRate'));
+  addIf(designHours > 0, 'Design / modeling time',
+    `${designHours} design hours × ${plainMoney(designRate)}/hr`,
+    designHours, designRate);
 
   addIf(calc.post > 0, 'Post-processing / handling',
     'Cleanup, support removal, packaging, or special handling.',
@@ -230,19 +256,45 @@ export function pushToBuilder(calc, lineItemsFn, addLineItemFn, context = {}) {
     1, r2(calc.difficultyFee));
 
   const preMinimumSubtotal = calc.baseSubtotal + calc.difficultyFee;
-  const rushMultiplier = 1 + Math.max(0, val('rush') / 100);
+  const rushMultiplier = 1 + Math.max(0, rushPercent / 100);
   const minimumAdjustment = Math.max(0, ((calc.minimum + calc.discount) / rushMultiplier) - preMinimumSubtotal);
   addIf(minimumAdjustment > 0, 'Minimum charge adjustment',
     `Minimum quote floor: ${money(calc.minimum)}.`,
     1, r2(minimumAdjustment));
 
+  return {
+    lineItems,
+    builderFields: {
+      docDiscount: calc.discount.toFixed(2),
+      docRushPercent: String(Math.round(Math.max(0, (calc.rushFactor - 1) * 100))),
+      docTaxRate: taxRate.toFixed(3).replace(/\.?0+$/, ''),
+    },
+  };
+}
+
+export function pushToBuilder(calc, lineItemsFn, addLineItemFn, context = {}) {
+  const tbody = el('lineItemsBody');
+  if (!tbody) return;
+
+  const calcDescriptions = new Set(CALCULATOR_LINE_DESCRIPTIONS);
+  const productName = String(context.productName || '').trim();
+  const plan = buildCalculatorPushPlan(calc, getCalcState(), context);
+
+  Array.from(tbody.querySelectorAll('tr')).forEach(row => {
+    const desc = row.querySelector('.item-desc')?.value?.trim() || '';
+    const isSelectedProductRow = productName && desc.toLowerCase() === productName.toLowerCase();
+    if (row.dataset.source === 'calculator' || calcDescriptions.has(desc) || isSelectedProductRow) {
+      row.remove();
+    }
+  });
+
+  plan.lineItems.forEach(item => addLineItemFn(item));
+
   if (!tbody.children.length) addLineItemFn({});
 
   // Sync discount / rush / tax to builder
   const setV = (id, v) => { const e = el(id); if (e) e.value = v; };
-  setV('docDiscount',    calc.discount.toFixed(2));
-  setV('docRushPercent', String(Math.round(Math.max(0, (calc.rushFactor - 1) * 100))));
-  setV('docTaxRate',     val('taxRate').toFixed(3).replace(/\.?0+$/, ''));
+  Object.entries(plan.builderFields).forEach(([id, value]) => setV(id, value));
 
   ['docDiscount', 'docRushPercent', 'docTaxRate'].forEach(id => {
     const node = el(id);

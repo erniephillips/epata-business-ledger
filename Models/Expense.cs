@@ -21,6 +21,9 @@ public class Expense : AuditableEntity
     [MaxLength(120)]
     public string? PaymentAccount { get; set; }
 
+    [MaxLength(80)]
+    public string PaymentMethod { get; set; } = "Unknown / Review";
+
     public decimal? Amount { get; set; }
     public decimal? SalesTax { get; set; }
     public decimal? Total { get; set; }

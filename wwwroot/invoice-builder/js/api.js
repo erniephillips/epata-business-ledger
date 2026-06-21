@@ -32,6 +32,12 @@ export const api = {
   restore:     (id)            => request(`/api/documents/${id}/restore`, { method: 'POST' }),
   duplicate:   (id)            => request(`/api/documents/${id}/duplicate`, { method: 'POST' }),
   convertToInvoice: (id)       => request(`/api/documents/${id}/convert-to-invoice`, { method: 'POST' }),
+  importPdfDraft: (file)       => {
+    const fd = new FormData();
+    fd.append('sourceName', file?.name || 'Uploaded invoice or estimate PDF');
+    fd.append('files', file, file?.name || 'invoice-document.pdf');
+    return request('/api/ai/invoice-document-draft/upload', { method: 'POST', body: fd });
+  },
 
   // Settings
   getConfig:   ()              => request('/api/config'),

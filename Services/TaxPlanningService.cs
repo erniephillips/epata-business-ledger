@@ -57,6 +57,11 @@ public sealed class TaxPlanningService(AppDbContext db)
         var sales = await db.Sales.AsNoTracking().Where(x => !x.IsArchived && x.SaleDate.HasValue && x.SaleDate.Value.Year == year).ToListAsync();
         var reportableSales = sales.Where(MoneyRules.IsReportableSale).ToList();
         var expenses = await db.Expenses.AsNoTracking().Where(x => !x.IsArchived && x.ExpenseDate.HasValue && x.ExpenseDate.Value.Year == year).ToListAsync();
+        var bills = await db.Bills.AsNoTracking()
+            .Where(x => !x.IsArchived
+                && ((x.PaymentDate.HasValue && x.PaymentDate.Value.Year == year)
+                    || (!x.PaymentDate.HasValue && x.BillDate.HasValue && x.BillDate.Value.Year == year)))
+            .ToListAsync();
         var assets = await db.Assets.AsNoTracking().Where(x => !x.IsArchived && ((x.InServiceDate.HasValue && x.InServiceDate.Value.Year == year) || (!x.InServiceDate.HasValue && x.PurchaseDate.HasValue && x.PurchaseDate.Value.Year == year))).ToListAsync();
         var rewards = await db.MakerWorldRewards.AsNoTracking().Where(x => !x.IsArchived && x.RewardDate.HasValue && x.RewardDate.Value.Year == year).ToListAsync();
         var mileage = await db.MileageLogs.AsNoTracking().Where(x => !x.IsArchived && x.TripDate.HasValue && x.TripDate.Value.Year == year).ToListAsync();
@@ -66,8 +71,10 @@ public sealed class TaxPlanningService(AppDbContext db)
         var marketplaceTax = reportableSales.Where(x => SalesTaxReviewBucket(x).StartsWith("Marketplace", StringComparison.OrdinalIgnoreCase)).Sum(MoneyRules.SaleSalesTaxMemo);
         var sellerTax = reportableSales.Where(x => SalesTaxReviewBucket(x) == "Seller Collected").Sum(MoneyRules.SaleSalesTaxMemo);
         var unknownTaxRows = reportableSales.Count(x => SalesTaxReviewBucket(x).Contains("Review", StringComparison.OrdinalIgnoreCase));
-        var operating = expenses.Where(x => MoneyRules.IsTaxCountedExpense(x) && x.TaxBucket.Equals("Operating Expense", StringComparison.OrdinalIgnoreCase)).Sum(MoneyRules.TaxCountedExpenseAmount);
-        var materials = expenses.Where(x => MoneyRules.IsTaxCountedExpense(x) && x.TaxBucket.Equals("COGS/Materials", StringComparison.OrdinalIgnoreCase)).Sum(MoneyRules.TaxCountedExpenseAmount);
+        var operating = expenses.Where(x => MoneyRules.IsTaxCountedExpense(x) && x.TaxBucket.Equals("Operating Expense", StringComparison.OrdinalIgnoreCase)).Sum(MoneyRules.TaxCountedExpenseAmount)
+            + bills.Where(x => MoneyRules.IsTaxCountedBill(x) && MoneyRules.BillDeductionBucket(x).Equals("Operating Expense", StringComparison.OrdinalIgnoreCase)).Sum(MoneyRules.TaxCountedBillAmount);
+        var materials = expenses.Where(x => MoneyRules.IsTaxCountedExpense(x) && x.TaxBucket.Equals("COGS/Materials", StringComparison.OrdinalIgnoreCase)).Sum(MoneyRules.TaxCountedExpenseAmount)
+            + bills.Where(x => MoneyRules.IsTaxCountedBill(x) && MoneyRules.BillDeductionBucket(x).Equals("COGS/Materials", StringComparison.OrdinalIgnoreCase)).Sum(MoneyRules.TaxCountedBillAmount);
         var expensedAssets = assets.Sum(MoneyRules.FullyExpensedAssetAmount);
         var rewardIncome = rewards.Sum(MoneyRules.MakerWorldIncomeAmount);
         var miles = mileage.Sum(x => x.BusinessMiles ?? 0);
@@ -79,6 +86,11 @@ public sealed class TaxPlanningService(AppDbContext db)
         var workingProfit = gross + rewardIncome - platformCosts - estimatedCogs - operating - materials - expensedAssets - mileageDeduction - parkingTolls;
         var missingProof = reportableSales.Count(x => x.NeedsReview || string.IsNullOrWhiteSpace(x.SourceProof))
             + expenses.Count(x => x.NeedsReview || string.IsNullOrWhiteSpace(x.ReceiptProof))
+            + bills.Count(x => x.TaxDeductible
+                && MoneyRules.PaidBillAmount(x) > 0
+                && (x.NeedsReview
+                    || string.IsNullOrWhiteSpace(x.SourceProof)
+                    || MoneyRules.BillDeductionBucket(x).Equals("Review", StringComparison.OrdinalIgnoreCase)))
             + assets.Count(x => x.NeedsReview || string.IsNullOrWhiteSpace(x.SourceProof))
             + mileage.Count(x => x.NeedsReview)
             + obligations.Count(x => x.NeedsReview && !x.Status.Equals("Filed / Paid", StringComparison.OrdinalIgnoreCase) && !x.Status.Equals("Not Required", StringComparison.OrdinalIgnoreCase));
@@ -160,6 +172,12 @@ public sealed class TaxPlanningService(AppDbContext db)
         var obligations = await db.TaxObligations.AsNoTracking().Where(x => !x.IsArchived && x.TaxYear == year).OrderBy(x => x.DueDate).ToListAsync();
         var sales = await db.Sales.AsNoTracking().Where(x => !x.IsArchived && x.SaleDate.HasValue && x.SaleDate.Value.Year == year).OrderBy(x => x.SaleDate).ToListAsync();
         var expenses = await db.Expenses.AsNoTracking().Where(x => !x.IsArchived && x.ExpenseDate.HasValue && x.ExpenseDate.Value.Year == year).OrderBy(x => x.ExpenseDate).ToListAsync();
+        var bills = await db.Bills.AsNoTracking()
+            .Where(x => !x.IsArchived
+                && ((x.PaymentDate.HasValue && x.PaymentDate.Value.Year == year)
+                    || (!x.PaymentDate.HasValue && x.BillDate.HasValue && x.BillDate.Value.Year == year)))
+            .OrderBy(x => x.PaymentDate ?? x.BillDate)
+            .ToListAsync();
         var assets = await db.Assets.AsNoTracking().Where(x => !x.IsArchived).OrderBy(x => x.PurchaseDate).ToListAsync();
         var mileage = await db.MileageLogs.AsNoTracking().Where(x => !x.IsArchived && x.TripDate.HasValue && x.TripDate.Value.Year == year).OrderBy(x => x.TripDate).ToListAsync();
         var rewards = await db.MakerWorldRewards.AsNoTracking().Where(x => !x.IsArchived && x.RewardDate.HasValue && x.RewardDate.Value.Year == year).OrderBy(x => x.RewardDate).ToListAsync();
@@ -175,6 +193,7 @@ public sealed class TaxPlanningService(AppDbContext db)
             AddText(zip, "sales.csv", CsvExportService.ToCsv(sales));
             AddText(zip, "nj-sales-tax-review.csv", CsvExportService.ToCsv(njSalesTax));
             AddText(zip, "expenses.csv", CsvExportService.ToCsv(expenses));
+            AddText(zip, "bills.csv", CsvExportService.ToCsv(bills));
             AddText(zip, "assets.csv", CsvExportService.ToCsv(assets));
             AddText(zip, "mileage.csv", CsvExportService.ToCsv(mileage));
             AddText(zip, "makerworld-rewards.csv", CsvExportService.ToCsv(rewards));
@@ -276,6 +295,7 @@ public sealed class TaxPlanningService(AppDbContext db)
         This package is a recordkeeping and accountant-handoff aid. It is not a completed tax return and is not tax advice.
 
         Start with tax-summary.csv and tax-obligations.csv.
+        Review expenses.csv and bills.csv for paid purchases, payment method/account, proof references, and tax categories.
         Review every row marked NeedsReview or Review Applicability.
         Confirm NJ sales-tax treatment in nj-sales-tax-review.csv.
         Gross income must be tracked whether or not a 1099 or other tax form is received.

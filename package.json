@@ -1,0 +1,13 @@
+{
+  "name": "epata-accounts-tracker",
+  "private": true,
+  "scripts": {
+    "test:browser": "pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/run-playwright.ps1 tests/playwright/sidebar-modals.spec.cjs tests/playwright/invoice-builder-workflow.spec.cjs tests/playwright/invoice-state-stress.spec.cjs tests/playwright/navigation-upload-responsive.spec.cjs tests/playwright/final-checklist-closure.spec.cjs",
+    "test:browser:headed": "pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/run-playwright.ps1 tests/playwright/sidebar-modals.spec.cjs tests/playwright/invoice-builder-workflow.spec.cjs tests/playwright/invoice-state-stress.spec.cjs tests/playwright/navigation-upload-responsive.spec.cjs tests/playwright/final-checklist-closure.spec.cjs --headed",
+    "test:visual": "pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/run-playwright.ps1 tests/playwright/visual-regression.spec.cjs",
+    "test:visual:update": "set EPATA_UPDATE_VISUAL_BASELINES=1&& pwsh -NoProfile -ExecutionPolicy Bypass -File ./tools/run-playwright.ps1 tests/playwright/visual-regression.spec.cjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.0"
+  }
+}

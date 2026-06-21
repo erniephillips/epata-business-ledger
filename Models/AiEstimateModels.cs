@@ -41,6 +41,7 @@ public sealed class AiExecutionReceipt
 
 public sealed class AiEstimatePrefill
 {
+    public string? DocNumber { get; set; }
     public string DocType { get; set; } = "ESTIMATE";
     public string Status { get; set; } = "Draft";
     public string? CustomerName { get; set; }
@@ -65,6 +66,7 @@ public sealed class AiEstimatePrefill
     public decimal DocTaxRate { get; set; }
     public decimal DocRushPercent { get; set; }
     public decimal DocDiscount { get; set; }
+    public decimal AmountPaid { get; set; }
     public decimal CalcGrams { get; set; }
     public decimal CalcHours { get; set; }
     public decimal CalcDesignHours { get; set; }

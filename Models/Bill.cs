@@ -17,6 +17,9 @@ public class Bill : AuditableEntity
     [MaxLength(120)]
     public string Category { get; set; } = "General Business";
 
+    [MaxLength(120)]
+    public string TaxCategory { get; set; } = "Other business expense";
+
     [MaxLength(260)]
     public string Description { get; set; } = string.Empty;
 
@@ -31,6 +34,9 @@ public class Bill : AuditableEntity
 
     [MaxLength(120)]
     public string? PaymentAccount { get; set; }
+
+    [MaxLength(80)]
+    public string PaymentMethod { get; set; } = "Unknown / Review";
 
     [MaxLength(220)]
     public string? SourceProof { get; set; }

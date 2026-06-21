@@ -58,6 +58,50 @@ public static class MoneyRules
         return (expense.Total ?? expense.Amount ?? 0) * businessUse;
     }
 
+    public static string BillDeductionBucket(Bill bill)
+    {
+        var category = string.IsNullOrWhiteSpace(bill.TaxCategory)
+            ? bill.Category ?? string.Empty
+            : bill.TaxCategory;
+        var normalized = category.Trim();
+
+        if (normalized.Contains("Review", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Review";
+        }
+
+        return normalized.Contains("COGS", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("Material", StringComparison.OrdinalIgnoreCase)
+            || normalized.Contains("Filament", StringComparison.OrdinalIgnoreCase)
+                ? "COGS/Materials"
+                : "Operating Expense";
+    }
+
+    public static decimal PaidBillAmount(Bill bill)
+    {
+        if (bill.IsArchived || bill.Status.Equals("Void", StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        var total = Math.Max(0, bill.Total ?? bill.Amount ?? 0);
+        var paid = Math.Max(0, bill.AmountPaid ?? 0);
+        return total > 0 ? Math.Min(total, paid) : paid;
+    }
+
+    public static bool IsTaxCountedBill(Bill bill)
+    {
+        return !bill.IsArchived
+            && bill.TaxDeductible
+            && PaidBillAmount(bill) > 0
+            && !BillDeductionBucket(bill).Equals("Review", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static decimal TaxCountedBillAmount(Bill bill)
+    {
+        return IsTaxCountedBill(bill) ? PaidBillAmount(bill) : 0;
+    }
+
     public static bool IsFullyExpensedAsset(Asset asset)
     {
         if (asset.IsArchived || !asset.CountedExpenseThisYear)

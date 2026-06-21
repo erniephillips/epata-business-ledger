@@ -8,6 +8,8 @@ Add-Type -AssemblyName System.Net.Http
 
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $dbPath = Join-Path $root 'Data\full-acceptance.db'
+$backupDownloadPath = Join-Path $root 'Data\full-acceptance-app-backup-rehearsal.db'
+$manualCopyPath = Join-Path $root 'Data\full-acceptance-manual-copy-rehearsal.db'
 $base = "http://127.0.0.1:$Port"
 $project = Join-Path $root 'EPATA.BusinessLedger.csproj'
 $builtDll = @(
@@ -17,7 +19,12 @@ $builtDll = @(
 $uploadProbe = Join-Path $root 'Data\acceptance-upload-proof.txt'
 $aiDocxProbe = Join-Path $root 'Data\acceptance-ai-source.docx'
 $aiPdfProbe = Join-Path $root 'Data\acceptance-ai-source.pdf'
+$aiInvoicePdfProbe = Join-Path $root 'Data\acceptance-invoice-document.pdf'
+$aiEstimatePdfProbe = Join-Path $root 'Data\acceptance-estimate-document.pdf'
 $serverJob = $null
+$backupDir = Join-Path $root 'Backups'
+$backupFilesBefore = @()
+$backupCopyPreflightCompleted = $false
 
 function Write-Step($message) {
     Write-Host "[acceptance] $message"
@@ -29,10 +36,49 @@ function Assert-True($condition, $message) {
     }
 }
 
+function Invoke-BackupCopyRehearsal([string]$label) {
+    Remove-Item -LiteralPath $backupDownloadPath, $manualCopyPath -Force -ErrorAction SilentlyContinue
+
+    $downloadedBackup = Invoke-WebRequest -Method POST -Uri "$base/api/system/backup" -UseBasicParsing -SkipHttpErrorCheck -OutFile $backupDownloadPath -PassThru
+    Assert-True ($downloadedBackup.StatusCode -eq 200) "$label download failed."
+    Assert-True (Test-Path -LiteralPath $backupDownloadPath) "$label download was not created."
+    Assert-True ((Get-Item -LiteralPath $backupDownloadPath).Length -gt 100) "$label file looked empty."
+    $downloadedBackupSignature = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($backupDownloadPath), 0, 15)
+    Assert-True ($downloadedBackupSignature -eq 'SQLite format 3') "$label did not download a SQLite database. Signature: $downloadedBackupSignature"
+    $dataRoot = [System.IO.Path]::GetFullPath((Join-Path $root 'Data'))
+    $dataRootWithSep = if ($dataRoot.EndsWith([System.IO.Path]::DirectorySeparatorChar)) {
+        $dataRoot
+    } else {
+        $dataRoot + [System.IO.Path]::DirectorySeparatorChar
+    }
+    $manualCopyFullPath = [System.IO.Path]::GetFullPath($manualCopyPath)
+    $productionDbPath = [System.IO.Path]::GetFullPath((Join-Path $root ('Data\' + 'epata-business-ledger' + '.db')))
+    Assert-True ($manualCopyFullPath.StartsWith($dataRootWithSep, [System.StringComparison]::OrdinalIgnoreCase)) "$label target escaped Data: $manualCopyFullPath"
+    Assert-True (-not $manualCopyFullPath.Equals($productionDbPath, [System.StringComparison]::OrdinalIgnoreCase)) "$label target would overwrite the production database."
+    Copy-Item -LiteralPath $backupDownloadPath -Destination $manualCopyPath -Force
+    Assert-True (Test-Path -LiteralPath $manualCopyPath) "$label copy was not created."
+    $backupHash = (Get-FileHash -LiteralPath $backupDownloadPath -Algorithm SHA256).Hash
+    $copyHash = (Get-FileHash -LiteralPath $manualCopyPath -Algorithm SHA256).Hash
+    Assert-True ($copyHash -eq $backupHash) "$label copy does not match the app-created backup."
+}
+
 function Assert-Close([decimal]$actual, [decimal]$expected, [decimal]$tolerance, $message) {
     if ([math]::Abs([decimal]$actual - [decimal]$expected) -gt $tolerance) {
         throw "$message Expected $expected, got $actual."
     }
+}
+
+function Assert-UploadedDocUnderRoot($doc, [string]$label) {
+    $uploadRoot = [System.IO.Path]::GetFullPath((Join-Path $root 'UploadedDocs'))
+    $uploadRootWithSep = if ($uploadRoot.EndsWith([System.IO.Path]::DirectorySeparatorChar)) {
+        $uploadRoot
+    } else {
+        $uploadRoot + [System.IO.Path]::DirectorySeparatorChar
+    }
+    $fullPath = [System.IO.Path]::GetFullPath([string]$doc.filePathOrUrl)
+    Assert-True ($fullPath.StartsWith($uploadRootWithSep, [System.StringComparison]::OrdinalIgnoreCase)) "$label escaped UploadedDocs: $fullPath"
+    Assert-True (Test-Path -LiteralPath $fullPath) "$label was not saved under UploadedDocs."
+    return $fullPath
 }
 
 function Invoke-Json($method, $path, $body = $null) {
@@ -134,6 +180,8 @@ function Assert-EstimateMoney($doc, $message) {
 }
 
 function Assert-CrudRoundTrip($route, $payload, $updateField, $updatedValue) {
+    Assert-True $backupCopyPreflightCompleted "Round 64 backup preflight did not run before $route CRUD/archive/restore checks."
+
     $created = Invoke-Json POST "/api/$route" $payload
     Assert-True ($created.id -gt 0) "$route create did not return an id."
     $fetched = Invoke-Json GET "/api/$route/$($created.id)"
@@ -171,6 +219,30 @@ function Upload-ProofFile {
         throw "Document upload failed with $($response.StatusCode): $text"
     }
     return $text | ConvertFrom-Json
+}
+
+function Upload-ProofTextFiles($files) {
+    $client = [System.Net.Http.HttpClient]::new()
+    $content = [System.Net.Http.MultipartFormDataContent]::new()
+    try {
+        foreach ($file in $files) {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes([string]$file.Text)
+            $fileContent = [System.Net.Http.ByteArrayContent]::new($bytes)
+            $fileContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('text/plain')
+            $content.Add($fileContent, 'files', [string]$file.FileName)
+        }
+
+        $response = $client.PostAsync("$base/api/documents/upload", $content).GetAwaiter().GetResult()
+        $text = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+        if (-not $response.IsSuccessStatusCode) {
+            throw "Document text upload failed with $($response.StatusCode): $text"
+        }
+        return $text | ConvertFrom-Json
+    }
+    finally {
+        $content.Dispose()
+        $client.Dispose()
+    }
 }
 
 function Invoke-AiEstimateUpload {
@@ -233,9 +305,57 @@ function Invoke-AiEstimateDocumentUpload {
     return $text | ConvertFrom-Json
 }
 
+function Write-ProbePdfText {
+    param(
+        [string]$Path,
+        [string]$Text
+    )
+
+    $escaped = $Text.Replace('\', '\\').Replace('(', '\(').Replace(')', '\)')
+    [System.IO.File]::WriteAllText($Path, "%PDF-1.4 BT ($escaped) Tj ET %%EOF", [System.Text.Encoding]::Latin1)
+}
+
+function Invoke-AiInvoiceDocumentDraftUpload {
+    Write-ProbePdfText -Path $aiInvoicePdfProbe -Text 'INVOICE Invoice # INV-2026-0099 Date June 12, 2026 Due Date June 19, 2026 Prepared For Acceptance PDF Customer Bill To Acceptance PDF Customer 973-555-0199 pdfcustomer@example.test 123 Import Ave Testville NJ 07001 Project Details Project Name: Imported Console Cover Description: Replacement console part Material: ABS Color: Black Infill: 40% Pricing Summary Subtotal $100.00 Discount -$5.00 Rush Fee (0%) $0.00 Tax (10%) $9.50 Balance Due $0.00 INVOICE Breakdown # Description Calculation / Details Qty Rate Amount 1 Console cover ABS print and finishing 1 $100.00 $100.00 Pricing Guide Print-Only Jobs - $15 minimum Terms & Notes - Payment is due by the due date shown above. Payment Status Status Paid Invoice Total $104.50 Amount Paid $104.50 Balance Due $0.00'
+    $client = [System.Net.Http.HttpClient]::new()
+    $content = [System.Net.Http.MultipartFormDataContent]::new()
+    $content.Add([System.Net.Http.StringContent]::new('acceptance invoice PDF'), 'sourceName')
+    $fileContent = [System.Net.Http.ByteArrayContent]::new([System.IO.File]::ReadAllBytes($aiInvoicePdfProbe))
+    $fileContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('application/pdf')
+    $content.Add($fileContent, 'files', 'accepted-invoice.pdf')
+    $response = $client.PostAsync("$base/api/ai/invoice-document-draft/upload", $content).GetAwaiter().GetResult()
+    $text = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+    if (-not $response.IsSuccessStatusCode) {
+        throw "AI invoice PDF draft upload failed with $($response.StatusCode): $text"
+    }
+    return $text | ConvertFrom-Json
+}
+
+function Invoke-AiEstimateDocumentDraftUpload {
+    Write-ProbePdfText -Path $aiEstimatePdfProbe -Text 'ESTIMATE Estimate # EST-2026-0042 Date June 10, 2026 Valid Until June 24, 2026 Prepared For Acceptance Estimate Customer Bill To Acceptance Estimate Customer estimatecustomer@example.test Project Details Project Name: Imported Estimate Bracket Description: Quote for bracket replacement Material: PETG Color: Blue Infill: 20% Pricing Summary Subtotal $75.00 Discount -$0.00 Rush Fee (0%) $0.00 Tax (0%) $0.00 Estimated Total $75.00 ESTIMATE Breakdown # Description Calculation / Details Qty Rate Amount 1 Bracket replacement Printed PETG bracket 1 $75.00 $75.00 Terms & Notes - This estimate is valid for 14 days from the date above. Approval Status Sent Approved Total $75.00'
+    $client = [System.Net.Http.HttpClient]::new()
+    $content = [System.Net.Http.MultipartFormDataContent]::new()
+    $content.Add([System.Net.Http.StringContent]::new('acceptance estimate PDF'), 'sourceName')
+    $fileContent = [System.Net.Http.ByteArrayContent]::new([System.IO.File]::ReadAllBytes($aiEstimatePdfProbe))
+    $fileContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('application/pdf')
+    $content.Add($fileContent, 'files', 'accepted-estimate.pdf')
+    $response = $client.PostAsync("$base/api/ai/invoice-document-draft/upload", $content).GetAwaiter().GetResult()
+    $text = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+    if (-not $response.IsSuccessStatusCode) {
+        throw "AI estimate PDF draft upload failed with $($response.StatusCode): $text"
+    }
+    return $text | ConvertFrom-Json
+}
+
 try {
     Write-Step 'Preparing disposable database'
-    foreach ($path in @($dbPath, "$dbPath-shm", "$dbPath-wal", $uploadProbe, $aiDocxProbe, $aiPdfProbe)) {
+    $backupFilesBefore = if (Test-Path -LiteralPath $backupDir) {
+        @(Get-ChildItem -LiteralPath $backupDir -Filter 'epata-business-ledger-*.db' -File | ForEach-Object { $_.FullName })
+    } else {
+        @()
+    }
+
+    foreach ($path in @($dbPath, "$dbPath-shm", "$dbPath-wal", $backupDownloadPath, "$backupDownloadPath-shm", "$backupDownloadPath-wal", $manualCopyPath, "$manualCopyPath-shm", "$manualCopyPath-wal", $uploadProbe, $aiDocxProbe, $aiPdfProbe, $aiInvoicePdfProbe, $aiEstimatePdfProbe)) {
         if (Test-Path -LiteralPath $path) {
             Remove-Item -LiteralPath $path -Force
         }
@@ -268,15 +388,81 @@ try {
         $jobOutput = Receive-Job -Job $serverJob -Keep
         throw "App did not become ready. Job output: $jobOutput"
     }
+    Assert-True ($health.database -like '*full-acceptance.db') "Acceptance app is not using the disposable database. Reported: $($health.database)"
+    Invoke-BackupCopyRehearsal 'Round 64 preflight backup-and-copy rehearsal'
+    $backupCopyPreflightCompleted = $true
 
     Write-Step 'Checking static shells and core endpoints'
-    foreach ($path in @('/', '/index.html', '/css/site.css', '/js/app.js', '/invoice-builder/', '/invoice-builder/index.html', '/invoice-builder/css/app.css', '/invoice-builder/js/app.js', '/invoice-builder/js/builder.js', '/invoice-builder/js/records.js', '/invoice-builder/js/pdf.js')) {
+    foreach ($path in @('/', '/index.html', '/css/site.css', '/js/app.js', '/js/relationship-directory.js?v=1', '/js/toast-stack.js?v=1', '/js/modal-lifecycle.js?v=1', '/js/modal-save-state.js?v=1', '/js/entity-table-state.js?v=1', '/js/sidebar-state.js?v=1', '/js/navigation-history.js?v=1', '/js/global-search.js?v=1', '/js/quick-add.js?v=1', '/js/invoice-prefill.js?v=1', '/js/tax-prep-state.js?v=1', '/js/communication-state.js?v=1', '/js/job-workflow-state.js?v=1', '/invoice-builder/', '/invoice-builder/index.html', '/invoice-builder/css/app.css', '/invoice-builder/js/app.js', '/invoice-builder/js/builder.js', '/invoice-builder/js/records.js', '/invoice-builder/js/pdf.js')) {
         $response = Invoke-Raw GET $path
         Assert-True ($response.StatusCode -eq 200) "Static asset $path failed."
     }
     $appJs = (Invoke-Raw GET '/js/app.js').Content
+    $relationshipDirectoryJs = (Invoke-Raw GET '/js/relationship-directory.js?v=1').Content
+    $modalLifecycleJs = (Invoke-Raw GET '/js/modal-lifecycle.js?v=1').Content
+    $modalSaveStateJs = (Invoke-Raw GET '/js/modal-save-state.js?v=1').Content
+    $entityTableStateJs = (Invoke-Raw GET '/js/entity-table-state.js?v=1').Content
+    $sidebarStateJs = (Invoke-Raw GET '/js/sidebar-state.js?v=1').Content
+    $navigationHistoryJs = (Invoke-Raw GET '/js/navigation-history.js?v=1').Content
+    $globalSearchJs = (Invoke-Raw GET '/js/global-search.js?v=1').Content
+    $quickAddJs = (Invoke-Raw GET '/js/quick-add.js?v=1').Content
+    $invoicePrefillJs = (Invoke-Raw GET '/js/invoice-prefill.js?v=1').Content
+    $aiProductDraftJs = (Invoke-Raw GET '/js/ai-product-draft.js?v=1').Content
+    $taxPrepStateJs = (Invoke-Raw GET '/js/tax-prep-state.js?v=1').Content
+    $communicationStateJs = (Invoke-Raw GET '/js/communication-state.js?v=1').Content
+    $jobWorkflowStateJs = (Invoke-Raw GET '/js/job-workflow-state.js?v=1').Content
     Assert-True ($appJs -match 'function assistanceIndicator') 'Assistance source indicator is missing from the app shell.'
     Assert-True ($appJs -match 'Automatic fallback while Local AI is unavailable') 'Local AI fallback indicator is missing.'
+    Assert-True ($appJs -match 'defaultPaymentMethod' -and $appJs -match 'Etsy Payments' -and $appJs -match 'Wire Transfer') 'Payment method defaults/options are missing from the app shell.'
+    Assert-True ($appJs -match 'relationshipOpenButton' -and $relationshipDirectoryJs -match 'relationshipLinkedRowTarget') 'Relationship detail row open routing is not using the shared helper.'
+    Assert-True ($appJs -match 'customerDetailSectionPlan' -and $appJs -match 'vendorDetailSectionPlan' -and $appJs -match 'personContactTarget' -and $appJs -match 'relationshipSectionPage' -and $relationshipDirectoryJs -match 'customerDetailSectionPlan' -and $relationshipDirectoryJs -match 'vendorDetailSectionPlan' -and $relationshipDirectoryJs -match 'personContactTarget' -and $relationshipDirectoryJs -match 'relationshipSectionPage') 'Relationship detail/contact/pagination helpers are not wired into the main shell.'
+Assert-True ($appJs -match 'nameStatus' -and $appJs -match 'duplicateNameWarning' -and $relationshipDirectoryJs -match 'Duplicate contacts' -and $relationshipDirectoryJs -match 'duplicateNameWarning' -and $relationshipDirectoryJs -match 'trimmed, case-insensitive name') 'Relationship duplicate-name status is not visible in the main shell.'
+    Assert-True ($appJs -match 'Edit Audit Doc' -and $appJs -match 'openModal\(configs\.auditDocs') 'Document Intake is not wiring uploaded Audit Docs back to the Audit Doc edit modal.'
+    Assert-True ($appJs -match 'EpataToastStack') 'Main shell is not using stacked toasts for visible save/error messages.'
+    Assert-True ($appJs -match 'EpataModalLifecycle' -and $modalLifecycleJs -match 'openModalSurface' -and $modalLifecycleJs -match 'closeModalSurface') 'Main shell is not using modal lifecycle focus management.'
+    Assert-True ($appJs -match 'EpataModalSaveState' -and $modalSaveStateJs -match 'closeModal: false' -and $modalSaveStateJs -match 'refreshPage: false' -and $modalSaveStateJs -match 'Save failed:') 'Main shell is not using explicit failed-save modal handling.'
+    Assert-True ($appJs -match 'EpataEntityTableState' -and $entityTableStateJs -match 'buildEntityTableModel' -and $entityTableStateJs -match 'filterRows' -and $entityTableStateJs -match 'clampPage' -and $entityTableStateJs -match 'needs-review' -and $entityTableStateJs -match 'refunded' -and $appJs -match 'Refunded' -and $appJs -match 'Needs Review') 'Main shell is not using entity table search/filter/page helpers.'
+    Assert-True ($appJs -match "columns:\s*\['name','sku','material','color','grams'") 'Product catalog table does not expose color with SKU and material.'
+    Assert-True ($appJs -match "columns:\s*\['name','accountType','institution','last4','activeStatus','openingBalance','currentBalance'\]" -and $appJs -match "row\.isActive === false \? 'Inactive' : 'Active'") 'Business Accounts table does not expose explicit active/inactive status.'
+    Assert-True ($appJs -match 'EpataSidebarState' -and $sidebarStateJs -match 'resolveSidebarCollapsed' -and $sidebarStateJs -match 'persistSidebarCollapsed' -and $sidebarStateJs -match 'sidebarExpandedState') 'Main shell is not using sidebar state persistence helpers.'
+    Assert-True ($appJs -match 'EpataNavigationHistory' -and $navigationHistoryJs -match 'nextPageHistory' -and $navigationHistoryJs -match 'browserHistoryMode' -and $navigationHistoryJs -match 'pageFromStateOrHash') 'Main shell is not using navigation history helpers.'
+    Assert-True ($appJs -match 'EpataGlobalSearch' -and $globalSearchJs -match 'searchRowsByConfig' -and $globalSearchJs -match 'resultOpenCall' -and $globalSearchJs -match 'rowMatchesQuery') 'Main shell is not using global search helpers.'
+    Assert-True ($appJs -match 'EpataQuickAdd' -and $quickAddJs -match 'quickAddCards' -and $quickAddJs -match 'quickAddPreset' -and $quickAddJs -match 'quickAddTarget' -and $quickAddJs -match 'productCosting' -and $quickAddJs -match 'actionItem' -and $quickAddJs -match 'auditDoc' -and $quickAddJs -match 'partyContact') 'Main shell is not using complete Quick Add helpers.'
+    Assert-True ($appJs -match 'startReceivablePdfInvoice' -and $appJs -match 'EpataInvoicePrefill' -and $invoicePrefillJs -match 'invoicePrefillFromReceivable' -and $invoicePrefillJs -match 'sourceReceivableInvoiceNumber') 'Main shell is not using AR-to-invoice PDF prefill helpers.'
+    Assert-True ($appJs -match 'EpataAiProductDraft' -and $aiProductDraftJs -match 'openProductDraftPlan' -and $aiProductDraftJs -match 'shouldSaveAutomatically: false') 'Main shell is not using unsaved AI Product draft helpers.'
+    Assert-True ($appJs -match 'EpataTaxPrepState' -and $taxPrepStateJs -match 'taxPrepAssetHandlingRows' -and $taxPrepStateJs -match 'taxPrepRewardIncomeRows' -and $appJs -match 'Asset Tax Handling' -and $appJs -match 'MakerWorld Reward Income Status') 'Main shell is not using Tax Prep asset/reward display helpers.'
+    Assert-True ($appJs -match 'EpataCommunicationState' -and $communicationStateJs -match 'communicationCardPlan' -and $appJs -match 'long-summary') 'Main shell is not using Communication card state helpers.'
+    Assert-True ($appJs -match 'EpataJobWorkflowState' -and $jobWorkflowStateJs -match 'timelineEventTarget' -and $jobWorkflowStateJs -match 'printerQueuePrefillFromJob' -and $appJs -match 'openTimelineEvent') 'Main shell is not using Job Workflow timeline/open/prefill helpers.'
+    $invoiceAppJs = (Invoke-Raw GET '/invoice-builder/js/app.js').Content
+    $invoiceRecordsJs = (Invoke-Raw GET '/invoice-builder/js/records.js').Content
+    Assert-True ($appJs -match 'modalSaveOutcome\(\{ ok: true \}\)' -and $modalSaveStateJs -like "*'Saved.'*" -and $modalSaveStateJs -like '*Save failed:*' -and $invoiceAppJs -like '*Save failed:*') 'Save action toast feedback is missing from a browser module.'
+    Assert-True ($appJs -like "*toast('Archived.')*" -and $invoiceRecordsJs -match '\$\{label\} archived' -and $invoiceAppJs -like '*Archive failed:*') 'Archive/delete action toast feedback is missing from a browser module.'
+    Assert-True ($invoiceRecordsJs -match '\$\{label\} restored' -and $invoiceAppJs -like '*Restore failed:*') 'Restore action toast feedback is missing from the invoice records browser module.'
+    Assert-True ($appJs -like '*Proof file attached and indexed.*' -and $appJs -like '*Upload failed:*' -and $invoiceAppJs -like '*PDF import failed:*') 'Upload action toast feedback is missing from a browser module.'
+    Assert-True ($appJs -like '*Listing text copied.*' -and $appJs -like '*Calculator line copied.*' -and $invoiceAppJs -like '*Copied to clipboard!*') 'Copy action toast feedback is missing from a browser module.'
+    $mainHtml = (Invoke-Raw GET '/index.html').Content
+    $builderHtml = (Invoke-Raw GET '/invoice-builder/index.html').Content
+    Assert-True ($mainHtml -match 'relationship-directory.js') 'Main shell is not loading the relationship directory helper.'
+    Assert-True ($mainHtml -match 'toast-container' -and $mainHtml -match 'toast-stack.js') 'Main shell is not loading the stacked toast container/helper.'
+    Assert-True ($mainHtml -match 'modal-lifecycle.js') 'Main shell is not loading the modal lifecycle helper.'
+    Assert-True ($mainHtml -match 'modal-save-state.js') 'Main shell is not loading the modal save-state helper.'
+    Assert-True ($mainHtml -match 'entity-table-state.js') 'Main shell is not loading the entity table state helper.'
+    Assert-True ($mainHtml -match 'sidebar-state.js') 'Main shell is not loading the sidebar state helper.'
+    Assert-True ($mainHtml -match 'navigation-history.js') 'Main shell is not loading the navigation history helper.'
+    Assert-True ($mainHtml -match 'global-search.js') 'Main shell is not loading the global search helper.'
+    Assert-True ($mainHtml -match 'quick-add.js') 'Main shell is not loading the Quick Add helper.'
+    Assert-True ($mainHtml -match 'invoice-prefill.js') 'Main shell is not loading the invoice prefill helper.'
+    Assert-True ($mainHtml -match 'tax-prep-state.js') 'Main shell is not loading the Tax Prep state helper.'
+    Assert-True ($mainHtml -match 'communication-state.js') 'Main shell is not loading the Communication state helper.'
+    Assert-True ($mainHtml -match 'job-workflow-state.js') 'Main shell is not loading the Job Workflow state helper.'
+    Assert-True ($mainHtml -match 'dashboard-state.js') 'Main shell is not loading the Dashboard state helper.'
+    Assert-True ($mainHtml -match 'id="sidebarToggle"[^>]*aria-controls="primarySidebar"[^>]*aria-expanded="true"[^>]*aria-label="Collapse menu"') 'Sidebar toggle screen-reader label is missing.'
+    Assert-True ($mainHtml -match 'id="sidebarScrim"[^>]*aria-label="Close menu"') 'Sidebar scrim screen-reader label is missing.'
+    Assert-True ($mainHtml -match 'id="modal"[^>]*role="dialog"[^>]*aria-modal="true"[^>]*aria-labelledby=' -and $mainHtml -match 'id="breakdownModal"[^>]*role="dialog"[^>]*aria-modal="true"[^>]*aria-labelledby=') 'Primary modal dialog semantics are missing.'
+    Assert-True ($builderHtml -match 'id="invoicePdfImportFile"[^>]*aria-label="Import invoice or estimate PDF"' -and $builderHtml -match 'id="importDbFile"[^>]*aria-label="Import database backup file"') 'Invoice-builder hidden file inputs are missing screen-reader labels.'
+    Assert-True ($appJs -match 'aria-label="Choose proof files to upload"' -and $appJs -match 'aria-label="Attach proof file for \$\{escapeAttr\(field\.label \|\| field\.name\)\}"') 'Document/proof upload file inputs are missing screen-reader labels.'
+    Assert-True ($appJs -match 'aria-label="Remove line item"' -and $invoiceRecordsJs -match 'aria-label="Duplicate \$\{escapeHtml\(r\.docNumber \|\|' -and $invoiceRecordsJs -match 'aria-label="Archive \$\{escapeHtml\(r\.docNumber \|\|') 'Icon-only invoice action buttons are missing screen-reader labels.'
+    Assert-True ($appJs -match 'id="pgFirst" aria-label="First page"' -and $appJs -match 'id="pgLast" aria-label="Last page"' -and $invoiceRecordsJs -match 'id="recPageFirst" aria-label="First records page"' -and $invoiceRecordsJs -match 'id="recPageLast" aria-label="Last records page"') 'Pager icon buttons are missing screen-reader labels.'
     Invoke-Json GET '/api/dashboard' | Out-Null
     Invoke-Json GET '/api/tax-audit' | Out-Null
     $taxProfile = Invoke-Json GET '/api/tax-profile'
@@ -432,6 +618,8 @@ Tracking number: 9400111899000000000000
         sourceUrls = ''
     }
     Assert-True ($marketplaceDraft.sale.platform -eq 'Etsy') 'Paid marketplace importer did not identify Etsy.'
+    Assert-True ($marketplaceDraft.sale.paymentMethod -eq 'Etsy Payments') 'Paid marketplace importer did not default Etsy Sale payment method.'
+    Assert-True ($marketplaceDraft.job.paymentMethod -eq 'Etsy Payments') 'Paid marketplace importer did not default Etsy Job payment method.'
     Assert-True ($marketplaceDraft.sale.orderNumber -eq '4999000111') 'Paid marketplace importer did not extract the order number.'
     Assert-True (([datetime]$marketplaceDraft.sale.saleDate).ToString('yyyy-MM-dd') -eq '2026-06-10') 'Paid marketplace importer did not extract the Sale Date.'
     Assert-True (@($marketplaceDraft.detectedOrderNumbers).Count -eq 1) 'Paid marketplace importer did not report the detected order number.'
@@ -498,6 +686,8 @@ Order total: $61.87
     }
     Assert-True ($marketplaceSave.sale.id -gt 0) 'Paid marketplace save did not create a Sale.'
     Assert-True ($marketplaceSave.job.id -gt 0) 'Paid marketplace save did not create the optional completed Job.'
+    Assert-True ($marketplaceSave.sale.paymentMethod -eq 'Etsy Payments') 'Paid marketplace save did not preserve Sale payment method.'
+    Assert-True ($marketplaceSave.job.paymentMethod -eq 'Etsy Payments') 'Paid marketplace save did not preserve Job payment method.'
     Assert-True ($marketplaceSave.customer.id -gt 0) 'Paid marketplace save did not create the customer business card.'
     Assert-True ($marketplaceSave.customer.address1 -eq '123 Acceptance Test Lane') 'Saved customer business card lost the shipping address.'
     Assert-True (@($marketplaceSave.auditDocuments).Count -eq 1) 'Paid marketplace save did not link uploaded proof.'
@@ -514,6 +704,7 @@ Order total: $61.87
     Invoke-Json DELETE "/api/parties/$($marketplaceSave.customer.id)" | Out-Null
     Invoke-Json DELETE "/api/audit-documents/$($marketplaceSave.auditDocuments[0].id)" | Out-Null
 
+    $productCountBeforeAiImport = @((Invoke-Json GET '/api/products?includeArchived=true')).Count
     $productImport = Invoke-RestMethod -Method Post -Uri "$base/api/ai/operations/product-import" -Form @{
         sourceName = 'acceptance-product-source.txt'
         sourceText = 'Acceptance Imported Bracket. Black PETG replacement bracket.'
@@ -522,6 +713,10 @@ Order total: $61.87
     Assert-True ($productImport.product.name -like '*Acceptance Imported Bracket*') 'Product importer did not build a Product draft from pasted source text.'
     Assert-True ($productImport.product.material -eq 'PETG') 'Product importer did not extract material.'
     Assert-True ($productImport.product.needsReview -eq $true) 'Product importer draft must require review.'
+    Assert-True (-not [string]::IsNullOrWhiteSpace($productImport.listing.title)) 'Product importer did not return listing title copy.'
+    Assert-True (-not [string]::IsNullOrWhiteSpace($productImport.listing.description)) 'Product importer did not return listing description copy.'
+    Assert-True (@($productImport.receipt.writes | Where-Object { $_ -like '*Unsaved Product*' }).Count -ge 1) 'Product importer receipt did not state that the Product draft is unsaved.'
+    Assert-True (@((Invoke-Json GET '/api/products?includeArchived=true')).Count -eq $productCountBeforeAiImport) 'Product importer saved a Product automatically.'
 
     $jobPlan = Invoke-Json POST '/api/ai/operations/job-plan' @{ sourceText = 'Build 10 black PETG brackets, get prototype approval, then package and invoice.' }
     Assert-True (@($jobPlan.tasks).Count -ge 5) 'Job planner did not return a practical multi-step plan.'
@@ -533,18 +728,27 @@ Order total: $61.87
 
     $slicerRead = Invoke-RestMethod -Method Post -Uri "$base/api/ai/operations/slicer-read" -Form @{
         sourceName = 'acceptance-slicer.txt'
-        sourceText = 'Material: PETG. Filament used 184.6g. Print time 8h 42m. 2 plates. Quantity 4.'
+        sourceText = 'Material: PETG. Filament used 184.6g. Print time 8h 42m. Plates: 2. Quantity: 4.'
         sourceUrls = ''
     }
+    Assert-True ($slicerRead.slicer.material -eq 'PETG') 'Slicer reader material'
     Assert-Close ([decimal]$slicerRead.slicer.grams) 184.6 0.01 'Slicer reader grams'
     Assert-Close ([decimal]$slicerRead.slicer.printHours) 8.7 0.01 'Slicer reader hours'
+    Assert-True ($slicerRead.slicer.plateCount -eq 2) 'Slicer reader plate count'
+    Assert-True ($slicerRead.slicer.quantity -eq 4) 'Slicer reader quantity'
 
+    $listingProductBefore = Invoke-Json GET "/api/products/$($catalogProduct.id)"
     $listing = Invoke-Json POST '/api/ai/operations/listing' @{ productId = $catalogProduct.id; platform = 'MakerWorld'; extraInstructions = 'Keep it concise.' }
     Assert-True (-not [string]::IsNullOrWhiteSpace($listing.listing.title)) 'Listing writer did not return a title.'
     Assert-True (-not [string]::IsNullOrWhiteSpace($listing.listing.description)) 'Listing writer did not return a description.'
+    $listingProductAfter = Invoke-Json GET "/api/products/$($catalogProduct.id)"
+    Assert-True ($listingProductAfter.updatedAtUtc -eq $listingProductBefore.updatedAtUtc) 'Listing writer modified the Product row.'
+    Assert-True (@($listing.receipt.writes | Where-Object { $_ -like '*preview only*' }).Count -ge 1) 'Listing writer receipt did not state preview-only output.'
 
     $ledgerAnswer = Invoke-Json POST '/api/ai/operations/ask-ledger' @{ query = 'Acceptance Catalog Widget' }
     Assert-True (@($ledgerAnswer.results).Count -ge 1) 'Ask the Ledger did not return the matching Product.'
+    Assert-True (@($ledgerAnswer.results | Where-Object { $_.route -eq 'products' -and $_.id -eq $catalogProduct.id }).Count -eq 1) 'Ask the Ledger did not return a Product route/id open action.'
+    Assert-True ($ledgerAnswer.receipt.safety -like '*never edits*') 'Ask the Ledger receipt did not state its read-only boundary.'
     Invoke-Json DELETE "/api/products/$($duplicateProduct.id)" | Out-Null
     Invoke-Json DELETE "/api/products/$($catalogProduct.id)" | Out-Null
     $aiMixedDraft = Invoke-AiEstimateUpload
@@ -553,6 +757,24 @@ Order total: $61.87
     $aiDocumentDraft = Invoke-AiEstimateDocumentUpload
     Assert-True ($aiDocumentDraft.prefill.projectDescription -like '*Acceptance DOCX Customer*') 'DOCX source text was not extracted into the AI estimate draft.'
     Assert-True ($aiDocumentDraft.prefill.projectDescription -like '*PDF custom sign request*') 'PDF source text was not extracted into the AI estimate draft.'
+    $aiInvoiceDocumentDraft = Invoke-AiInvoiceDocumentDraftUpload
+    Assert-True ($aiInvoiceDocumentDraft.prefill.docType -eq 'INVOICE') 'Invoice PDF import did not detect invoice type.'
+    Assert-True ($aiInvoiceDocumentDraft.prefill.docNumber -eq 'INV-2026-0099') 'Invoice PDF import did not recover invoice number.'
+    Assert-True ($aiInvoiceDocumentDraft.prefill.status -eq 'Paid') 'Invoice PDF import did not recover paid status.'
+    Assert-True ($aiInvoiceDocumentDraft.prefill.customerPhone -eq '(973) 555-0199') 'Invoice PDF import did not normalize customer phone.'
+    Assert-True ($aiInvoiceDocumentDraft.prefill.customerEmail -eq 'pdfcustomer@example.test') 'Invoice PDF import did not recover customer email.'
+    Assert-True ($aiInvoiceDocumentDraft.prefill.projectName -eq 'Imported Console Cover') 'Invoice PDF import did not recover project name.'
+    Assert-Close ([decimal]$aiInvoiceDocumentDraft.prefill.amountPaid) 104.50 0.01 'Invoice PDF import amount paid'
+    Assert-Close ([decimal]$aiInvoiceDocumentDraft.prefill.docTaxRate) 10 0.01 'Invoice PDF import tax rate'
+    Assert-True (@($aiInvoiceDocumentDraft.prefill.lineItems).Count -eq 1) 'Invoice PDF import did not recover one line item.'
+    Assert-Close ([decimal]$aiInvoiceDocumentDraft.prefill.lineItems[0].rate) 100 0.01 'Invoice PDF import line item rate'
+    Assert-True ($aiInvoiceDocumentDraft.executionReceipt.usedAi -eq $false) 'Invoice PDF local mapper incorrectly claimed model AI use.'
+    $aiEstimateDocumentDraft = Invoke-AiEstimateDocumentDraftUpload
+    Assert-True ($aiEstimateDocumentDraft.prefill.docType -eq 'ESTIMATE') 'Estimate PDF import did not detect estimate type.'
+    Assert-True ($aiEstimateDocumentDraft.prefill.docNumber -eq 'EST-2026-0042') 'Estimate PDF import did not recover estimate number.'
+    Assert-True ($aiEstimateDocumentDraft.prefill.projectName -eq 'Imported Estimate Bracket') 'Estimate PDF import did not recover project name.'
+    Assert-Close ([decimal]$aiEstimateDocumentDraft.prefill.amountPaid) 0 0.01 'Estimate PDF import should not mark paid.'
+    Assert-True (@($aiEstimateDocumentDraft.prefill.lineItems).Count -eq 1) 'Estimate PDF import did not recover one line item.'
     $aiBlockedUrlDraft = Invoke-Json POST '/api/ai/estimate-draft' @{
         sourceName = 'blocked URL safety test'
         sourceText = 'One custom bracket'
@@ -567,6 +789,7 @@ Order total: $61.87
     Assert-True ($aiReview.safety -like '*Read-only*') 'AI review did not identify its safety boundary.'
 
     Write-Step 'Checking admin/config endpoints'
+    Assert-True $backupCopyPreflightCompleted 'Round 64 backup preflight did not run before admin/clear checks.'
     $config = Invoke-Json GET '/api/config'
     $config.businessName = 'EPATA Acceptance Ledger'
     $config.calcMinimum = 18
@@ -578,21 +801,29 @@ Order total: $61.87
     Write-Step 'Checking generic ledger CRUD routes'
     $party = Assert-CrudRoundTrip 'parties' @{ name='Acceptance Customer'; partyType='Both'; email='customer@example.test'; phone='973-555-0101'; city='Testville'; state='NJ'; country='United States'; notes='acceptance' } 'notes' 'updated party'
     Assert-CrudRoundTrip 'products' @{ name='Acceptance Product'; sku='ACC-001'; category='3D Printed Product'; material='PLA'; color='Black'; grams=-10; materialCostPerGram=-0.1; printHours=2; machineRatePerHour=3; packagingCost=-1; designMinutes=20; targetPrice=-5; notes='acceptance' } 'notes' 'updated product' | Out-Null
-    Assert-CrudRoundTrip 'customer-jobs' @{ jobDate='2026-05-30'; customerName='Acceptance Customer'; platform='Direct'; jobNumber='JOB-ACC-001'; relatedInvoiceNumber='INV-ACC-001'; jobName='Acceptance Job'; jobType='Print'; status='Open'; productName='Acceptance Product'; material='PLA'; color='Black'; quoteAmount=-25; invoiceAmount=-40; amountPaid=-10; notes='acceptance' } 'status' 'Completed' | Out-Null
+    $job = Assert-CrudRoundTrip 'customer-jobs' @{ jobDate='2026-05-30'; customerName='Acceptance Customer'; platform='Direct'; jobNumber='JOB-ACC-001'; relatedInvoiceNumber='INV-ACC-001'; jobName='Acceptance Job'; jobType='Print'; status='Open'; productName='Acceptance Product'; material='PLA'; color='Black'; quoteAmount=-25; invoiceAmount=-40; amountPaid=-10; paymentMethod='Zelle'; notes='acceptance' } 'status' 'Completed'
+    Assert-True ($job.paymentMethod -eq 'Zelle') 'Customer Job CRUD payment method was not preserved.'
     $sale = Assert-CrudRoundTrip 'sales' @{ saleDate='2026-05-30'; platform='Direct'; paymentMethod='Credit Card'; salesTaxHandling='Seller Collected'; orderNumber='ORD-ACC-001'; invoiceNumber=''; customerName='Acceptance Customer'; productName='Acceptance Product'; quantity=-1; itemSales=80; shippingCharged=5; salesTaxCollected=6.8; customerPaid=999; platformFees=-3; shippingLabelCost=-2; refunds=-4; estimatedCogs=-5; status='Paid'; includeInDashboard=$true; notes='acceptance' } 'notes' 'updated sale'
     Assert-Close ([decimal]$sale.customerPaid) 91.8 0.01 'Sale CRUD customer paid should be normalized.'
-    Assert-CrudRoundTrip 'receivable-invoices' @{ invoiceNumber='AR-ACC-001'; invoiceDate='2026-05-30'; dueDate='2026-06-15'; customerName='Acceptance Customer'; projectName='AR Project'; status='Partial'; subtotal=100; discount=-12; rushFee=-4; taxRatePercent=10; salesTax=-7; invoiceTotal=1; amountPaid=-2; includeInCashReports=$true; notes='acceptance' } 'status' 'Paid' | Out-Null
-    $bill = Assert-CrudRoundTrip 'bills' @{ vendorName='Acceptance Vendor'; billNumber='BILL-ACC-001'; billDate='2026-05-30'; dueDate='2026-06-30'; category='Supplies'; description='Acceptance bill'; amount=100; salesTax=7; total=1; amountPaid=-8; status='Partial'; paymentAccount='Checking'; taxDeductible=$true; notes='acceptance' } 'status' 'Paid'
+    $ar = Assert-CrudRoundTrip 'receivable-invoices' @{ invoiceNumber='AR-ACC-001'; invoiceDate='2026-05-30'; dueDate='2026-06-15'; customerName='Acceptance Customer'; projectName='AR Project'; status='Partial'; subtotal=100; discount=-12; rushFee=-4; taxRatePercent=10; salesTax=-7; invoiceTotal=1; amountPaid=-2; paymentMethod='PayPal'; includeInCashReports=$true; notes='acceptance' } 'status' 'Paid'
+    Assert-True ($ar.paymentMethod -eq 'PayPal') 'Receivable CRUD payment method was not preserved.'
+    $bill = Assert-CrudRoundTrip 'bills' @{ vendorName='Acceptance Vendor'; billNumber='BILL-ACC-001'; billDate='2026-05-30'; dueDate='2026-06-30'; category='Supplies'; description='Acceptance bill'; amount=100; salesTax=7; total=1; amountPaid=-8; status='Partial'; paymentMethod='ACH / Bank Transfer'; paymentAccount='Checking'; taxDeductible=$true; notes='acceptance' } 'status' 'Paid'
+    Assert-True ($bill.paymentMethod -eq 'ACH / Bank Transfer') 'Bill CRUD payment method was not preserved.'
     Assert-Close ([decimal]$bill.total) 107 0.01 'Bill total should normalize amount plus tax.'
-    $expense = Assert-CrudRoundTrip 'expenses' @{ expenseDate='2026-05-30'; vendorName='Acceptance Vendor'; category='Supplies'; taxCategory='COGS / materials'; description='Acceptance expense'; paymentAccount='Checking'; amount=20; salesTax=2; total=1; receiptProof='proof'; taxBucket='COGS/Materials'; deductibleStatus='Yes'; businessUsePercent=150; countedExpense=$true; taxDeductible=$true; notes='acceptance' } 'notes' 'updated expense'
+    $expense = Assert-CrudRoundTrip 'expenses' @{ expenseDate='2026-05-30'; vendorName='Acceptance Vendor'; category='Supplies'; taxCategory='COGS / materials'; description='Acceptance expense'; paymentMethod='Debit Card'; paymentAccount='Checking'; amount=20; salesTax=2; total=1; receiptProof='proof'; taxBucket='COGS/Materials'; deductibleStatus='Yes'; businessUsePercent=150; countedExpense=$true; taxDeductible=$true; notes='acceptance' } 'notes' 'updated expense'
+    Assert-True ($expense.paymentMethod -eq 'Debit Card') 'Expense CRUD payment method was not preserved.'
     Assert-Close ([decimal]$expense.total) 22 0.01 'Expense total should normalize amount plus tax.'
     Assert-Close ([decimal]$expense.businessUsePercent) 100 0.01 'Expense business use should clamp at 100.'
-    Assert-CrudRoundTrip 'assets' @{ name='Acceptance Printer'; purchaseDate='2026-05-30'; vendorName='Bambu'; category='Equipment'; cost=-200; serialNumber='ACC123'; businessUsePercent=150; inServiceDate='2026-05-30'; taxTreatment='Section 179'; countedExpenseThisYear=$true; notes='acceptance' } 'notes' 'updated asset' | Out-Null
+    $asset = Assert-CrudRoundTrip 'assets' @{ name='Acceptance Printer'; purchaseDate='2026-05-30'; vendorName='Bambu'; category='Equipment'; cost=-200; paymentMethod='Credit Card'; serialNumber='ACC123'; businessUsePercent=150; inServiceDate='2026-05-30'; taxTreatment='Section 179'; countedExpenseThisYear=$true; notes='acceptance' } 'notes' 'updated asset'
+    Assert-True ($asset.paymentMethod -eq 'Credit Card') 'Asset CRUD payment method was not preserved.'
+    Assert-Close ([decimal]$asset.cost) 0 0.01 'Asset cost should clamp at zero.'
+    Assert-Close ([decimal]$asset.businessUsePercent) 100 0.01 'Asset business use should clamp at 100.'
     Assert-CrudRoundTrip 'makerworld-rewards' @{ rewardDate='2026-05-30'; rewardType='Gift Card'; pointsChange=-100; giftCardAmount=-50; codeLast4='1234'; status='Available'; incomeStatus='Yes - Count as income'; notes='acceptance' } 'notes' 'updated makerworld' | Out-Null
     Assert-CrudRoundTrip 'audit-documents' @{ documentDate='2026-05-30'; documentType='Receipt'; relatedRecordType='Expense'; relatedRecordNumber='EXP-ACC'; fileName='acceptance.pdf'; filePathOrUrl='C:\acceptance.pdf'; notes='acceptance' } 'notes' 'updated audit doc' | Out-Null
     Assert-CrudRoundTrip 'business-accounts' @{ name='Acceptance Checking'; accountType='Checking'; institution='Acceptance Bank'; last4='1111'; openingBalance=-10; currentBalance=-5; isActive=$true; notes='acceptance' } 'notes' 'updated account' | Out-Null
     Assert-CrudRoundTrip 'action-items' @{ title='Acceptance action'; area='Tax'; priority='High'; dueDate='2026-06-01'; status='Open'; relatedRecord='ACC'; notes='acceptance' } 'status' 'Done' | Out-Null
-    Assert-CrudRoundTrip 'tax-obligations' @{ taxYear=2026; title='Acceptance tax obligation'; jurisdiction='Federal'; obligationType='Estimated Income Tax'; formName='1040-ES'; period='Q2'; dueDate='2026-06-15'; status='Review Applicability'; estimatedAmount=-20; amountPaid=-10; appliesIf='Acceptance'; needsReview=$true; notes='acceptance' } 'status' 'Filed / Paid' | Out-Null
+    $taxObligation = Assert-CrudRoundTrip 'tax-obligations' @{ taxYear=2026; title='Acceptance tax obligation'; jurisdiction='Federal'; obligationType='Estimated Income Tax'; formName='1040-ES'; period='Q2'; dueDate='2026-06-15'; status='Review Applicability'; estimatedAmount=-20; amountPaid=-10; paymentMethod='Check'; appliesIf='Acceptance'; needsReview=$true; notes='acceptance' } 'status' 'Filed / Paid'
+    Assert-True ($taxObligation.paymentMethod -eq 'Check') 'Tax Obligation CRUD payment method was not preserved.'
     Assert-CrudRoundTrip 'mileage-logs' @{ tripDate='2026-05-30'; vehicle='Acceptance Vehicle'; startLocation='Home'; endLocation='Post Office'; businessPurpose='Ship customer order'; businessMiles=-12; parkingAndTolls=-2; proofReference='calendar'; notes='acceptance' } 'notes' 'updated mileage' | Out-Null
     Assert-CrudRoundTrip 'settings' @{ key='AcceptanceSetting'; value='One'; notes='acceptance' } 'value' 'Two' | Out-Null
 
@@ -659,27 +890,205 @@ Order total: $61.87
     $queueCompleted.needsReview = $true
     $queueAttention = Invoke-Json PUT "/api/printer-queue-items/$($queueItem.id)" $queueCompleted
     Assert-True ($queueAttention.status -eq 'Needs Attention') 'Printer queue attention status did not persist.'
+    $queueOverdue = Invoke-Json POST '/api/printer-queue-items' @{
+        queueDate='2026-06-10'
+        priority='High'
+        status='Queued'
+        printerName='Acceptance P1S'
+        customerName='Acceptance Customer'
+        jobName='Acceptance Overdue Queue Job'
+        productName='Acceptance Overdue Part'
+        material='PLA'
+        color='Black'
+        quantity=1
+        plateCount=1
+        scheduledStart='2000-01-02T09:00:00'
+        estimatedFinish='2000-01-02T12:00:00'
+        failureCount=0
+        needsReview=$false
+    }
+    $queueFailed = Invoke-Json POST '/api/printer-queue-items' @{
+        queueDate='2026-06-10'
+        priority='Normal'
+        status='Ready'
+        printerName='Acceptance A1'
+        customerName='Acceptance Customer'
+        jobName='Acceptance Failed Queue Job'
+        productName='Acceptance Failed Part'
+        material='PETG'
+        color='Blue'
+        quantity=1
+        plateCount=1
+        scheduledStart='2099-01-02T09:00:00'
+        estimatedFinish='2099-01-02T12:00:00'
+        failureCount=2
+        needsReview=$false
+    }
+    $queueCompletedFailed = Invoke-Json POST '/api/printer-queue-items' @{
+        queueDate='2026-06-10'
+        priority='Normal'
+        status='Completed'
+        printerName='Acceptance A1'
+        customerName='Acceptance Customer'
+        jobName='Acceptance Completed Failed Queue Job'
+        productName='Acceptance Completed Failed Part'
+        material='PETG'
+        color='Gray'
+        quantity=1
+        plateCount=1
+        scheduledStart='2000-01-02T09:00:00'
+        estimatedFinish='2000-01-02T12:00:00'
+        failureCount=3
+        needsReview=$true
+    }
+    Assert-True ($queueOverdue.id -gt 0 -and $queueFailed.id -gt 0 -and $queueCompletedFailed.id -gt 0) 'Printer queue AI review fixtures did not save.'
     $operationsReview = Invoke-Json GET '/api/ai/review'
     Assert-True (@($operationsReview.items | Where-Object { $_.title -eq 'Customer communication follow-ups are due' }).Count -eq 1) 'AI review did not flag due customer communication follow-ups.'
-    Assert-True (@($operationsReview.items | Where-Object { $_.title -eq 'Printer queue items need attention' }).Count -eq 1) 'AI review did not flag printer queue items needing attention.'
+    $queueReview = @($operationsReview.items | Where-Object { $_.title -eq 'Printer queue items need attention' })
+    Assert-True ($queueReview.Count -eq 1) 'AI review did not flag printer queue items needing attention.'
+    $queueReviewEvidence = ($queueReview | ForEach-Object { $_.evidence }) -join ' | '
+    Assert-True ($queueReviewEvidence -like '*Acceptance Overdue Queue Job*' -and $queueReviewEvidence -like '*overdue*') 'AI review did not flag overdue printer queue items.'
+    Assert-True ($queueReviewEvidence -like '*Acceptance Failed Queue Job*' -and $queueReviewEvidence -like '*2 failed attempts*') 'AI review did not flag failed printer queue items.'
+    Assert-True ($queueReviewEvidence -notlike '*Acceptance Completed Failed Queue Job*') 'AI review incorrectly flagged a completed printer queue item.'
     $operationsTimeline = Invoke-Json GET '/api/job-timeline?q=Acceptance%20Queue'
     Assert-True (@($operationsTimeline.timelines.events | Where-Object { $_.kind -eq 'Communication' }).Count -ge 1) 'Job Timeline did not include customer communication events.'
     Assert-True (@($operationsTimeline.timelines.events | Where-Object { $_.kind -eq 'Printer Queue' }).Count -ge 1) 'Job Timeline did not include printer queue events.'
 
     Write-Step 'Checking proof/document intake upload'
+    $classificationUpload = Upload-ProofTextFiles @(
+        [pscustomobject]@{ FileName = 'acceptance-proof-sale.txt'; Text = 'Etsy order receipt. Order #ACC-SALE-001. Buyer paid. Customer paid. Order total $42.50. Tracking 9400111899000000000101.' },
+        [pscustomobject]@{ FileName = 'acceptance-proof-expense.txt'; Text = 'Receipt for paid purchase from Office Depot. Subtotal $18.25 total $18.25 charged to business card.' },
+        [pscustomobject]@{ FileName = 'acceptance-proof-asset.txt'; Text = 'Bambu P1S printer equipment purchase receipt. Serial BP1S-ACC. Total $699.00. Durable business property.' },
+        [pscustomobject]@{ FileName = 'acceptance-proof-invoice.txt'; Text = 'Customer invoice INV-2026-ACC-PROOF. Amount due $120.00. Payment due on receipt for custom display stand.' },
+        [pscustomobject]@{ FileName = 'acceptance-proof-estimate.txt'; Text = 'Estimate EST-2026-ACC-PROOF quote proposal valid until 2026-07-01. Total $250.00 for custom bracket.' },
+        [pscustomobject]@{ FileName = 'acceptance-proof-bill.txt'; Text = 'Vendor bill from Filament Supplier. Payment terms net 30. Unpaid supplier statement. Amount due $88.00.' },
+        [pscustomobject]@{ FileName = 'acceptance-proof-shipping.txt'; Text = 'USPS shipping label postage. Tracking 9400111899000000000102. Ship by tomorrow. Total $8.40.' },
+        [pscustomobject]@{ FileName = 'acceptance-proof-review.txt'; Text = 'Studio note: remember to review the loose document and decide where it belongs later.' }
+    )
+    Assert-True ($classificationUpload.count -eq 8) 'Document intake classification upload did not create all Audit Docs.'
+    foreach ($doc in @($classificationUpload.documents)) {
+        $null = Assert-UploadedDocUnderRoot $doc "Classified proof upload $($doc.fileName)"
+    }
+    $suggestionsByFile = @{}
+    foreach ($suggestion in @($classificationUpload.suggestions)) {
+        $suggestionsByFile[$suggestion.fileName] = $suggestion
+    }
+    Assert-True ($suggestionsByFile['acceptance-proof-sale.txt'].lane -eq 'Sale' -and $suggestionsByFile['acceptance-proof-sale.txt'].suggestedRoute -eq 'sales' -and $suggestionsByFile['acceptance-proof-sale.txt'].suggestedKind -eq 'etsy') 'Document intake did not classify sale proof correctly.'
+    Assert-True ($suggestionsByFile['acceptance-proof-expense.txt'].lane -like 'Expense*' -and $suggestionsByFile['acceptance-proof-expense.txt'].suggestedConfig -eq 'expenses') 'Document intake did not classify expense proof correctly.'
+    Assert-True ($suggestionsByFile['acceptance-proof-asset.txt'].lane -eq 'Asset' -and $suggestionsByFile['acceptance-proof-asset.txt'].suggestedConfig -eq 'assets') 'Document intake did not classify asset proof correctly.'
+    Assert-True ($suggestionsByFile['acceptance-proof-invoice.txt'].lane -eq 'Invoice' -and $suggestionsByFile['acceptance-proof-invoice.txt'].suggestedRoute -eq 'invoices') 'Document intake did not classify invoice proof correctly.'
+    Assert-True ($suggestionsByFile['acceptance-proof-estimate.txt'].lane -eq 'Estimate' -and $suggestionsByFile['acceptance-proof-estimate.txt'].suggestedRoute -eq 'estimates') 'Document intake did not classify estimate proof correctly.'
+    Assert-True ($suggestionsByFile['acceptance-proof-bill.txt'].lane -eq 'Bill / AP' -and $suggestionsByFile['acceptance-proof-bill.txt'].suggestedConfig -eq 'bills') 'Document intake did not classify bill proof correctly.'
+    Assert-True ($suggestionsByFile['acceptance-proof-shipping.txt'].lane -eq 'Shipping / Sale Cost' -and $suggestionsByFile['acceptance-proof-shipping.txt'].suggestedConfig -eq 'sales') 'Document intake did not classify shipping proof correctly.'
+    Assert-True ($suggestionsByFile['acceptance-proof-review.txt'].lane -eq 'Review' -and $suggestionsByFile['acceptance-proof-review.txt'].suggestedRoute -eq 'documentIntake') 'Document intake did not classify ambiguous proof as Review.'
+
+    $uploadEdgeDocsBefore = @(Invoke-Json GET '/api/audit-documents?includeArchived=true').Count
+    $uploadEdgeClient = [System.Net.Http.HttpClient]::new()
+
+    $missingUploadForm = [System.Net.Http.MultipartFormDataContent]::new()
+    $missingUploadForm.Add([System.Net.Http.StringContent]::new('Acceptance missing file edge'), 'relatedType')
+    $missingUploadResponse = $uploadEdgeClient.PostAsync("$base/api/documents/upload", $missingUploadForm).GetAwaiter().GetResult()
+    $missingUploadText = $missingUploadResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+    Assert-True ([int]$missingUploadResponse.StatusCode -eq 400) "Missing proof upload expected 400, got $([int]$missingUploadResponse.StatusCode)."
+    Assert-True ($missingUploadText -like '*Choose at least one file*') 'Missing proof upload did not explain that a file is required.'
+    $missingUploadForm.Dispose()
+
+    $zeroUploadForm = [System.Net.Http.MultipartFormDataContent]::new()
+    $zeroUploadContent = [System.Net.Http.ByteArrayContent]::new([byte[]]::new(0))
+    $zeroUploadContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('text/plain')
+    $zeroUploadForm.Add($zeroUploadContent, 'files', 'acceptance-upload-empty.txt')
+    $zeroUploadResponse = $uploadEdgeClient.PostAsync("$base/api/documents/upload", $zeroUploadForm).GetAwaiter().GetResult()
+    $zeroUploadText = $zeroUploadResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+    Assert-True ([int]$zeroUploadResponse.StatusCode -eq 400) "Zero-byte proof upload expected 400, got $([int]$zeroUploadResponse.StatusCode)."
+    Assert-True ($zeroUploadText -like '*acceptance-upload-empty.txt*empty*') 'Zero-byte proof upload did not explain the empty file.'
+    $zeroUploadForm.Dispose()
+    $zeroUploadContent.Dispose()
+
+    $unsupportedUploadForm = [System.Net.Http.MultipartFormDataContent]::new()
+    $unsupportedUploadContent = [System.Net.Http.ByteArrayContent]::new([System.Text.Encoding]::UTF8.GetBytes('Acceptance unsupported proof upload'))
+    $unsupportedUploadContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('application/octet-stream')
+    $unsupportedUploadForm.Add($unsupportedUploadContent, 'files', 'acceptance-upload-unsupported.exe')
+    $unsupportedUploadResponse = $uploadEdgeClient.PostAsync("$base/api/documents/upload", $unsupportedUploadForm).GetAwaiter().GetResult()
+    $unsupportedUploadText = $unsupportedUploadResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+    Assert-True ([int]$unsupportedUploadResponse.StatusCode -eq 400) "Unsupported proof upload expected 400, got $([int]$unsupportedUploadResponse.StatusCode)."
+    Assert-True ($unsupportedUploadText -like '*acceptance-upload-unsupported.exe*not a supported proof upload type*') 'Unsupported proof upload did not explain supported file types.'
+    $unsupportedUploadForm.Dispose()
+    $unsupportedUploadContent.Dispose()
+
+    $oversizedUploadForm = [System.Net.Http.MultipartFormDataContent]::new()
+    $oversizedUploadBytes = [byte[]]::new((20 * 1024 * 1024) + 1)
+    $oversizedUploadContent = [System.Net.Http.ByteArrayContent]::new($oversizedUploadBytes)
+    $oversizedUploadContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('application/pdf')
+    $oversizedUploadForm.Add($oversizedUploadContent, 'files', 'acceptance-upload-oversized.pdf')
+    $oversizedUploadResponse = $uploadEdgeClient.PostAsync("$base/api/documents/upload", $oversizedUploadForm).GetAwaiter().GetResult()
+    $oversizedUploadText = $oversizedUploadResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+    Assert-True ([int]$oversizedUploadResponse.StatusCode -eq 400) "Oversized proof upload expected 400, got $([int]$oversizedUploadResponse.StatusCode)."
+    Assert-True ($oversizedUploadText -like '*acceptance-upload-oversized.pdf*20 MB per-file proof upload limit*') 'Oversized proof upload did not explain the proof upload limit.'
+    $oversizedUploadForm.Dispose()
+    $oversizedUploadContent.Dispose()
+    $uploadEdgeClient.Dispose()
+
+    $uploadEdgeDocsAfter = @(Invoke-Json GET '/api/audit-documents?includeArchived=true').Count
+    Assert-True ($uploadEdgeDocsAfter -eq $uploadEdgeDocsBefore) 'Rejected proof uploads created Audit Document rows.'
+    $uploadEdgeFiles = @(Get-ChildItem -LiteralPath (Join-Path $root 'UploadedDocs') -Filter 'acceptance-upload-*' -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'acceptance-upload-proof.txt' })
+    Assert-True ($uploadEdgeFiles.Count -eq 0) "Rejected proof uploads wrote files: $($uploadEdgeFiles.Name -join ', ')"
+
     $upload = Upload-ProofFile
     Assert-True ($upload.count -eq 1) 'Document upload did not create one audit document.'
     Assert-True ($upload.documents[0].id -gt 0) 'Document upload did not return an audit document id.'
     Assert-True ($upload.documents[0].fileName -eq 'acceptance-upload-proof.txt') 'Document upload returned the wrong filename.'
+    $null = Assert-UploadedDocUnderRoot $upload.documents[0] 'Normal proof upload'
     Assert-True ($upload.suggestions[0].engine -eq 'Local rules') 'Document suggestion did not identify its local-rules engine.'
     Assert-True ($upload.suggestions[0].usedAi -eq $false) 'Document suggestion incorrectly claimed model AI use.'
     Assert-True ($upload.suggestions[0].doesNot -like '*Does not create or save*') 'Document suggestion did not disclose its write boundary.'
+    $uploadAuditEditPayload = @{}
+    foreach ($property in $upload.documents[0].PSObject.Properties) {
+        $uploadAuditEditPayload[$property.Name] = $property.Value
+    }
+    $uploadAuditEditPayload['documentType'] = 'Invoice'
+    $uploadAuditEditPayload['relatedRecordType'] = 'Invoice'
+    $uploadAuditEditPayload['relatedRecordNumber'] = 'INV-ACCEPT-UPLOAD'
+    $uploadAuditEditPayload['needsReview'] = $false
+    $uploadAuditEditPayload['notes'] = 'Acceptance edited from the Document Intake Edit Audit Doc flow.'
+    $uploadAuditEdit = Invoke-Json PUT "/api/audit-documents/$($upload.documents[0].id)" $uploadAuditEditPayload
+    Assert-True ($uploadAuditEdit.documentType -eq 'Invoice') 'Edit Audit Doc did not persist document type.'
+    Assert-True ($uploadAuditEdit.relatedRecordType -eq 'Invoice' -and $uploadAuditEdit.relatedRecordNumber -eq 'INV-ACCEPT-UPLOAD') 'Edit Audit Doc did not persist related record fields.'
+    Assert-True ($uploadAuditEdit.needsReview -eq $false) 'Edit Audit Doc did not clear Needs Review.'
+    $uploadAuditReloaded = Invoke-Json GET "/api/audit-documents/$($upload.documents[0].id)"
+    Assert-True ($uploadAuditReloaded.notes -eq 'Acceptance edited from the Document Intake Edit Audit Doc flow.') 'Edited Audit Doc did not reload saved notes.'
+
+    $specialUploadName = "acceptance Bob's order (final proof).txt"
+    $specialUploadClient = [System.Net.Http.HttpClient]::new()
+    $specialUploadForm = [System.Net.Http.MultipartFormDataContent]::new()
+    $specialUploadContent = [System.Net.Http.ByteArrayContent]::new([System.Text.Encoding]::UTF8.GetBytes('Acceptance special proof filename content'))
+    $specialUploadContent.Headers.ContentType = [System.Net.Http.Headers.MediaTypeHeaderValue]::Parse('text/plain')
+    $specialUploadForm.Add($specialUploadContent, 'files', $specialUploadName)
+    $specialUploadResponse = $specialUploadClient.PostAsync("$base/api/documents/upload", $specialUploadForm).GetAwaiter().GetResult()
+    $specialUploadText = $specialUploadResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+    Assert-True ($specialUploadResponse.IsSuccessStatusCode) "Special proof filename upload failed with $([int]$specialUploadResponse.StatusCode): $specialUploadText"
+    $specialUpload = $specialUploadText | ConvertFrom-Json
+    Assert-True ($specialUpload.count -eq 1) 'Special proof filename upload did not create one audit document.'
+    Assert-True ($specialUpload.documents[0].fileName -eq $specialUploadName) 'Special proof filename was not preserved on the Audit Document.'
+    $specialUploadPath = Assert-UploadedDocUnderRoot $specialUpload.documents[0] 'Special proof upload'
+    Assert-True ((Split-Path -Leaf $specialUploadPath) -like "*$specialUploadName") 'Special proof stored filename did not retain spaces, parentheses, and apostrophe.'
+    $specialUploadFile = Invoke-Raw GET "/api/audit-documents/$($specialUpload.documents[0].id)/file"
+    Assert-True ($specialUploadFile.StatusCode -eq 200) 'Special proof filename could not be read back through the Audit Doc file endpoint.'
+    Assert-True ($specialUploadFile.Content -like '*Acceptance special proof filename content*') 'Special proof filename content did not round-trip.'
+    $specialUploadClient.Dispose()
+    $specialUploadForm.Dispose()
+    $specialUploadContent.Dispose()
 
     Write-Step 'Checking estimate and invoice builder workflows'
     $nextEstimate = Invoke-Json GET '/api/documents/next-number?type=ESTIMATE'
     Assert-True ($nextEstimate.number -like 'EST-*') 'Next estimate number should be EST-*.' 
     $estimate = Invoke-Json POST '/api/documents' (New-DocPayload 'ESTIMATE' 'Sent' $nextEstimate.number 500 'Acceptance Estimate Customer')
     Assert-EstimateMoney $estimate 'Estimate create'
+    $mutatedEstimatePayload = New-DocPayload 'INVOICE' 'Paid' $estimate.docNumber.Replace('EST-', 'INV-') 110 'Acceptance Estimate Customer'
+    $mutatedEstimateSave = Invoke-WebRequest -Method PUT -Uri "$base/api/documents/$($estimate.id)" -ContentType 'application/json' -Body ($mutatedEstimatePayload | ConvertTo-Json -Depth 20) -UseBasicParsing -SkipHttpErrorCheck
+    Assert-True ($mutatedEstimateSave.StatusCode -eq 400) 'Changing a saved estimate into an invoice by PUT should return 400, not 500.'
+    $estimateAfterFailedTypeChange = Invoke-Json GET "/api/documents/$($estimate.id)"
+    Assert-True ($estimateAfterFailedTypeChange.docType -eq 'ESTIMATE') 'Failed type-change save changed the original estimate type.'
+    Assert-True ($estimateAfterFailedTypeChange.docNumber -eq $estimate.docNumber) 'Failed type-change save changed the original estimate number.'
 
     $duplicate = Invoke-Json POST "/api/documents/$($estimate.id)/duplicate"
     Assert-True ($duplicate.id -ne $estimate.id) 'Document duplicate reused source id.'
@@ -709,6 +1118,7 @@ Order total: $61.87
     Assert-True ($null -ne $paidAr) 'Paid invoice did not sync to AR.'
     Assert-Close ([decimal]$paidAr.invoiceTotal) 110 0.01 'Paid invoice AR total'
     Assert-Close ([decimal]$paidAr.amountPaid) 110 0.01 'Paid invoice AR paid'
+    Assert-True ($paidAr.paymentMethod -eq 'Zelle') 'Paid invoice payment method did not sync to AR.'
 
     $partialPayload = New-DocPayload 'INVOICE' 'Partial' 'INV-ACC-PARTIAL' 55 'Acceptance Partial Customer'
     $partialInvoice = Invoke-Json POST '/api/documents' $partialPayload
@@ -737,10 +1147,12 @@ Order total: $61.87
     Assert-True ($stats.totalInvoiced -ge 110) 'Document stats did not include active invoice totals.'
 
     Write-Step 'Checking legacy import failure path is clean'
+    Assert-True $backupCopyPreflightCompleted 'Round 64 backup preflight did not run before import checks.'
     $legacy = Invoke-Json POST '/api/invoice-documents/import-from-legacy'
     Assert-True ($legacy.success -eq $false) 'Legacy import without old app should fail gracefully, not claim success.'
 
     Write-Step 'Checking exports and backups'
+    Assert-True $backupCopyPreflightCompleted 'Round 64 backup preflight did not run before export/backup checks.'
     foreach ($entity in @('parties', 'sales', 'customer-jobs', 'customer-communications', 'printer-queue-items', 'receivable-invoices', 'bills', 'expenses', 'products', 'assets', 'makerworld-rewards', 'audit-documents', 'business-accounts', 'action-items', 'tax-obligations', 'mileage-logs')) {
         $csv = Invoke-Raw GET "/api/export/$entity"
         Assert-True ($csv.StatusCode -eq 200) "CSV export failed for $entity."
@@ -768,6 +1180,7 @@ Order total: $61.87
     $systemBackup = Invoke-Raw POST '/api/system/backup'
     Assert-True ($systemBackup.StatusCode -eq 200) 'System backup endpoint failed.'
     Assert-True ($systemBackup.Content.Length -gt 100) 'System backup response looked empty.'
+    Assert-True $backupCopyPreflightCompleted 'Round 64 backup preflight did not run before export/backup checks.'
 
     Write-Step 'Checking dashboard and tax calculation outputs'
     $dashboard = Invoke-Json GET '/api/dashboard'
@@ -815,10 +1228,19 @@ Order total: $61.87
         Remove-Job -Job $serverJob -Force -ErrorAction SilentlyContinue | Out-Null
     }
 
-    foreach ($path in @($uploadProbe, $aiDocxProbe, $aiPdfProbe)) {
+    foreach ($path in @($dbPath, "$dbPath-shm", "$dbPath-wal", $backupDownloadPath, "$backupDownloadPath-shm", "$backupDownloadPath-wal", $manualCopyPath, "$manualCopyPath-shm", "$manualCopyPath-wal", $uploadProbe, $aiDocxProbe, $aiPdfProbe, $aiInvoicePdfProbe, $aiEstimatePdfProbe)) {
         if (Test-Path -LiteralPath $path) {
             Remove-Item -LiteralPath $path -Force
         }
     }
-    Get-ChildItem -LiteralPath (Join-Path $root 'UploadedDocs') -Filter '*acceptance-upload-proof.txt' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    Get-ChildItem -LiteralPath (Join-Path $root 'UploadedDocs') -Filter '*acceptance*proof*.txt' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $backupDir) {
+        $before = @{}
+        foreach ($path in $backupFilesBefore) {
+            $before[$path] = $true
+        }
+        Get-ChildItem -LiteralPath $backupDir -Filter 'epata-business-ledger-*.db' -File -ErrorAction SilentlyContinue |
+            Where-Object { -not $before.ContainsKey($_.FullName) } |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
 }

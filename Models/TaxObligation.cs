@@ -30,6 +30,9 @@ public class TaxObligation : AuditableEntity
     public decimal? AmountPaid { get; set; }
     public DateTime? PaidOrFiledDate { get; set; }
 
+    [MaxLength(80)]
+    public string PaymentMethod { get; set; } = "Unknown / Review";
+
     [MaxLength(160)]
     public string? ConfirmationNumber { get; set; }
 

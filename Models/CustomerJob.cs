@@ -43,6 +43,10 @@ public class CustomerJob : AuditableEntity
     public decimal? QuoteAmount { get; set; }
     public decimal? InvoiceAmount { get; set; }
     public decimal? AmountPaid { get; set; }
+
+    [MaxLength(80)]
+    public string PaymentMethod { get; set; } = "Unknown / Review";
+
     public DateTime? DueDate { get; set; }
     public DateTime? ShipByDate { get; set; }
 
