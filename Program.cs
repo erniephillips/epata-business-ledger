@@ -9,11 +9,27 @@ using EPATA.BusinessLedger.Models;
 using EPATA.BusinessLedger.Services;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.FileProviders;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
 builder.Logging.AddDebug();
+
+var webRootPath = new[]
+    {
+        Path.Combine(builder.Environment.ContentRootPath, "wwwroot"),
+        Path.Combine(Directory.GetCurrentDirectory(), "wwwroot"),
+        Path.Combine(AppContext.BaseDirectory, "wwwroot")
+    }
+    .Distinct(StringComparer.OrdinalIgnoreCase)
+    .FirstOrDefault(Directory.Exists)
+    ?? throw new DirectoryNotFoundException(
+        "The application cannot find its wwwroot folder. Keep the published wwwroot folder beside EPATA.BusinessLedger.exe.");
+
+builder.Environment.WebRootPath = webRootPath;
+var webRootFileProvider = new PhysicalFileProvider(webRootPath);
+builder.Environment.WebRootFileProvider = webRootFileProvider;
 
 var appUrl = builder.Configuration["App:Url"] ?? "http://127.0.0.1:5062";
 builder.WebHost.UseUrls(appUrl);
@@ -62,9 +78,13 @@ using (var scope = app.Services.CreateScope())
     // can silently change type/status/amounts and make the records view untrustworthy.
 }
 
-app.UseDefaultFiles();
+app.UseDefaultFiles(new DefaultFilesOptions
+{
+    FileProvider = webRootFileProvider
+});
 app.UseStaticFiles(new StaticFileOptions
 {
+    FileProvider = webRootFileProvider,
     OnPrepareResponse = context =>
     {
         var path = context.File.PhysicalPath ?? string.Empty;
@@ -1167,7 +1187,10 @@ app.MapGet("/api/app-info", (IWebHostEnvironment env, IConfiguration config) =>
 
 app.MapGet("/invoice-builder/", () => Results.Redirect("/invoice-builder/index.html"));
 
-app.MapFallbackToFile("index.html");
+app.MapFallbackToFile("index.html", new StaticFileOptions
+{
+    FileProvider = webRootFileProvider
+});
 
 var openBrowser = bool.TryParse(app.Configuration["App:OpenBrowserOnStart"], out var shouldOpen) && shouldOpen;
 if (openBrowser)
