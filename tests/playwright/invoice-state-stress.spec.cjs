@@ -382,6 +382,80 @@ test.describe('invoice and estimate state stress', () => {
     expect(failures).toEqual([]);
   });
 
+  test('reopening a paid invoice to sent restores the live balance due', async ({ page }) => {
+    const failures = collectBrowserFailures(page);
+    await openInvoiceBuilder(page);
+
+    await fillDocument(page, {
+      ...invoiceProfile,
+      status: 'Sent',
+      customerName: 'Paid Toggle Invoice Customer',
+      projectName: 'Paid Toggle Invoice Project',
+      amountPaid: '0',
+      paymentMethod: 'Credit Card',
+    });
+
+    await expect(page.locator('#amountPaid')).toHaveValue('0');
+    await expect(page.locator('#bPaid')).toHaveText('$0.00');
+    await expect(page.locator('#bBalance')).toHaveText('$100.00');
+
+    await setField(page, '#docStatus', 'Paid');
+    await expect(page.locator('#amountPaid')).toHaveValue('100.00');
+    await expect(page.locator('#bPaid')).toHaveText('$100.00');
+    await expect(page.locator('#bBalance')).toHaveText('$0.00');
+
+    await setField(page, '#docStatus', 'Sent');
+    await expect(page.locator('#amountPaid')).toHaveValue('0');
+    await expect(page.locator('#bPaid')).toHaveText('$0.00');
+    await expect(page.locator('#bBalance')).toHaveText('$100.00');
+
+    await setField(page, '#docStatus', 'Partial');
+    await setField(page, '#amountPaid', '25');
+    await expect(page.locator('#bPaid')).toHaveText('$25.00');
+    await expect(page.locator('#bBalance')).toHaveText('$75.00');
+
+    await setField(page, '#docStatus', 'Paid');
+    await expect(page.locator('#amountPaid')).toHaveValue('100.00');
+    await expect(page.locator('#bBalance')).toHaveText('$0.00');
+
+    await setField(page, '#docStatus', 'Partial');
+    await expect(page.locator('#amountPaid')).toHaveValue('25');
+    await expect(page.locator('#bPaid')).toHaveText('$25.00');
+    await expect(page.locator('#bBalance')).toHaveText('$75.00');
+
+    await setField(page, '#docStatus', 'Sent');
+    await expect(page.locator('#amountPaid')).toHaveValue('0');
+    await expect(page.locator('#bBalance')).toHaveText('$100.00');
+
+    const saved = await clickSaveAndWait(page, 'POST');
+    expect(saved.docType).toBe('INVOICE');
+    expect(saved.status).toBe('Sent');
+    expect(Number(saved.amountPaid)).toBeCloseTo(0, 2);
+    expect(Number(saved.balance)).toBeCloseTo(100, 2);
+
+    const persisted = await page.request.get(`/api/documents/${saved.id}`).then(resp => resp.json());
+    expect(persisted.status).toBe('Sent');
+    expect(Number(persisted.amountPaid)).toBeCloseTo(0, 2);
+    expect(Number(persisted.balance)).toBeCloseTo(100, 2);
+
+    const receivables = await page.request.get('/api/receivable-invoices?includeArchived=true').then(resp => resp.json());
+    const arRow = receivables.find(row => row.invoiceNumber === saved.docNumber);
+    expect(arRow).toBeTruthy();
+    expect(arRow.status).toBe('Sent');
+    expect(Number(arRow.amountPaid)).toBeCloseTo(0, 2);
+    expect(Number(arRow.balanceDue)).toBeCloseTo(100, 2);
+
+    const sales = await page.request.get('/api/sales?includeArchived=true').then(resp => resp.json());
+    expect(sales.filter(row => row.invoiceNumber === saved.docNumber).every(row => !row.includeInDashboard)).toBe(true);
+
+    await openRecord(page, saved.docNumber, saved.id);
+    await expect(page.locator('#docStatus')).toHaveValue('Sent');
+    await expect(page.locator('#amountPaid')).toHaveValue('0');
+    await expect(page.locator('#bBalance')).toHaveText('$100.00');
+
+    expect(failures).toEqual([]);
+  });
+
   test('saved estimate type-change save creates a new invoice and leaves the estimate intact', async ({ page }) => {
     const failures = collectBrowserFailures(page);
     await openInvoiceBuilder(page);

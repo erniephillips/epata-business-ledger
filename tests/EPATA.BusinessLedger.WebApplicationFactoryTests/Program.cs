@@ -1,9 +1,15 @@
 using System.Globalization;
+using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
+using EPATA.BusinessLedger.Data;
+using EPATA.BusinessLedger.Models;
+using EPATA.BusinessLedger.Services;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 
 namespace EPATA.BusinessLedger.WebApplicationFactoryTests;
@@ -26,18 +32,42 @@ public static class TestProgram
         });
 
         await AssertEndpointGroupReadsAsync(client);
+        await AssertConfigAndAiStatusAsync(client);
         await AssertGenericRouteListsAsync(client);
         await AssertCrudAndDocumentWorkflowsAsync(client);
         await AssertExportsAndSafetyAsync(client);
+        await AssertAiEstimateChatQuickRulesAsync(client);
+        await AssertAiEstimateDraftCleansGmailPasteAsync(client);
+        await AssertLocalAiTextCompletionUsesRequestedTokenBudgetAsync(root);
 
         Console.WriteLine(JsonSerializer.Serialize(new
         {
             WebApplicationFactoryRound100 = "pass",
             TypeChangeCreateInvoiceRound106 = "pass",
+            DevIdentityAndCloudAiStatus = "pass",
+            AiEstimateChatQuickRules = "pass",
+            AiEstimateDraftGmailCleanup = "pass",
+            LocalAiTextTokenBudget = "pass",
             Database = dbPath,
             EndpointGroups = "core,tax,ai-status,operations-status,lookups,documents,type-change-create-invoice,generic-crud,exports,backup,safety"
         }));
-    }
+}
+
+static async Task AssertConfigAndAiStatusAsync(HttpClient client)
+{
+    var config = await GetJsonAsync(client, "/api/config");
+    AssertEqual("erniephillips26@gmail.com", config.GetProperty("businessEmail").GetString(), "default business email");
+
+    var status = await GetJsonAsync(client, "/api/ai/estimate/status");
+    var cloud = status.GetProperty("cloudAi");
+    AssertTrue(cloud.GetProperty("enabled").GetBoolean(), "cloud AI fallback should be enabled by configuration");
+    AssertTrue(!cloud.GetProperty("configured").GetBoolean(), "cloud AI fallback should not be ready without the API key env var");
+    AssertTrue(!cloud.GetProperty("apiKeyPresent").GetBoolean(), "cloud AI status should not claim a missing test API key is present");
+    AssertEqual("EPATA_WAF_MISSING_API_KEY", cloud.GetProperty("apiKeyEnvironmentVariable").GetString(), "cloud AI API key env var");
+    AssertEqual("erniephillips26@gmail.com", cloud.GetProperty("accountEmail").GetString(), "cloud AI account email");
+    AssertContains("Provider-side billing", cloud.GetProperty("billing").GetString(), "cloud AI billing note");
+    AssertContains("cloud fallback runs only when enabled", status.GetProperty("safety").GetString(), "cloud AI safety note");
+}
 
 static async Task AssertEndpointGroupReadsAsync(HttpClient client)
 {
@@ -189,6 +219,22 @@ static async Task AssertCrudAndDocumentWorkflowsAsync(HttpClient client)
     var invoiceId = invoice.GetProperty("id").GetInt32();
     var invoiceAlias = await GetJsonAsync(client, $"/api/documents/{invoiceId}");
     AssertEqual("INV-2099-WAF-0001", invoiceAlias.GetProperty("docNumber").GetString(), "document aliases agree");
+
+    using var staleSentResponse = await client.PutAsJsonAsync(
+        $"/api/invoice-documents/{invoiceId}",
+        NewDocumentPayload("INVOICE", "Sent", "INV-2099-WAF-0001", 30));
+    AssertStatus(HttpStatusCode.OK, staleSentResponse.StatusCode, "sent invoice ignores stale paid amount");
+    var staleSent = await ReadJsonAsync(staleSentResponse);
+    AssertEqual("Sent", staleSent.GetProperty("status").GetString(), "sent invoice keeps sent status");
+    AssertEqual("0", staleSent.GetProperty("amountPaid").GetDecimal().ToString(CultureInfo.InvariantCulture), "sent invoice resets amount paid");
+    AssertEqual("30", staleSent.GetProperty("balance").GetDecimal().ToString(CultureInfo.InvariantCulture), "sent invoice restores full balance");
+
+    var sentReceivables = await GetJsonArrayAsync(client, "/api/receivable-invoices?includeArchived=true");
+    AssertTrue(sentReceivables.Any(x =>
+        string.Equals(x.GetProperty("invoiceNumber").GetString(), "INV-2099-WAF-0001", StringComparison.Ordinal)
+        && string.Equals(x.GetProperty("status").GetString(), "Sent", StringComparison.Ordinal)
+        && x.GetProperty("amountPaid").GetDecimal() == 0m),
+        "sent invoice should sync an unpaid AR row");
 }
 
 static async Task AssertExportsAndSafetyAsync(HttpClient client)
@@ -222,6 +268,107 @@ static async Task AssertExportsAndSafetyAsync(HttpClient client)
     using (var import = await client.PostAsync("/api/database/import", null))
     {
         AssertStatus(HttpStatusCode.BadRequest, import.StatusCode, "database import stays blocked");
+    }
+}
+
+static async Task AssertAiEstimateChatQuickRulesAsync(HttpClient client)
+{
+    using var form = new MultipartFormDataContent();
+    form.Add(new StringContent("Customer asks for a quote for a small custom 3D printed bracket. Material PLA. Need one piece."), "sourceText");
+    form.Add(new StringContent("Assistant modal context"), "sourceName");
+    form.Add(new StringContent("What details are missing before this can become a reliable estimate or invoice draft?"), "question");
+    form.Add(new StringContent("{\"docType\":\"ESTIMATE\",\"status\":\"Draft\"}", Encoding.UTF8, "application/json"), "currentDocumentContext");
+
+    var stopwatch = Stopwatch.StartNew();
+    using var response = await client.PostAsync("/api/ai/estimate-chat/upload", form);
+    stopwatch.Stop();
+
+    AssertStatus(HttpStatusCode.OK, response.StatusCode, "AI estimate chat quick rules");
+    var result = await ReadJsonAsync(response);
+    AssertEqual("Local quick rules", result.GetProperty("provider").GetString(), "AI estimate chat quick provider");
+    AssertTrue(!result.GetProperty("usedAi").GetBoolean(), "AI estimate chat quick path should not call the model");
+    AssertTrue(stopwatch.Elapsed < TimeSpan.FromSeconds(2), $"AI estimate chat quick path took {stopwatch.Elapsed.TotalSeconds:N2}s");
+    AssertContains("Dimensions", result.GetProperty("answer").GetString(), "AI estimate chat quick answer");
+    AssertDoesNotContain("Chat failed", result.GetProperty("answer").GetString(), "AI estimate chat quick answer");
+}
+
+static async Task AssertAiEstimateDraftCleansGmailPasteAsync(HttpClient client)
+{
+    const string gmailPaste = """
+        Skip to content Using Gmail with screen readers Enable desktop notifications for Gmail. OK No thanks 10 of 17 Estimate for Pontoon Boat Tiller Head Fitting Inbox Ernest Phillips III <epata.llc.co@gmail.com> Attachments Wed, May 20, 10:58 PM to ryan Hi Ryan, Attached is the estimate for your custom 3D print request. Please review the price, project details, material, and notes. If everything looks good, reply with approval and I'll move forward. If anything needs to be adjusted, send me the change.
+        """;
+
+    using var form = new MultipartFormDataContent();
+    form.Add(new StringContent(gmailPaste), "sourceText");
+    form.Add(new StringContent("Gmail paste"), "sourceName");
+
+    using var response = await client.PostAsync("/api/ai/estimate-draft/upload", form);
+
+    AssertStatus(HttpStatusCode.OK, response.StatusCode, "AI estimate draft Gmail cleanup");
+    var result = await ReadJsonAsync(response);
+    var prefill = result.GetProperty("prefill");
+    var projectName = prefill.GetProperty("projectName").GetString();
+    var projectDescription = prefill.GetProperty("projectDescription").GetString();
+    var customerName = prefill.GetProperty("customerName").GetString();
+    var customerEmail = prefill.GetProperty("customerEmail").GetString();
+
+    AssertContains("Pontoon Boat Tiller Head Fitting", projectName, "Gmail cleanup project name");
+    AssertContains("pontoon boat tiller head fitting", projectDescription, "Gmail cleanup project description");
+    AssertContains("Ryan", customerName, "Gmail cleanup customer name");
+    AssertDoesNotContain("Skip to content", projectDescription, "Gmail cleanup project description");
+    AssertDoesNotContain("Using Gmail", projectDescription, "Gmail cleanup project description");
+    AssertDoesNotContain("desktop notifications", projectDescription, "Gmail cleanup project description");
+    AssertDoesNotContain("epata.llc.co@gmail.com", customerEmail, "Gmail cleanup customer email");
+    AssertDoesNotContain("epata.llc.co@gmail.com", projectDescription, "Gmail cleanup project description");
+}
+
+static async Task AssertLocalAiTextCompletionUsesRequestedTokenBudgetAsync(string root)
+{
+    var modelsRoot = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+        ".lmstudio",
+        "models");
+    var testModelDirectory = Path.Combine(modelsRoot, "codex-token-budget-test");
+    var modelPath = Path.Combine(testModelDirectory, "codex-token-budget-test.gguf");
+    Directory.CreateDirectory(testModelDirectory);
+    await File.WriteAllTextAsync(modelPath, "test");
+
+    var dbPath = Path.Combine(root, "Data", "local-ai-token-budget-tests.db");
+    foreach (var path in new[] { dbPath, dbPath + "-wal", dbPath + "-shm" })
+    {
+        File.Delete(path);
+    }
+
+    try
+    {
+        var options = new DbContextOptionsBuilder<AppDbContext>()
+            .UseSqlite("Data Source=" + dbPath)
+            .Options;
+        await using var db = new AppDbContext(options);
+        await db.Database.EnsureCreatedAsync();
+        db.AppSettings.AddRange(
+            new AppSetting { Key = "LocalAi:BaseUrl", Value = "http://127.0.0.1:1234" },
+            new AppSetting { Key = "LocalAi:ModelPath", Value = modelPath },
+            new AppSetting { Key = "LocalAi:ModelIdentifier", Value = "test-model" },
+            new AppSetting { Key = "LocalAi:ContextLength", Value = "8192" });
+        await db.SaveChangesAsync();
+
+        var handler = new RecordingLocalAiHandler();
+        var localAi = new LocalAiService(db, new HttpClient(handler));
+
+        var answer = await localAi.CompleteTextAsync("system", "user", CancellationToken.None, 512);
+
+        AssertEqual("ok", answer, "local AI text answer");
+        AssertEqual("512", handler.LastChatMaxTokens?.ToString(CultureInfo.InvariantCulture), "local AI text token budget");
+
+        handler.ReturnReasoningOnly = true;
+        var visibleFallback = await localAi.CompleteTextAsync("system", "user", CancellationToken.None, 512);
+        AssertContains("- Dimensions", visibleFallback, "local AI reasoning-only fallback");
+        AssertDoesNotContain("Okay", visibleFallback, "local AI reasoning-only fallback");
+    }
+    finally
+    {
+        try { Directory.Delete(testModelDirectory, recursive: true); } catch { }
     }
 }
 
@@ -386,8 +533,84 @@ sealed class EpataFactory(string root, string dbPath) : WebApplicationFactory<gl
                 ["ConnectionStrings:DefaultConnection"] = "Data Source=" + dbPath,
                 ["App:OpenBrowserOnStart"] = "false",
                 ["App:Url"] = "http://127.0.0.1:0",
-                ["Ai:AllowHostedFallback"] = "false"
+                ["Ai:AllowHostedFallback"] = "true",
+                ["Ai:Provider"] = "OpenAI",
+                ["Ai:Endpoint"] = "https://api.openai.com/v1/chat/completions",
+                ["Ai:Model"] = "gpt-5.5",
+                ["Ai:ApiKeyEnvironmentVariable"] = "EPATA_WAF_MISSING_API_KEY",
+                ["Ai:AccountEmail"] = "erniephillips26@gmail.com"
             });
         });
     }
+}
+
+sealed class RecordingLocalAiHandler : HttpMessageHandler
+{
+    public int? LastChatMaxTokens { get; private set; }
+    public bool ReturnReasoningOnly { get; set; }
+
+    protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+    {
+        if (request.Method == HttpMethod.Get
+            && request.RequestUri?.AbsolutePath.Equals("/api/v1/models", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            return JsonResponse("""
+                {
+                  "models": [
+                    {
+                      "type": "llm",
+                      "loaded_instances": [
+                        { "id": "test-model" }
+                      ]
+                    }
+                  ]
+                }
+                """);
+        }
+
+        if (request.Method == HttpMethod.Post
+            && request.RequestUri?.AbsolutePath.Equals("/v1/chat/completions", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            var body = await request.Content!.ReadAsStringAsync(cancellationToken);
+            using var document = JsonDocument.Parse(body);
+            LastChatMaxTokens = document.RootElement.GetProperty("max_tokens").GetInt32();
+            if (ReturnReasoningOnly)
+            {
+                return JsonResponse("""
+                    {
+                      "choices": [
+                        {
+                          "message": {
+                            "content": "",
+                            "reasoning_content": "Okay, so I need to think through the missing details.\\n1. Dimensions and tolerances\\n2. Deadline\\n3. Color"
+                          }
+                        }
+                      ]
+                    }
+                    """);
+            }
+            return JsonResponse("""
+                {
+                  "choices": [
+                    {
+                      "message": {
+                        "content": "ok"
+                      }
+                    }
+                  ]
+                }
+                """);
+        }
+
+        return new HttpResponseMessage(HttpStatusCode.NotFound)
+        {
+            Content = new StringContent("not found", Encoding.UTF8, "text/plain")
+        };
+    }
+
+    private static HttpResponseMessage JsonResponse(string json) =>
+        new(HttpStatusCode.OK)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        };
 }

@@ -3,7 +3,7 @@
 // ═══════════════════════════════════════════════════════
 
 import { el, money, escapeHtml, fmtDate, fmtDateTime, statusBadge, typeBadge, toast } from './utils.js?v=2';
-import { api } from './api.js?v=5';
+import { api } from './api.js?v=6';
 
 export const RECORD_PAGE_SIZES = [10, 25, 50, 100];
 export const RECORD_SORT_KEYS = ['updated', 'created', 'number', 'type', 'status', 'total', 'paid', 'customer', 'project'];

@@ -861,7 +861,7 @@ function normalizeData(input) {
   d.brandColor = normalizeBrandColor(d.brandColor);
   d.businessName = String(d.businessName || 'EPATA 3D PRINTS').toUpperCase();
   d.businessLocation = d.businessLocation || 'Based in New Jersey';
-  d.businessEmail = d.businessEmail || 'epata.llc.co@gmail.com';
+  d.businessEmail = d.businessEmail || 'erniephillips26@gmail.com';
   d.businessPhone = d.businessPhone || '973 306 8628';
   d.businessWebsite = d.businessWebsite || 'erniephillipsportfolio.com';
   d.businessEtsy = d.businessEtsy || 'etsy.com/shop/EPATA3dPrints';

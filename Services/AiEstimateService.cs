@@ -22,6 +22,9 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
     public const int MaxImages = 10;
     public const int MaxModelSourceCharacters = 32_000;
     private const int MaxModelOutputTokens = 4_096;
+    private const int MaxClarificationChatOutputTokens = 512;
+    private static readonly TimeSpan DraftModelTimeout = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan ClarificationModelTimeout = TimeSpan.FromSeconds(25);
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -31,6 +34,7 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
 
     private string InstructionsPath => Path.Combine(environment.ContentRootPath, "AiEstimateInstructions.json");
     private string BuilderPath => Path.Combine(environment.ContentRootPath, "wwwroot", "invoice-builder", "index.html");
+    private string AiFeaturesPath => Path.Combine(environment.ContentRootPath, "AI_FEATURES.md");
 
     private static readonly string[] BuilderFieldIds =
     [
@@ -49,15 +53,31 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
         var localConnection = await localAi.GetReadyConnectionAsync(cancellationToken);
         var endpoint = configuration["Ai:Endpoint"];
         var model = configuration["Ai:Model"];
+        var keyVariable = GetConfiguredAiApiKeyEnvironmentVariable();
+        var apiKeyPresent = !string.IsNullOrWhiteSpace(GetConfiguredAiApiKey());
+        var hostedEnabled = configuration.GetValue<bool>("Ai:AllowHostedFallback");
         var hostedConfigured = configuration.GetValue<bool>("Ai:AllowHostedFallback")
             && !string.IsNullOrWhiteSpace(endpoint)
-            && !string.IsNullOrWhiteSpace(model);
+            && !string.IsNullOrWhiteSpace(model)
+            && apiKeyPresent;
         return new
         {
             configured = localConnection is not null || hostedConfigured,
             provider = localConnection?.Provider ?? (hostedConfigured ? configuration["Ai:Provider"] ?? "OpenAI-compatible" : "Local rules fallback"),
             model = localConnection?.Model ?? model ?? string.Empty,
             localAi = localStatus,
+            cloudAi = new
+            {
+                enabled = hostedEnabled,
+                configured = hostedConfigured,
+                provider = configuration["Ai:Provider"] ?? "OpenAI-compatible",
+                endpoint = endpoint ?? string.Empty,
+                model = model ?? string.Empty,
+                apiKeyEnvironmentVariable = keyVariable,
+                apiKeyPresent,
+                accountEmail = configuration["Ai:AccountEmail"] ?? string.Empty,
+                billing = "Provider-side billing is controlled in the API account. If the provider reports billing disabled, enable billing for this account or use Local AI/local rules."
+            },
             instructionsPath = InstructionsPath,
             builderPath = BuilderPath,
             builderFields = await LoadBuilderFieldsAsync(cancellationToken),
@@ -75,7 +95,7 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
                 maxExtractedCharactersPerFile = AiSourceDocumentTextExtractor.MaxExtractedCharactersPerFile
             },
             visionRequiresConfiguredAi = true,
-            safety = "Review-first: analysis opens an unsaved estimate draft and never saves or sends automatically. Local AI is preferred; hosted fallback is disabled unless explicitly enabled. URL fetching allows public HTTPS pages only."
+            safety = "Review-first: analysis opens an unsaved estimate draft and never saves or sends automatically. Local AI is preferred; cloud fallback runs only when enabled, configured, and the API-key environment variable is present. URL fetching allows public HTTPS pages only."
         };
     }
 
@@ -95,13 +115,17 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
         var instructions = await LoadInstructionsAsync(cancellationToken);
         var builderFields = await LoadBuilderFieldsAsync(cancellationToken);
         var products = await LoadProductCatalogAsync(cancellationToken);
-        var connection = await ResolveProviderConnectionAsync(cancellationToken);
+        var appGuidance = await LoadEstimateHelpGuidanceAsync(cancellationToken);
+        var useLocalOnlyForThinGmailWrapper = ShouldUseLocalDraftWithoutModel(prepared);
+        var connection = useLocalOnlyForThinGmailWrapper ? null : await ResolveProviderConnectionAsync(cancellationToken);
         if (connection is not null)
         {
             try
             {
                 var modelSource = BuildModelSource(prepared.Text);
-                var aiResult = await CallConfiguredProviderAsync(modelSource.Text, request.SourceName, prepared.Images, instructions, builderFields, products, connection.ChatEndpoint, connection.Model, connection.UseApiKey, cancellationToken);
+                using var modelTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                modelTimeout.CancelAfter(DraftModelTimeout);
+                var aiResult = await CallConfiguredProviderAsync(modelSource.Text, request.SourceName, prepared.Images, instructions, builderFields, products, appGuidance, connection.ChatEndpoint, connection.Model, connection.UseApiKey, modelTimeout.Token);
                 aiResult.Provider = connection.Provider;
                 aiResult.UsedAi = true;
                 aiResult.ExecutionReceipt.Provider = connection.Provider;
@@ -110,7 +134,7 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
                 aiResult.ExecutionReceipt.SourceWasCondensed = modelSource.WasCondensed;
                 aiResult.InstructionsPath = InstructionsPath;
                 ApplySourcePlanningAssumptions(aiResult, prepared.Text, instructions);
-                NormalizeResult(aiResult, request.SourceName, instructions);
+                NormalizeResult(aiResult, request.SourceName, instructions, prepared.Text);
                 AddSourceBudgetWarning(aiResult, prepared.Text);
                 aiResult.Warnings.InsertRange(0, prepared.Warnings);
                 if (modelSource.WasCondensed)
@@ -119,16 +143,19 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
                 }
                 return aiResult;
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
             {
                 var fallback = BuildLocalDraft(prepared.Text, request.SourceName, prepared.Images, instructions, products);
                 fallback.ExecutionReceipt.SourceCharacters = prepared.Text.Length;
                 fallback.ExecutionReceipt.ModelInputCharacters = 0;
                 ApplySourcePlanningAssumptions(fallback, prepared.Text, instructions);
-                NormalizeResult(fallback, request.SourceName, instructions);
+                NormalizeResult(fallback, request.SourceName, instructions, prepared.Text);
                 AddSourceBudgetWarning(fallback, prepared.Text);
                 fallback.Warnings.InsertRange(0, prepared.Warnings);
-                fallback.Warnings.Insert(0, $"Configured AI call failed, so local rules were used: {ex.Message}");
+                var reason = ex is OperationCanceledException
+                    ? $"Configured AI call exceeded {DraftModelTimeout.TotalSeconds:0} seconds, so local rules were used."
+                    : $"Configured AI call failed, so local rules were used: {ex.Message}";
+                fallback.Warnings.Insert(0, reason);
                 return fallback;
             }
         }
@@ -137,11 +164,299 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
         local.ExecutionReceipt.SourceCharacters = prepared.Text.Length;
         local.ExecutionReceipt.ModelInputCharacters = 0;
         ApplySourcePlanningAssumptions(local, prepared.Text, instructions);
-        NormalizeResult(local, request.SourceName, instructions);
+        NormalizeResult(local, request.SourceName, instructions, prepared.Text);
         AddSourceBudgetWarning(local, prepared.Text);
         local.Warnings.InsertRange(0, prepared.Warnings);
+        if (useLocalOnlyForThinGmailWrapper)
+        {
+            local.Warnings.Insert(0, "The pasted Gmail content looked like an outgoing estimate wrapper, so local cleanup rules drafted from the subject instead of waiting on the model.");
+        }
         return local;
     }
+
+    public async Task<AiEstimateChatResult> ChatAsync(AiEstimateChatRequest request, CancellationToken cancellationToken)
+    {
+        if (TryBuildQuickClarificationResult(request) is { } quickResult)
+        {
+            return quickResult;
+        }
+
+        var prepared = await PrepareSourcesAsync(
+            new AiEstimateDraftRequest(request.SourceText, request.SourceName, request.SourceUrls, request.Images, request.SourceWarnings),
+            cancellationToken);
+        if (prepared.Text.Length < 5 && prepared.Images.Count == 0)
+        {
+            throw new InvalidOperationException("Add source context or upload at least one file/image before chatting with Local AI.");
+        }
+
+        var connection = await localAi.GetReadyConnectionAsync(cancellationToken)
+            ?? throw new InvalidOperationException("Local AI is off or no model is loaded. The assistant modal can start LM Studio, but a GGUF model must be selected and ready before chat.");
+        var instructions = await LoadInstructionsAsync(cancellationToken);
+        var builderFields = await LoadBuilderFieldsAsync(cancellationToken);
+        var products = await LoadProductCatalogAsync(cancellationToken);
+        var modelSource = BuildModelSource(prepared.Text);
+        var relevantProducts = products
+            .Where(product => (!string.IsNullOrWhiteSpace(product.Name) && modelSource.Text.Contains(product.Name, StringComparison.OrdinalIgnoreCase))
+                || (!string.IsNullOrWhiteSpace(product.Sku) && modelSource.Text.Contains(product.Sku, StringComparison.OrdinalIgnoreCase)))
+            .Take(25)
+            .ToList();
+        var recentMessages = (request.Messages ?? [])
+            .Where(message => !string.IsNullOrWhiteSpace(message.Content))
+            .TakeLast(10)
+            .Select(message => $"{NormalizeChatRole(message.Role)}: {Trim(message.Content, 1_200)}")
+            .ToList();
+
+        var systemPrompt = $"""
+            You are the EPATA local estimate intake assistant.
+            You are running only to help gather and clarify context before the app builds an estimate or invoice draft.
+            Use only the source packet, current document snapshot, recent chat, editable estimate instructions, HTML builder field contract, and saved product/cost catalog provided below.
+            Do not invent proof, certifications, customer approvals, tax advice, or exact slicer data.
+            When details are missing, ask focused follow-up questions and state safe planning assumptions.
+            Reply in at most 90 words. Use at most 5 bullets. Start with the final answer immediately; do not write analysis.
+            If the user asks whether the draft is ready, answer with Ready / Not ready plus the few missing items that matter most.
+            Never save, send, post, or claim that you changed the ledger.
+
+            HTML BUILDER FIELD IDS PRESENT:
+            {JsonSerializer.Serialize(builderFields, JsonOptions)}
+
+            SAVED PRODUCT / COST CATALOG:
+            {JsonSerializer.Serialize(relevantProducts, JsonOptions)}
+
+            EDITABLE ESTIMATE INSTRUCTIONS:
+            {JsonSerializer.Serialize(instructions, JsonOptions)}
+            """;
+        var userPrompt = $"""
+            Source: {request.SourceName ?? "Estimate assistant packet"}
+
+            CURRENT DOCUMENT SNAPSHOT:
+            {Trim(request.CurrentDocumentContext, 4_000)}
+
+            SOURCE PACKET:
+            {modelSource.Text}
+
+            RECENT CHAT:
+            {string.Join("\n", recentMessages)}
+
+            USER QUESTION:
+            {Trim(request.Question, 2_000)}
+            """;
+
+        string answer;
+        using (var modelTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+        {
+            modelTimeout.CancelAfter(ClarificationModelTimeout);
+            try
+            {
+                answer = prepared.Images.Count > 0
+                    ? await localAi.CompleteTextWithImagesAsync(systemPrompt, userPrompt, prepared.Images, modelTimeout.Token, MaxClarificationChatOutputTokens)
+                    : await localAi.CompleteTextAsync(systemPrompt, userPrompt, modelTimeout.Token, MaxClarificationChatOutputTokens);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                return BuildQuickClarificationTimeoutResult(request, prepared, modelSource, connection);
+            }
+        }
+
+        return new AiEstimateChatResult
+        {
+            Provider = connection.Provider,
+            UsedAi = true,
+            SourceName = request.SourceName ?? "Estimate assistant packet",
+            Answer = Trim(answer, 4_000),
+            ExecutionReceipt = new AiExecutionReceipt
+            {
+                Engine = "AI MODEL",
+                UsedAi = true,
+                Provider = connection.Provider,
+                Model = connection.Model,
+                ExecutedAtUtc = DateTimeOffset.UtcNow,
+                SourceCharacters = prepared.Text.Length,
+                ModelInputCharacters = modelSource.Text.Length,
+                SourceWasCondensed = modelSource.WasCondensed
+            },
+            Warnings = prepared.Warnings
+        };
+    }
+
+    private static AiEstimateChatResult? TryBuildQuickClarificationResult(AiEstimateChatRequest request)
+    {
+        var question = request.Question ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(question))
+        {
+            return null;
+        }
+
+        if (IsQuickPurposeQuestion(question))
+        {
+            return BuildQuickClarificationResult(
+                request,
+                "I help turn customer messages, files, URLs, and current builder fields into a reviewable estimate or invoice draft. I can spot missing quote details and planning assumptions. I never save, send, or change the ledger automatically.");
+        }
+
+        if (IsQuickMissingDetailsQuestion(question))
+        {
+            return BuildQuickClarificationResult(request, BuildMissingDetailsAnswer(MergeQuickClarificationContext(request.SourceText, request.CurrentDocumentContext)));
+        }
+
+        return null;
+    }
+
+    private static AiEstimateChatResult BuildQuickClarificationTimeoutResult(
+        AiEstimateChatRequest request,
+        PreparedAiSources prepared,
+        PreparedModelSource modelSource,
+        LocalAiConnection connection)
+    {
+        var answer = $"""
+            The loaded local model is still taking too long, so I stopped waiting after {ClarificationModelTimeout.TotalSeconds:0} seconds.
+
+            {BuildMissingDetailsAnswer(MergeQuickClarificationContext(prepared.Text, request.CurrentDocumentContext))}
+            """;
+
+        return BuildQuickClarificationResult(
+            request,
+            answer,
+            prepared.Text.Length,
+            modelSource.Text.Length,
+            modelSource.WasCondensed,
+            connection.Model,
+            [
+                ..prepared.Warnings,
+                "The loaded model exceeded the quick chat timeout. Switch LM Studio to a smaller non-reasoning model for faster custom answers."
+            ]);
+    }
+
+    private static AiEstimateChatResult BuildQuickClarificationResult(
+        AiEstimateChatRequest request,
+        string answer,
+        int? sourceCharacters = null,
+        int modelInputCharacters = 0,
+        bool sourceWasCondensed = false,
+        string? model = null,
+        List<string>? warnings = null)
+    {
+        var sourceContext = MergeQuickClarificationContext(request.SourceText, request.CurrentDocumentContext);
+        return new AiEstimateChatResult
+        {
+            Provider = "Local quick rules",
+            UsedAi = false,
+            SourceName = request.SourceName ?? "Estimate assistant packet",
+            Answer = Trim(answer, 4_000),
+            ExecutionReceipt = new AiExecutionReceipt
+            {
+                Engine = "LOCAL QUICK RULES",
+                UsedAi = false,
+                Provider = "Local quick rules",
+                Model = model,
+                ExecutedAtUtc = DateTimeOffset.UtcNow,
+                SourceCharacters = sourceCharacters ?? sourceContext.Length,
+                ModelInputCharacters = modelInputCharacters,
+                SourceWasCondensed = sourceWasCondensed
+            },
+            Warnings = warnings ?? []
+        };
+    }
+
+    private static bool IsQuickPurposeQuestion(string question) => Regex.IsMatch(
+        question,
+        @"(?i)\b(?:purpose|what\s+(?:is|are)\s+you|what\s+do\s+you\s+do|what\s+can\s+you\s+do|why\s+are\s+you\s+here)\b",
+        RegexOptions.CultureInvariant);
+
+    private static bool IsQuickMissingDetailsQuestion(string question) => Regex.IsMatch(
+        question,
+        @"(?i)\b(?:missing|what\s+details|details\s+do\s+i\s+need|what\s+questions|questions?\s+should|ask\s+before|ready|reliable|clarif(?:y|ication)|need\s+before|next\s+questions?)\b",
+        RegexOptions.CultureInvariant);
+
+    private static string BuildMissingDetailsAnswer(string source)
+    {
+        var missing = new List<string>();
+        var found = new List<string>();
+
+        AddMissingOrFound(missing, found, HasDimensionsOrReference(source), "Dimensions, CAD/STL/reference file, or measured sketch", "dimensions/reference");
+        AddMissingOrFound(missing, found, HasQuantity(source), "Quantity", "quantity");
+        AddMissingOrFound(missing, found, HasMaterial(source), "Material", "material");
+        AddMissingOrFound(missing, found, HasColorOrFinish(source), "Color and finish", "color/finish");
+        AddMissingOrFound(missing, found, HasUseOrTolerance(source), "Use case, load/strength, fit, and tolerance needs", "use/tolerance");
+        AddMissingOrFound(missing, found, HasDeadline(source), "Deadline or turnaround", "deadline");
+
+        if (!HasCustomerContact(source))
+        {
+            missing.Add("Customer name/contact for an invoice-ready draft");
+        }
+
+        if (missing.Count == 0)
+        {
+            return "Ready enough for a reviewable draft. Still verify measurements, price, tax, turnaround, payment, and customer approval before saving or sending.";
+        }
+
+        var heading = missing.Count <= 2
+            ? "Ready enough for a rough draft, but confirm:"
+            : "Not ready for a reliable estimate yet. Missing:";
+        var foundText = found.Count > 0
+            ? $"\n\nAlready found: {string.Join(", ", found.Take(5))}."
+            : string.Empty;
+
+        return $"""
+            {heading}
+            {string.Join("\n", missing.Take(6).Select(item => "- " + item))}
+            {foundText}
+
+            For an invoice draft, also confirm the customer approved the quote and how they will pay.
+            """;
+    }
+
+    private static void AddMissingOrFound(List<string> missing, List<string> found, bool hasValue, string missingLabel, string foundLabel)
+    {
+        if (hasValue)
+        {
+            found.Add(foundLabel);
+        }
+        else
+        {
+            missing.Add(missingLabel);
+        }
+    }
+
+    private static string MergeQuickClarificationContext(params string?[] parts)
+    {
+        var merged = string.Join("\n\n", parts.Where(part => !string.IsNullOrWhiteSpace(part)).Select(part => part!.Trim()));
+        return Regex.Replace(merged, @"[^\S\r\n]+", " ").Trim();
+    }
+
+    private static bool HasDimensionsOrReference(string source) => Regex.IsMatch(
+        source,
+        @"(?i)(?:\b\d+(?:\.\d+)?\s*(?:mm|cm|in|inch|inches|"")\b|(?:stl|step|3mf|obj|cad|drawing|sketch|reference\s+file|dimensions?|measurements?))",
+        RegexOptions.CultureInvariant);
+
+    private static bool HasQuantity(string source) => Regex.IsMatch(
+        source,
+        @"(?i)\b(?:(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s*(?:x|pcs?|pieces?|copies?|units?|prints?)|quantity\s*[:=]\s*\d+)\b",
+        RegexOptions.CultureInvariant);
+
+    private static bool HasMaterial(string source) => Regex.IsMatch(
+        source,
+        @"(?i)\b(?:PLA|PETG|ABS|ASA|TPU|nylon|resin|carbon\s*fiber|wood\s*fill|silk\s*pla|matte\s*pla)\b",
+        RegexOptions.CultureInvariant);
+
+    private static bool HasColorOrFinish(string source) => Regex.IsMatch(
+        source,
+        @"(?i)\b(?:black|white|red|blue|green|yellow|orange|purple|pink|gray|grey|silver|gold|clear|transparent|matte|glossy|silk|sanded|painted|finish(?:ed)?|colour|color)\b",
+        RegexOptions.CultureInvariant);
+
+    private static bool HasUseOrTolerance(string source) => Regex.IsMatch(
+        source,
+        @"(?i)\b(?:load|strength|tolerance|fit|press\s*fit|snap\s*fit|clearance|mount|mounted|screw|bolt|hole|functional|prototype|outdoor|heat|food|use\s+case)\b",
+        RegexOptions.CultureInvariant);
+
+    private static bool HasDeadline(string source) => Regex.IsMatch(
+        source,
+        @"(?i)\b(?:deadline|due|turnaround|rush|ship|deliver|pickup|pick\s*up|today|tomorrow|this\s+week|next\s+week|by\s+\w+|\b\d{1,2}/\d{1,2}\b)\b",
+        RegexOptions.CultureInvariant);
+
+    private static bool HasCustomerContact(string source) => Regex.IsMatch(
+        source,
+        @"(?im)^(?:to|from|hey|hi|hello)\s+[A-Z][a-z]+|\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b|(?<!\d)(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}(?!\d)",
+        RegexOptions.CultureInvariant);
 
     private async Task<ResolvedAiConnection?> ResolveProviderConnectionAsync(CancellationToken cancellationToken)
     {
@@ -156,6 +471,7 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
         return !configuration.GetValue<bool>("Ai:AllowHostedFallback")
             || string.IsNullOrWhiteSpace(endpoint)
             || string.IsNullOrWhiteSpace(model)
+            || string.IsNullOrWhiteSpace(GetConfiguredAiApiKey())
             ? null
             : new ResolvedAiConnection(endpoint, model, $"{configuration["Ai:Provider"] ?? "AI"} / {model}", true);
     }
@@ -179,6 +495,27 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
         return BuilderFieldIds
             .Where(id => Regex.IsMatch(html, $@"\bid\s*=\s*[""']{Regex.Escape(id)}[""']", RegexOptions.IgnoreCase))
             .ToArray();
+    }
+
+    private async Task<string> LoadEstimateHelpGuidanceAsync(CancellationToken cancellationToken)
+    {
+        if (!File.Exists(AiFeaturesPath)) return "AI_FEATURES.md was not found. Use editable estimate instructions and builder fields as the source of truth.";
+        var text = await File.ReadAllTextAsync(AiFeaturesPath, cancellationToken);
+        var headings = new[]
+        {
+            "## Local AI model",
+            "### AI Estimate Intake",
+            "### AI Estimate Intake fallback",
+            "### AI Estimate Intake limits",
+            "## Editable AI pricing instructions",
+            "## What never happens automatically"
+        };
+        var excerpts = headings
+            .Select(heading => MarkdownSection(text, heading))
+            .Where(section => !string.IsNullOrWhiteSpace(section))
+            .ToList();
+        var guidance = excerpts.Count > 0 ? string.Join("\n\n", excerpts) : text;
+        return Trim(guidance, 6_000);
     }
 
     private async Task<List<AiProductPricingContext>> LoadProductCatalogAsync(CancellationToken cancellationToken) => await db.Products
@@ -206,7 +543,15 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
     {
         var parts = new List<string>();
         var warnings = new List<string>(request.SourceWarnings ?? []);
-        if (!string.IsNullOrWhiteSpace(request.SourceText)) parts.Add(request.SourceText.Trim());
+        if (!string.IsNullOrWhiteSpace(request.SourceText))
+        {
+            var cleanedSourceText = CleanPastedSourceText(request.SourceText);
+            if (ContainsGmailChrome(request.SourceText) && !string.Equals(cleanedSourceText, request.SourceText.Trim(), StringComparison.Ordinal))
+            {
+                warnings.Add("Removed Gmail interface text from the pasted source before drafting.");
+            }
+            parts.Add(cleanedSourceText);
+        }
 
         var allUrls = (request.SourceUrls ?? [])
             .Where(x => !string.IsNullOrWhiteSpace(x))
@@ -434,6 +779,7 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
         AiEstimateInstructions instructions,
         string[] builderFields,
         List<AiProductPricingContext> products,
+        string appGuidance,
         string endpoint,
         string model,
         bool useApiKey,
@@ -508,6 +854,10 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
             Do not bundle a prototype/sample fee into a setup line when the prototype/sample is already a separate line item. Each fee must appear exactly once.
             When the sources describe roughly 300 slightly oversized 1.2 mm guitar-pick-like pieces, use at least 300 total grams before adding a disclosed multicolor waste allowance.
             Use supplied source-page metadata, uploaded documents, and uploaded pictures as source material. Pictures can identify likely products and features, but uncertain details must become questions or warnings.
+            The source packet may contain Gmail interface chrome, screen-reader text, inbox counters, labels, attachment labels, desktop notification prompts, or sent-message boilerplate. Ignore that UI text completely.
+            Never use EPATA LLC, Ernest Phillips, epata.llc.co@gmail.com, or other EPATA sender identity as the customer name or customer email.
+            If the source is an outgoing EPATA estimate/invoice email, infer the customer from the To line or greeting when clear, but leave customerEmail blank unless a customer email address is visible.
+            ProjectDescription must describe the requested physical object/service and work to be quoted. It must not describe Gmail, an inbox, an attachment, screen readers, desktop notifications, or the fact that an estimate was attached.
             Use only the rules and prices in the editable instructions below.
             When the requested item matches the saved product catalog, treat its stored material, grams, print hours, rates, packaging cost, design minutes, and target price as the preferred pricing basis. Use target price as the minimum floor, not as an extra fee.
             Fill every applicable field in the HTML estimate builder contract below.
@@ -527,6 +877,9 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
 
             EDITABLE INSTRUCTIONS:
             {JsonSerializer.Serialize(instructions, JsonOptions)}
+
+            APP HELP / ABOUT GUIDANCE:
+            {appGuidance}
             """;
         var userContent = new List<object>
         {
@@ -555,8 +908,7 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
         {
             Content = new StringContent(JsonSerializer.Serialize(payload, JsonOptions), Encoding.UTF8, "application/json")
         };
-        var keyVariable = configuration["Ai:ApiKeyEnvironmentVariable"] ?? "EPATA_AI_API_KEY";
-        var apiKey = useApiKey ? Environment.GetEnvironmentVariable(keyVariable) : null;
+        var apiKey = useApiKey ? GetConfiguredAiApiKey() : null;
         if (!string.IsNullOrWhiteSpace(apiKey))
         {
             message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
@@ -589,6 +941,27 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
             ?? throw new InvalidOperationException("AI provider response could not be parsed as an estimate draft.");
         result.ExecutionReceipt = BuildModelExecutionReceipt(envelope.RootElement, model);
         return result;
+    }
+
+    private string GetConfiguredAiApiKeyEnvironmentVariable()
+    {
+        var configured = configuration["Ai:ApiKeyEnvironmentVariable"];
+        return string.IsNullOrWhiteSpace(configured) ? "OPENAI_API_KEY" : configured;
+    }
+
+    private string? GetConfiguredAiApiKey()
+    {
+        var primary = GetConfiguredAiApiKeyEnvironmentVariable();
+        foreach (var variable in new[] { primary, "OPENAI_API_KEY", "EPATA_AI_API_KEY" }.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            var value = Environment.GetEnvironmentVariable(variable);
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                return value;
+            }
+        }
+
+        return null;
     }
 
     private static object BuildEstimateResponseFormat(bool useApiKey)
@@ -746,15 +1119,14 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
 
     private AiEstimateDraftResult BuildLocalDraft(string source, string? sourceName, List<AiEstimateImageInput> images, AiEstimateInstructions instructions, List<AiProductPricingContext> products)
     {
+        source = CleanPastedSourceText(source);
         var clean = Regex.Replace(source, @"\s+", " ").Trim();
-        var email = Match(source, @"(?im)\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b");
+        var email = FirstCustomerEmail(source);
         var phoneDigits = Regex.Replace(Match(source, @"(?<!\d)(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}(?!\d)") ?? string.Empty, @"\D", "");
         if (phoneDigits.Length == 11 && phoneDigits.StartsWith('1')) phoneDigits = phoneDigits[1..];
         var phone = phoneDigits.Length == 10 ? $"({phoneDigits[..3]}) {phoneDigits.Substring(3, 3)}-{phoneDigits[6..]}" : null;
-        var customer = FirstMatch(source,
-            @"(?im)^\s*(?:customer|name|from)\s*:\s*(?<value>[^\r\n<]{2,80})",
-            @"(?im)^\s*(?<value>[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s*$");
-        var subject = FirstMatch(source, @"(?im)^\s*subject\s*:\s*(?<value>[^\r\n]{3,120})");
+        var customer = ExtractCustomerName(source);
+        var subject = NormalizeProjectTitle(ExtractProjectTitle(source) ?? FirstMatch(source, @"(?im)^\s*subject\s*:\s*(?<value>[^\r\n]{3,120})"));
         var sourcePageTitle = FirstMatch(source, @"(?im)^\s*(?:ETSY LISTING|SOURCE PAGE):\s*(?<value>[^\r\n]{3,180})");
         var savedProduct = products.FirstOrDefault(product =>
             (!string.IsNullOrWhiteSpace(product.Sku) && source.Contains(product.Sku, StringComparison.OrdinalIgnoreCase))
@@ -817,7 +1189,7 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
                 Material = material,
                 Color = color,
                 Infill = infill,
-                ProjectDescription = Trim(clean, 500),
+                ProjectDescription = BuildProjectDescription(source, projectName),
                 ProjectNotes = $"Drafted from {sourceName ?? "pasted customer text"}. Review every field and price before saving.",
                 PageSize = instructions.Defaults.PageSize,
                 DocDate = DateTime.Today.ToString("yyyy-MM-dd"),
@@ -847,8 +1219,15 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
 
         if (string.IsNullOrWhiteSpace(customer)) result.Questions.Add("What is the customer's name?");
         if (string.IsNullOrWhiteSpace(ExtractDimensions(source))) result.Questions.Add("What are the required dimensions or fit requirements?");
-        if (!new[] { "PLA", "PETG", "ABS", "ASA", "TPU", "Nylon", "Resin" }.Any(x => Regex.IsMatch(source, $@"(?i)\b{Regex.Escape(x)}\b")))
-            result.Questions.Add($"Confirm material. The draft currently uses the default: {instructions.Defaults.Material}.");
+        var sourceHasMaterial = new[] { "PLA", "PETG", "ABS", "ASA", "TPU", "Nylon", "Resin" }
+            .Any(x => Regex.IsMatch(source, $@"(?i)\b{Regex.Escape(x)}\b"));
+        if (!sourceHasMaterial)
+        {
+            var materialBasis = savedProduct?.Material is { Length: > 0 }
+                ? "saved product material"
+                : "default material";
+            result.Questions.Add($"Confirm material. The draft currently uses the {materialBasis}: {material}.");
+        }
         if (lineItems.Any(x => x.Rate == instructions.Defaults.MinimumOrder))
             result.Warnings.Add($"One or more items use the ${instructions.Defaults.MinimumOrder:0.00} minimum and need pricing review.");
         if (images.Count > 0)
@@ -856,7 +1235,7 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
         if (savedProduct is not null)
             result.Warnings.Add($"Saved product costing was applied from {savedProduct.Name}. Review stored grams, print time, rates, packaging, and target price before sending.");
         result.Warnings.Add("Local rules performed the extraction. Start Local AI and load a model for model-assisted interpretation.");
-        NormalizeResult(result, sourceName, instructions);
+        NormalizeResult(result, sourceName, instructions, source);
         return result;
     }
 
@@ -947,8 +1326,9 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
         };
     }
 
-    private void NormalizeResult(AiEstimateDraftResult result, string? sourceName, AiEstimateInstructions instructions)
+    private void NormalizeResult(AiEstimateDraftResult result, string? sourceName, AiEstimateInstructions instructions, string? source = null)
     {
+        source = string.IsNullOrWhiteSpace(source) ? null : CleanPastedSourceText(source);
         result.SourceName = sourceName ?? result.SourceName ?? "Pasted text";
         result.ExecutionReceipt ??= new AiExecutionReceipt();
         result.ExecutionReceipt.Engine = result.UsedAi ? "AI MODEL" : "LOCAL RULES";
@@ -963,10 +1343,16 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
             result.ExecutionReceipt.TotalTokens = null;
         }
         result.Prefill ??= new AiEstimatePrefill();
+        result.Questions ??= [];
+        result.Warnings ??= [];
         var prefill = result.Prefill;
         prefill.DocType = "ESTIMATE";
         prefill.Status = "Draft";
         prefill.CustomerPhone = FormatUsPhone(prefill.CustomerPhone);
+        prefill.CustomerEmail = NormalizeCustomerEmail(prefill.CustomerEmail);
+        prefill.LineItems ??= [];
+        RepairCustomerIdentity(prefill, source);
+        RepairProjectText(prefill, source, result.Warnings);
         prefill.PreparedFor = string.IsNullOrWhiteSpace(prefill.PreparedFor) ? prefill.CustomerName : prefill.PreparedFor;
         prefill.Material = string.IsNullOrWhiteSpace(prefill.Material) ? instructions.Defaults.Material : prefill.Material;
         prefill.Infill = string.IsNullOrWhiteSpace(prefill.Infill) ? instructions.Defaults.Infill : prefill.Infill;
@@ -1001,9 +1387,6 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
         prefill.DocTaxRate = prefill.CalcTaxRate;
         prefill.AssistanceSource = result.UsedAi ? "AI MODEL" : "LOCAL RULES";
         prefill.AssistanceProvider = result.Provider;
-        prefill.LineItems ??= [];
-        result.Questions ??= [];
-        result.Warnings ??= [];
         foreach (var line in prefill.LineItems)
         {
             line.Quantity = Math.Max(0, line.Quantity);
@@ -1435,12 +1818,206 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
             : 0;
     }
 
-    private static string? FirstMeaningfulLine(string source) => source
-        .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-        .FirstOrDefault(line => !Regex.IsMatch(line, @"(?i)^(from|to|sent|subject|date)\s*:"));
+    private static string CleanPastedSourceText(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return string.Empty;
+
+        var cleaned = value.Replace('\u00a0', ' ').Trim();
+        cleaned = Regex.Replace(cleaned, @"(?i)\bSkip to content\b", " ");
+        cleaned = Regex.Replace(cleaned, @"(?i)\bUsing Gmail with screen readers\b", " ");
+        cleaned = Regex.Replace(cleaned, @"(?i)\bEnable desktop notifications for Gmail\.?\b", " ");
+        cleaned = Regex.Replace(cleaned, @"(?i)\bOK\s+No thanks\b", " ");
+        cleaned = Regex.Replace(cleaned, @"(?i)\b\d+\s+of\s+\d+\b", " ");
+        cleaned = Regex.Replace(cleaned, @"(?i)\b(?:Inbox|Attachments?)\b", " ");
+        cleaned = Regex.Replace(cleaned, @"(?i)\bErnest\s+Phillips\s+III\s*<\s*epata\.llc\.co@gmail\.com\s*>", "EPATA LLC");
+        cleaned = Regex.Replace(cleaned, @"(?i)\bepata\.llc\.co@gmail\.com\b", " ");
+        cleaned = Regex.Replace(cleaned, @"(?i)\bAttached is the estimate for your custom 3D print request\.?", " ");
+        cleaned = Regex.Replace(cleaned, @"(?i)\bPlease review the price, project details, material, and notes\.?", " ");
+        cleaned = Regex.Replace(cleaned, @"(?i)\bIf everything looks good, reply with approval and I(?:'|’)ll move forward\.?", " ");
+        cleaned = Regex.Replace(cleaned, @"(?i)\bIf anything needs to be adjusted, send me the chang(?:e|es)?\.?", " ");
+        cleaned = Regex.Replace(cleaned, @"[^\S\r\n]+", " ");
+        cleaned = Regex.Replace(cleaned, @"(?:\r?\n\s*){3,}", Environment.NewLine + Environment.NewLine);
+        return cleaned.Trim();
+    }
+
+    private static bool ContainsGmailChrome(string? value) => !string.IsNullOrWhiteSpace(value)
+        && Regex.IsMatch(value, @"(?i)(Skip to content|Using Gmail with screen readers|Enable desktop notifications for Gmail|OK\s+No thanks|\b\d+\s+of\s+\d+\b)");
+
+    private static bool ShouldUseLocalDraftWithoutModel(PreparedAiSources prepared)
+    {
+        var cameFromGmailPaste = prepared.Warnings.Any(warning => warning.Contains("Gmail interface text", StringComparison.OrdinalIgnoreCase));
+        if (!cameFromGmailPaste || string.IsNullOrWhiteSpace(ExtractProjectTitle(prepared.Text))) return false;
+        if (prepared.Text.Contains("EPATA LLC", StringComparison.OrdinalIgnoreCase)) return true;
+
+        return !Regex.IsMatch(
+            prepared.Text,
+            @"(?i)\b(?:PLA|PETG|ABS|ASA|TPU|nylon|resin|material|dimensions?|measurements?|mm|cm|inches?|grams?|hours?|qty|quantity|deadline|budget|color|colour|STL|STEP|CAD|\$\s*\d)",
+            RegexOptions.CultureInvariant);
+    }
+
+    private static string? FirstCustomerEmail(string source) => Regex.Matches(source, @"(?im)\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b")
+        .Select(match => match.Value.Trim())
+        .FirstOrDefault(email => !IsBusinessEmail(email));
+
+    private static string? NormalizeCustomerEmail(string? email)
+    {
+        if (string.IsNullOrWhiteSpace(email)) return null;
+        var match = Regex.Match(email, @"(?im)\b[\w.+-]+@[\w.-]+\.[a-z]{2,}\b");
+        if (!match.Success) return null;
+        var normalized = match.Value.Trim();
+        return IsBusinessEmail(normalized) ? null : normalized;
+    }
+
+    private static bool IsBusinessEmail(string email) => email.Contains("epata", StringComparison.OrdinalIgnoreCase)
+        || email.Contains("ernest", StringComparison.OrdinalIgnoreCase)
+        || email.Contains("ernie", StringComparison.OrdinalIgnoreCase);
+
+    private static string? ExtractCustomerName(string source)
+    {
+        var value = FirstMatch(source,
+            @"(?im)^\s*(?:customer|name)\s*:\s*(?<value>[^\r\n<]{2,80})",
+            @"(?i)\bto\s+(?<value>[A-Za-z][A-Za-z.'-]{1,30})\b",
+            @"(?i)\b(?:hi|hey|hello)\s+(?<value>[A-Za-z][A-Za-z.'-]{1,30})\b",
+            @"(?im)^\s*(?<value>[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\s*$");
+        if (string.IsNullOrWhiteSpace(value) || IsBusinessName(value) || IsGmailJunkText(value)) return null;
+        return ToDisplayName(value);
+    }
+
+    private static string? ExtractProjectTitle(string source) => FirstMatch(source,
+        @"(?is)\bEstimate\s+for\s+(?<value>.*?)(?=\s+(?:Inbox|EPATA LLC|Ernest\s+Phillips|Attachments?|Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b|$)",
+        @"(?is)\bQuote\s+for\s+(?<value>.*?)(?=\s+(?:Inbox|EPATA LLC|Ernest\s+Phillips|Attachments?|Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b|$)",
+        @"(?im)^\s*(?:subject|project)\s*:\s*(?<value>[^\r\n]{3,140})");
+
+    private static string? NormalizeProjectTitle(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var cleaned = CleanTextFragment(value);
+        cleaned = Regex.Replace(cleaned, @"(?i)^(?:re|fw|fwd)\s*:\s*", string.Empty);
+        cleaned = Regex.Replace(cleaned, @"(?i)^(?:estimate|invoice|quote)\s+for\s+", string.Empty);
+        cleaned = Regex.Replace(cleaned, @"(?i)\s+(?:Inbox|Attachments?|EPATA LLC|Ernest\s+Phillips|Mon|Tue|Wed|Thu|Fri|Sat|Sun)\b.*$", string.Empty);
+        cleaned = CleanTextFragment(cleaned);
+        if (string.IsNullOrWhiteSpace(cleaned) || IsGmailJunkText(cleaned)) return null;
+        return cleaned.Length <= 100 ? ToTitleIfNeeded(cleaned) : Trim(ToTitleIfNeeded(cleaned), 100);
+    }
+
+    private static string BuildProjectDescription(string source, string? projectName)
+    {
+        var title = NormalizeProjectTitle(ExtractProjectTitle(source) ?? projectName);
+        if (!string.IsNullOrWhiteSpace(title))
+        {
+            return Trim($"Custom 3D print estimate for {title.ToLowerInvariant()}.", 500);
+        }
+
+        var line = FirstMeaningfulLine(source);
+        return Trim(line ?? "Custom 3D print / design service.", 500);
+    }
+
+    private static void RepairCustomerIdentity(AiEstimatePrefill prefill, string? source)
+    {
+        if (IsBusinessName(prefill.CustomerName)) prefill.CustomerName = null;
+        if (IsBusinessName(prefill.PreparedFor)) prefill.PreparedFor = null;
+        if (string.IsNullOrWhiteSpace(source)) return;
+
+        var customer = ExtractCustomerName(source);
+        if (!string.IsNullOrWhiteSpace(customer))
+        {
+            if (string.IsNullOrWhiteSpace(prefill.CustomerName)) prefill.CustomerName = customer;
+            if (string.IsNullOrWhiteSpace(prefill.PreparedFor)) prefill.PreparedFor = customer;
+        }
+
+        prefill.CustomerEmail ??= FirstCustomerEmail(source);
+    }
+
+    private static void RepairProjectText(AiEstimatePrefill prefill, string? source, List<string> warnings)
+    {
+        var repaired = false;
+        var derivedTitle = string.IsNullOrWhiteSpace(source) ? null : NormalizeProjectTitle(ExtractProjectTitle(source));
+        if (IsGmailJunkText(prefill.ProjectName) && !string.IsNullOrWhiteSpace(derivedTitle))
+        {
+            prefill.ProjectName = derivedTitle;
+            repaired = true;
+        }
+
+        if (string.IsNullOrWhiteSpace(prefill.ProjectName) && !string.IsNullOrWhiteSpace(derivedTitle))
+        {
+            prefill.ProjectName = derivedTitle;
+        }
+
+        if (IsGmailJunkText(prefill.ProjectDescription) || string.IsNullOrWhiteSpace(prefill.ProjectDescription))
+        {
+            prefill.ProjectDescription = BuildProjectDescription(source ?? string.Empty, prefill.ProjectName);
+            repaired = true;
+        }
+
+        foreach (var line in prefill.LineItems ?? [])
+        {
+            if (IsGmailJunkText(line.Description))
+            {
+                line.Description = prefill.ProjectName ?? "Custom 3D print / design service";
+                repaired = true;
+            }
+            if (IsGmailJunkText(line.Details))
+            {
+                line.Details = string.Empty;
+                repaired = true;
+            }
+        }
+
+        if (repaired)
+        {
+            warnings.Add("Removed Gmail interface/sent-message boilerplate from customer-facing draft fields.");
+        }
+    }
+
+    private static bool IsBusinessName(string? value) => !string.IsNullOrWhiteSpace(value)
+        && (value.Contains("EPATA", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("Ernest Phillips", StringComparison.OrdinalIgnoreCase)
+            || value.Contains("Ernie Phillips", StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsGmailJunkText(string? value) => !string.IsNullOrWhiteSpace(value)
+        && Regex.IsMatch(value, @"(?i)(Skip to content|Using Gmail|screen readers|desktop notifications|OK\s+No thanks|\b\d+\s+of\s+\d+\b|\bGmail\b|\bInbox\b|epata\.llc\.co@gmail\.com|Attached is the estimate|Please review the price|If everything looks good|If anything needs to be adjusted)");
+
+    private static string CleanTextFragment(string value)
+    {
+        var cleaned = CleanPastedSourceText(value);
+        cleaned = Regex.Replace(cleaned, @"(?i)\b(?:Wed|Mon|Tue|Thu|Fri|Sat|Sun),?\s+[A-Z][a-z]{2,8}\s+\d{1,2},?\s+\d{1,2}:\d{2}\s*(?:AM|PM)\b.*$", string.Empty);
+        cleaned = Regex.Replace(cleaned, @"\s+", " ").Trim(" \t\r\n-–:.".ToCharArray());
+        return cleaned;
+    }
+
+    private static string ToDisplayName(string value)
+    {
+        var cleaned = Regex.Replace(value, @"[^\p{L}\p{M} .'-]+", string.Empty).Trim();
+        return ToTitleIfNeeded(cleaned);
+    }
+
+    private static string ToTitleIfNeeded(string value) => value.Any(char.IsLower) && value.Any(char.IsUpper)
+        ? value.Trim()
+        : System.Globalization.CultureInfo.InvariantCulture.TextInfo.ToTitleCase(value.ToLowerInvariant()).Trim();
+
+    private static string? FirstMeaningfulLine(string source) => Regex.Split(CleanPastedSourceText(source), @"(?<=[.!?])\s+|\r?\n+")
+        .Select(line => CleanTextFragment(line))
+        .FirstOrDefault(line => line.Length >= 3
+            && !Regex.IsMatch(line, @"(?i)^(from|to|sent|subject|date)\s*:")
+            && !IsGmailJunkText(line));
 
     private static string? ExtractDimensions(string source) => Match(source,
         @"(?i)\b\d+(?:\.\d+)?\s*(?:mm|cm|in|inch|inches|"")\s*[x×]\s*\d+(?:\.\d+)?\s*(?:mm|cm|in|inch|inches|"")(?:\s*[x×]\s*\d+(?:\.\d+)?\s*(?:mm|cm|in|inch|inches|""))?");
+
+    private static string MarkdownSection(string text, string heading)
+    {
+        var start = text.IndexOf(heading, StringComparison.OrdinalIgnoreCase);
+        if (start < 0) return string.Empty;
+        var next = text.IndexOf("\n##", start + heading.Length, StringComparison.OrdinalIgnoreCase);
+        var section = next > start ? text[start..next] : text[start..];
+        return Trim(section.Trim(), 1_800);
+    }
+
+    private static string NormalizeChatRole(string? role)
+    {
+        var clean = (role ?? string.Empty).Trim().ToLowerInvariant();
+        return clean is "assistant" or "ai" or "model" ? "Assistant" : "User";
+    }
 
     private static string StripJsonFence(string value)
     {

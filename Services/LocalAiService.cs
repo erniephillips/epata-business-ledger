@@ -18,6 +18,8 @@ public sealed class LocalAiService(AppDbContext db, HttpClient httpClient)
     private const string DefaultIdentifier = "epata-local";
     private const int DefaultContextLength = 8192;
     private const int DefaultIdleUnloadSeconds = 1800;
+    private const int DefaultStructuredOutputTokens = 4096;
+    private const int DefaultTextOutputTokens = 1024;
 
     public async Task<LocalAiSettings> GetSettingsAsync(CancellationToken cancellationToken = default)
     {
@@ -196,7 +198,7 @@ public sealed class LocalAiService(AppDbContext db, HttpClient httpClient)
 
     public async Task<T> CompleteJsonAsync<T>(string systemPrompt, string userPrompt, CancellationToken cancellationToken = default)
     {
-        var content = await SendChatAsync(systemPrompt, userPrompt, typeof(T), cancellationToken);
+        var content = await SendChatAsync(systemPrompt, userPrompt, typeof(T), DefaultStructuredOutputTokens, cancellationToken);
         return DeserializeJson<T>(content);
     }
 
@@ -212,7 +214,7 @@ public sealed class LocalAiService(AppDbContext db, HttpClient httpClient)
             type = "image_url",
             image_url = new { url = $"data:{image.ContentType};base64,{image.Base64Data}" }
         }));
-        var response = await SendChatAsync(systemPrompt, content, typeof(T), cancellationToken);
+        var response = await SendChatAsync(systemPrompt, content, typeof(T), DefaultStructuredOutputTokens, cancellationToken);
         return DeserializeJson<T>(response);
     }
 
@@ -229,14 +231,19 @@ public sealed class LocalAiService(AppDbContext db, HttpClient httpClient)
         }
     }
 
-    public async Task<string> CompleteTextAsync(string systemPrompt, string userPrompt, CancellationToken cancellationToken = default)
-        => await SendChatAsync(systemPrompt, userPrompt, null, cancellationToken);
+    public async Task<string> CompleteTextAsync(
+        string systemPrompt,
+        string userPrompt,
+        CancellationToken cancellationToken = default,
+        int maxTokens = DefaultTextOutputTokens)
+        => await SendChatAsync(systemPrompt, userPrompt, null, maxTokens, cancellationToken);
 
     public async Task<string> CompleteTextWithImagesAsync(
         string systemPrompt,
         string userPrompt,
         IReadOnlyCollection<AiEstimateImageInput> images,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        int maxTokens = DefaultTextOutputTokens)
     {
         var content = new List<object> { new { type = "text", text = userPrompt } };
         content.AddRange(images.Take(10).Select(image => (object)new
@@ -244,10 +251,10 @@ public sealed class LocalAiService(AppDbContext db, HttpClient httpClient)
             type = "image_url",
             image_url = new { url = $"data:{image.ContentType};base64,{image.Base64Data}" }
         }));
-        return await SendChatAsync(systemPrompt, content, null, cancellationToken);
+        return await SendChatAsync(systemPrompt, content, null, maxTokens, cancellationToken);
     }
 
-    private async Task<string> SendChatAsync(string systemPrompt, object userContent, Type? responseType, CancellationToken cancellationToken)
+    private async Task<string> SendChatAsync(string systemPrompt, object userContent, Type? responseType, int maxTokens, CancellationToken cancellationToken)
     {
         var connection = await GetReadyConnectionAsync(cancellationToken)
             ?? throw new InvalidOperationException("Local AI is off or no model is loaded. Open Local AI, select a model, and click Start.");
@@ -255,7 +262,7 @@ public sealed class LocalAiService(AppDbContext db, HttpClient httpClient)
         {
             model = connection.Model,
             temperature = 0.1,
-            max_tokens = 4096,
+            max_tokens = Math.Clamp(maxTokens, 64, DefaultStructuredOutputTokens),
             reasoning_effort = "none",
             response_format = BuildResponseFormat(responseType),
             messages = new object[]
@@ -284,11 +291,41 @@ public sealed class LocalAiService(AppDbContext db, HttpClient httpClient)
             && responseMessage.TryGetProperty("reasoning_content", out var reasoningElement)
             && reasoningElement.ValueKind == JsonValueKind.String)
         {
-            content = reasoningElement.GetString();
+            var reasoning = reasoningElement.GetString();
+            content = responseType is null
+                ? BuildVisibleFallbackFromReasoning(reasoning)
+                : reasoning;
         }
         return string.IsNullOrWhiteSpace(content)
             ? throw new InvalidOperationException("Local AI returned no text.")
             : content.Trim();
+    }
+
+    private static string BuildVisibleFallbackFromReasoning(string? reasoning)
+    {
+        if (string.IsNullOrWhiteSpace(reasoning))
+        {
+            return string.Empty;
+        }
+
+        var normalizedReasoning = reasoning
+            .Replace("\\r", "\r", StringComparison.Ordinal)
+            .Replace("\\n", "\n", StringComparison.Ordinal);
+
+        var usefulLines = normalizedReasoning
+            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(line => line.StartsWith("- ", StringComparison.Ordinal)
+                || System.Text.RegularExpressions.Regex.IsMatch(line, @"^\d+[\.)]\s+"))
+            .Where(line => !line.Contains("chain", StringComparison.OrdinalIgnoreCase)
+                && !line.Contains("think", StringComparison.OrdinalIgnoreCase)
+                && !line.Contains("the user", StringComparison.OrdinalIgnoreCase))
+            .Take(5)
+            .Select(line => System.Text.RegularExpressions.Regex.Replace(line, @"^\d+[\.)]\s+", "- "))
+            .ToList();
+
+        return usefulLines.Count > 0
+            ? string.Join(Environment.NewLine, usefulLines)
+            : "Local AI kept thinking and did not produce a final answer. Try again with a shorter question or a smaller context packet.";
     }
 
     private static object BuildResponseFormat(Type? responseType)

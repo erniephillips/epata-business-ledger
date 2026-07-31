@@ -9,6 +9,28 @@ public sealed record AiEstimateDraftRequest(
 
 public sealed record AiEstimateImageInput(string FileName, string ContentType, string Base64Data);
 
+public sealed record AiEstimateChatTurn(string Role, string Content);
+
+public sealed record AiEstimateChatRequest(
+    string? SourceText,
+    string? SourceName,
+    List<string>? SourceUrls = null,
+    List<AiEstimateImageInput>? Images = null,
+    List<string>? SourceWarnings = null,
+    List<AiEstimateChatTurn>? Messages = null,
+    string? Question = null,
+    string? CurrentDocumentContext = null);
+
+public sealed class AiEstimateChatResult
+{
+    public string Provider { get; set; } = "Local AI";
+    public bool UsedAi { get; set; }
+    public string SourceName { get; set; } = "Estimate assistant packet";
+    public string Answer { get; set; } = string.Empty;
+    public AiExecutionReceipt ExecutionReceipt { get; set; } = new();
+    public List<string> Warnings { get; set; } = [];
+}
+
 public sealed class AiEstimateDraftResult
 {
     public string Provider { get; set; } = "Local rules";

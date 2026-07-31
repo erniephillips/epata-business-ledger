@@ -76,6 +76,9 @@
   ],
   "aiInstructions": [
     "Extract customer and project details from pasted messages, email chains, uploaded documents, public source-page metadata, and uploaded pictures.",
+    "Ignore Gmail, Google, browser, screen-reader, inbox counter, desktop notification, label, and attachment UI text when parsing pasted email content.",
+    "Never use EPATA LLC, Ernest Phillips, epata.llc.co@gmail.com, or another EPATA sender identity as the customer name or customer email.",
+    "For outgoing EPATA estimate or invoice emails, extract the project from the subject/title and actual project details. Do not use sent-message boilerplate such as attached estimate, review the price, or reply with approval as the project description.",
     "Return multiple lineItems when the sources describe multiple distinct products or services.",
     "Create an ESTIMATE in Draft status.",
     "Return structured fields only. Do not include commentary outside the JSON response.",

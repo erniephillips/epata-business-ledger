@@ -451,7 +451,7 @@ app.MapGet("/api/config", async (AppDbContext db) =>
         id = 1,
         businessName = settings.GetValueOrDefault("BusinessName", "EPATA 3D PRINTS"),
         businessLocation = settings.GetValueOrDefault("BusinessLocation", "Based in NJ"),
-        businessEmail = settings.GetValueOrDefault("BusinessEmail", "epata.llc.co@gmail.com"),
+        businessEmail = settings.GetValueOrDefault("BusinessEmail", "erniephillips26@gmail.com"),
         businessPhone = settings.GetValueOrDefault("BusinessPhone", "(973) 306-8628"),
         businessWebsite = settings.GetValueOrDefault("BusinessWebsite", "https://erniephillipsportfolio.com/"),
         businessEtsy = settings.GetValueOrDefault("BusinessEtsy", "https://www.etsy.com/shop/epata3dprints"),
@@ -1002,6 +1002,95 @@ app.MapPost("/api/ai/estimate-draft/upload", async Task<IResult> (
     }
 });
 
+app.MapPost("/api/ai/estimate-chat/upload", async Task<IResult> (
+    HttpRequest request,
+    AiEstimateService ai,
+    AiSourceDocumentTextExtractor extractor,
+    CancellationToken cancellationToken) =>
+{
+    if (!request.HasFormContentType)
+    {
+        return Results.BadRequest(new { message = "AI estimate chat must be sent as multipart/form-data." });
+    }
+
+    var serializerOptions = new JsonSerializerOptions(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = true };
+    var form = await request.ReadFormAsync(cancellationToken);
+    var sourceText = form["sourceText"].FirstOrDefault() ?? string.Empty;
+    var sourceName = form["sourceName"].FirstOrDefault() ?? "Assistant modal sources";
+    var sourceUrls = form["sourceUrls"]
+        .SelectMany(value => value?.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries) ?? [])
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .Take(AiEstimateService.MaxSourceUrls)
+        .ToList();
+    var question = form["question"].FirstOrDefault() ?? string.Empty;
+    var currentDocumentContext = form["currentDocumentContext"].FirstOrDefault() ?? string.Empty;
+    var messagesJson = form["messagesJson"].FirstOrDefault();
+    List<AiEstimateChatTurn> messages = string.IsNullOrWhiteSpace(messagesJson)
+        ? []
+        : JsonSerializer.Deserialize<List<AiEstimateChatTurn>>(messagesJson, serializerOptions) ?? [];
+    var images = new List<AiEstimateImageInput>();
+    var warnings = new List<string>();
+    var files = form.Files.Take(AiEstimateService.MaxUploadFiles).ToList();
+    if (form.Files.Count > AiEstimateService.MaxUploadFiles)
+    {
+        warnings.Add($"Only the first {AiEstimateService.MaxUploadFiles} files were read.");
+    }
+
+    var totalBytes = files.Sum(file => file.Length);
+    if (totalBytes > AiEstimateService.MaxTotalUploadBytes)
+    {
+        return Results.BadRequest(new { message = $"The selected files total more than {AiEstimateService.MaxTotalUploadBytes / 1024 / 1024} MB. Remove or split some files and try again." });
+    }
+
+    foreach (var file in files)
+    {
+        if (file.Length <= 0) continue;
+        if (file.Length > AiEstimateService.MaxUploadFileBytes)
+        {
+            return Results.BadRequest(new { message = $"{file.FileName} is larger than the {AiEstimateService.MaxUploadFileBytes / 1024 / 1024} MB per-file AI chat limit." });
+        }
+
+        if (file.ContentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+        {
+            await using var memory = new MemoryStream();
+            await file.CopyToAsync(memory, cancellationToken);
+            images.Add(new AiEstimateImageInput(file.FileName, file.ContentType, Convert.ToBase64String(memory.ToArray())));
+            continue;
+        }
+
+        try
+        {
+            var extraction = await extractor.ExtractAsync(file, cancellationToken);
+            if (!string.IsNullOrWhiteSpace(extraction.Text))
+            {
+                sourceText = string.Join("\n\n", new[] { sourceText, $"SOURCE FILE: {file.FileName}\n{extraction.Text}" }.Where(x => !string.IsNullOrWhiteSpace(x)));
+            }
+            if (!string.IsNullOrWhiteSpace(extraction.Warning)) warnings.Add(extraction.Warning);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or System.Xml.XmlException)
+        {
+            warnings.Add($"{file.FileName} could not be read as a valid {Path.GetExtension(file.FileName).TrimStart('.').ToUpperInvariant()} document.");
+        }
+    }
+
+    try
+    {
+        return Results.Ok(await ai.ChatAsync(new AiEstimateChatRequest(
+            sourceText,
+            sourceName,
+            sourceUrls,
+            images,
+            warnings,
+            messages,
+            question,
+            currentDocumentContext), cancellationToken));
+    }
+    catch (Exception ex) when (ex is InvalidOperationException or JsonException)
+    {
+        return Results.BadRequest(new { message = ex.Message });
+    }
+});
+
 app.MapPost("/api/ai/invoice-document-draft/upload", async Task<IResult> (
     HttpRequest request,
     InvoiceDocumentPdfDraftService draftService,
@@ -1069,7 +1158,8 @@ app.MapPost("/api/system/backup", async (AppDbContext db, IConfiguration configu
 });
 
 app.MapGet("/api/app-info", (IWebHostEnvironment env, IConfiguration config) =>
-    Results.Ok(new {
+    Results.Ok(new
+    {
         environment = env.EnvironmentName,
         isTest = env.EnvironmentName.Equals("Test", StringComparison.OrdinalIgnoreCase),
         dbPath = new SqliteConnectionStringBuilder(ResolveConnectionString(config, env.ContentRootPath)).DataSource
@@ -4517,11 +4607,13 @@ static void NormalizeInvoiceDocumentMoney(InvoiceDocument doc, SaveInvoiceDocume
             doc.Status = "Accepted";
         }
     }
-    else if (doc.Status.Equals("Void", StringComparison.OrdinalIgnoreCase))
+    else if (doc.Status.Equals("Void", StringComparison.OrdinalIgnoreCase)
+        || doc.Status.Equals("Draft", StringComparison.OrdinalIgnoreCase)
+        || doc.Status.Equals("Sent", StringComparison.OrdinalIgnoreCase))
     {
         paid = 0;
     }
-    else if (doc.Status.Equals("Paid", StringComparison.OrdinalIgnoreCase) && paid <= 0 && total > 0)
+    else if (doc.Status.Equals("Paid", StringComparison.OrdinalIgnoreCase) && total > 0)
     {
         paid = total;
     }
@@ -4556,11 +4648,14 @@ static void NormalizeExistingInvoiceDocumentMoney(InvoiceDocument doc)
     {
         doc.Status = "Accepted";
     }
-    else if (doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase) && doc.Status.Equals("Void", StringComparison.OrdinalIgnoreCase))
+    else if (doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase)
+        && (doc.Status.Equals("Void", StringComparison.OrdinalIgnoreCase)
+            || doc.Status.Equals("Draft", StringComparison.OrdinalIgnoreCase)
+            || doc.Status.Equals("Sent", StringComparison.OrdinalIgnoreCase)))
     {
         paid = 0;
     }
-    else if (doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase) && doc.Status.Equals("Paid", StringComparison.OrdinalIgnoreCase) && paid <= 0 && total > 0)
+    else if (doc.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase) && doc.Status.Equals("Paid", StringComparison.OrdinalIgnoreCase) && total > 0)
     {
         paid = total;
     }

@@ -81,6 +81,8 @@ public static class DbSeeder
 
         db.AppSettings.AddRange(
             new AppSetting { Key = "SeedVersion", Value = "2026-05-30-001", Notes = "Initial seed based on uploaded EPATA PDFs and tracker structure." },
+            new AppSetting { Key = "BusinessEmail", Value = "erniephillips26@gmail.com", Notes = "Default local/cloud development account identity." },
+            new AppSetting { Key = "DeveloperAccountEmail", Value = "erniephillips26@gmail.com", Notes = "Seed account used for local and cloud development." },
             new AppSetting { Key = "NextInvoiceNumber", Value = "INV-2026-0003", Notes = "Charles is 0001. Ryan is tracked as 0002 because the uploaded Ryan PDF reused 0001." },
             new AppSetting { Key = "LegacyInvoiceImport", Value = "Optional", Notes = "Use Invoice Center for new work. Old invoice app import is only for one-time migration." }
         );
@@ -99,19 +101,19 @@ public static class DbSeeder
             {
                 db.Assets.Add(new Asset
                 {
-                    Name             = "Bambu Lab P1S 3D Printer AMS 2 Pro Combo",
-                    PurchaseDate     = new DateTime(2025, 6, 23),
-                    VendorName       = "Bambu Lab",
-                    Category         = "Equipment",
-                    Cost             = 1123.83m,
+                    Name = "Bambu Lab P1S 3D Printer AMS 2 Pro Combo",
+                    PurchaseDate = new DateTime(2025, 6, 23),
+                    VendorName = "Bambu Lab",
+                    Category = "Equipment",
+                    Cost = 1123.83m,
                     BusinessUsePercent = 100m,
-                    InServiceDate    = new DateTime(2026, 2, 1),
-                    TaxTreatment     = "Review",
+                    InServiceDate = new DateTime(2026, 2, 1),
+                    TaxTreatment = "Review",
                     CountedExpenseThisYear = false,
-                    NotYetExpensed   = 1123.83m,
-                    SourceProof      = "Expenses.zip/Bambu/20250623_P1S_Order.pdf",
-                    NeedsReview      = true,
-                    Notes            = "Printer was bought before Etsy sales shown here. Track as asset/startup conversion; decide Section 179/depreciation/de minimis with tax preparer before counting."
+                    NotYetExpensed = 1123.83m,
+                    SourceProof = "Expenses.zip/Bambu/20250623_P1S_Order.pdf",
+                    NeedsReview = true,
+                    Notes = "Printer was bought before Etsy sales shown here. Track as asset/startup conversion; decide Section 179/depreciation/de minimis with tax preparer before counting."
                 });
             }
 
@@ -135,12 +137,58 @@ public static class DbSeeder
 
             db.AppSettings.Add(new AppSetting
             {
-                Key   = "SeedPatch",
+                Key = "SeedPatch",
                 Value = "2026-05-31-001",
                 Notes = "Added Bambu P1S asset and MakerWorld rewards from user Excel data."
             });
 
             await db.SaveChangesAsync();
+        }
+
+        if (!await db.AppSettings.AnyAsync(x => x.Key == "SeedPatch" && x.Value == "2026-07-04-dev-identity"))
+        {
+            await UpsertSeedSettingAsync(
+                db,
+                "BusinessEmail",
+                "erniephillips26@gmail.com",
+                "Default local/cloud development account identity.",
+                replaceOnlyIfMissingOr: "epata.llc.co@gmail.com");
+            await UpsertSeedSettingAsync(
+                db,
+                "DeveloperAccountEmail",
+                "erniephillips26@gmail.com",
+                "Seed account used for local and cloud development.");
+
+            db.AppSettings.Add(new AppSetting
+            {
+                Key = "SeedPatch",
+                Value = "2026-07-04-dev-identity",
+                Notes = "Aligned default local/cloud development identity with the owner account."
+            });
+
+            await db.SaveChangesAsync();
+        }
+    }
+
+    private static async Task UpsertSeedSettingAsync(
+        AppDbContext db,
+        string key,
+        string value,
+        string notes,
+        string? replaceOnlyIfMissingOr = null)
+    {
+        var setting = await db.AppSettings.FirstOrDefaultAsync(x => x.Key == key);
+        if (setting is null)
+        {
+            db.AppSettings.Add(new AppSetting { Key = key, Value = value, Notes = notes });
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(replaceOnlyIfMissingOr)
+            && string.Equals(setting.Value, replaceOnlyIfMissingOr, StringComparison.OrdinalIgnoreCase))
+        {
+            setting.Value = value;
+            setting.Notes = notes;
         }
     }
 }

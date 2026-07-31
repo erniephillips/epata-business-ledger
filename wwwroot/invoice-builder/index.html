@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>EPATA Estimate & Invoice Builder</title>
   <link rel="stylesheet" href="./css/app.css?v=20260609-ai-full-prefill" />
-  <script type="module" src="./js/app.js?v=37"></script>
+  <script type="module" src="./js/app.js?v=40"></script>
 </head>
 <body>
 <div id="app">
@@ -163,6 +163,7 @@
           <p>Enter your print specs and see the cost breakdown live — with the math shown</p>
         </div>
         <div class="view-actions">
+          <button class="btn-ghost" data-ai-assistant-open type="button">AI Intake</button>
           <button class="btn" id="btnPushToBuilder">Push to Builder →</button>
         </div>
       </div>
@@ -423,6 +424,7 @@
           <p>Build estimates and invoices with line items</p>
         </div>
         <div class="view-actions">
+          <button class="btn" data-ai-assistant-open type="button">AI Intake</button>
           <button class="btn-ghost" id="btnImportPdfDraftBuilder" onclick="document.getElementById('invoicePdfImportFile').click()">AI Import PDF</button>
           <button class="btn-ghost" id="btnPreviewPdf">👁 Preview</button>
           <button class="btn-ghost" id="btnSaveNew">⧉ Save as New</button>

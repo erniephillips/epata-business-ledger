@@ -3172,6 +3172,12 @@ function renderDocumentIntake(el) {
 async function renderAiEstimateIntake(el) {
   const status = await api('/api/ai/estimate/status');
   const mode = status.configured ? `${status.provider} / ${status.model}` : 'Local rules fallback';
+  const cloud = status.cloudAi || {};
+  const cloudMode = cloud.enabled
+    ? cloud.configured
+      ? `Cloud fallback ready: ${cloud.provider || 'AI'} / ${cloud.model || 'model not set'}`
+      : `Cloud fallback enabled but not ready: ${cloud.apiKeyPresent ? 'endpoint/model needs review' : `${cloud.apiKeyEnvironmentVariable || 'OPENAI_API_KEY'} is not set`}`
+    : 'Cloud fallback off';
   const limits = status.limits || {};
   const maxFiles = Number(limits.maxFiles || 25);
   const maxFileMb = Number(limits.maxFileMegabytes || 20);
@@ -3191,8 +3197,10 @@ async function renderAiEstimateIntake(el) {
     </section>
     <div class="ai-status-strip">
       ${assistanceIndicator(status.configured ? 'AI model' : 'Local rules', mode)}
+      <span><b>Cloud:</b> ${escapeHtml(cloudMode)}${cloud.accountEmail ? ` (${escapeHtml(cloud.accountEmail)})` : ''}</span>
       <span><b>Editable pricing/rules:</b> ${escapeHtml(status.instructionsPath)}</span>
       <span>${escapeHtml(status.safety)}</span>
+      ${cloud.billing ? `<span>${escapeHtml(cloud.billing)}</span>` : ''}
     </div>
     ${aiTouchCard(
       status.configured ? 'AI model' : 'Local rules',
@@ -4213,7 +4221,7 @@ async function renderMergedInvoiceTool(el, initialView = 'dashboard', newType = 
 
   const prefill = appState.invoiceToolPrefill;
   appState.invoiceToolPrefill = null;
-  const module = await import('/invoice-builder/js/app.js?v=37');
+  const module = await import('/invoice-builder/js/app.js?v=39');
   await module.init({ initialView, restoreSnapshot, newType, prefill });
 }
 

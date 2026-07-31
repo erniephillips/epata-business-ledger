@@ -25,7 +25,7 @@ The preferred model connection is LM Studio running on this computer.
 - Stop unloads models and stops the LM Studio local server.
 - The default idle timeout unloads the selected model after 30 minutes without use.
 - No API token is needed for LM Studio.
-- Hosted-provider fallback is disabled by default. It runs only if `Ai:AllowHostedFallback` is deliberately changed to `true` and a hosted endpoint/model is configured.
+- Hosted-provider fallback is optional and runs only when `Ai:AllowHostedFallback` is `true`, a hosted endpoint/model is configured, and the configured API-key environment variable is present. Provider billing is controlled by the API account, not by this local ledger.
 
 ## AI model
 

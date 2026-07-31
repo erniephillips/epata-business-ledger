@@ -659,10 +659,10 @@ try {
         '/invoice-builder/index.html',
         '/js/app.js',
         '/css/site.css',
-        '/invoice-builder/js/app.js?v=37',
+        '/invoice-builder/js/app.js?v=39',
         '/invoice-builder/js/calculator.js?v=5',
         '/invoice-builder/js/builder.js?v=9',
-        '/invoice-builder/js/api.js?v=5',
+        '/invoice-builder/js/api.js?v=6',
         '/invoice-builder/js/records.js?v=11',
         '/invoice-builder/js/save-intent.js?v=2',
         '/invoice-builder/js/document-session.js?v=1',
@@ -771,7 +771,7 @@ try {
     Assert-Smoke ($builderJs -like '*planDocTypeChange*' -and $builderJs -like '*shouldClearDocNumberForDocType*') 'Builder JS does not clear a mismatched doc-number prefix on type change.'
     Assert-Smoke ($builderJs -like '*INVOICE_STATUSES*Partial*') 'Builder JS does not expose Partial invoice status.'
 
-    $invoiceAppJs = Get-Text '/invoice-builder/js/app.js?v=37'
+    $invoiceAppJs = Get-Text '/invoice-builder/js/app.js?v=39'
     Assert-Smoke ($invoiceAppJs -like '*save-intent.js?v=2*') 'Invoice app JS is not using the save-intent guard.'
     Assert-Smoke ($invoiceAppJs -like '*calculator.js?v=5*') 'Invoice app JS is not using the current calculator module.'
     Assert-Smoke ($invoiceAppJs -like '*document-session.js?v=1*') 'Invoice app JS is not using the current document session module.'
@@ -792,11 +792,11 @@ try {
     Assert-Smoke ($validationJs -like '*normalizeNumberValue*') 'Validation JS does not expose pure numeric normalization coverage.'
     Assert-Smoke ($validationJs -like "*paymentMethod: 'Payment method'*") 'Validation JS does not require payment method.'
 
-    $apiJs = Get-Text '/invoice-builder/js/api.js?v=5'
+    $apiJs = Get-Text '/invoice-builder/js/api.js?v=6'
     Assert-Smoke ($apiJs -like '*/api/ai/invoice-document-draft/upload*') 'Invoice PDF import endpoint is not wired in API JS.'
 
     $invoiceHtml = Get-Text '/invoice-builder/index.html'
-    Assert-Smoke ($invoiceHtml -like '*./js/app.js?v=37*') 'Standalone invoice builder shell is not loading the current app module.'
+    Assert-Smoke ($invoiceHtml -like '*./js/app.js?v=39*') 'Standalone invoice builder shell is not loading the current app module.'
     Assert-Smoke ($invoiceHtml -like '*btnImportPdfDraft*') 'Invoice PDF import button is missing.'
     Assert-Smoke ($invoiceHtml -like '*btnImportPdfDraftBuilder*') 'Builder header Invoice PDF import button is missing.'
     Assert-Smoke ($invoiceHtml -like '*invoicePdfImportFile*') 'Invoice PDF file input is missing.'
@@ -989,7 +989,7 @@ try {
     Assert-Smoke ($round26ConfigJson -notlike "*$round26SecretSentinel*") 'Config API exposed the Round 26 secret sentinel.'
     Assert-SmokeNoSecretMaterial 'Config API' $round26ConfigJson
 
-    foreach ($path in @('/', '/index.html', '/js/app.js', '/invoice-builder/', '/invoice-builder/index.html', '/invoice-builder/js/app.js?v=37', '/invoice-builder/js/utils.js')) {
+    foreach ($path in @('/', '/index.html', '/js/app.js', '/invoice-builder/', '/invoice-builder/index.html', '/invoice-builder/js/app.js?v=39', '/invoice-builder/js/utils.js')) {
         $content = Get-Text $path
         Assert-Smoke ($content -notlike "*$round26SecretSentinel*") "Static UI $path exposed the Round 26 secret sentinel."
         Assert-SmokeNoSecretMaterial "Static UI $path" $content

@@ -3,11 +3,12 @@ import { readFile } from 'node:fs/promises';
 
 const readProjectFile = path => readFile(new URL(`../${path}`, import.meta.url), 'utf8');
 
-const [mainHtml, mainShell, invoiceHtml, invoiceApp] = await Promise.all([
+const [mainHtml, mainShell, invoiceHtml, invoiceApp, invoiceApi] = await Promise.all([
   readProjectFile('wwwroot/index.html'),
   readProjectFile('wwwroot/js/app.js'),
   readProjectFile('wwwroot/invoice-builder/index.html'),
   readProjectFile('wwwroot/invoice-builder/js/app.js'),
+  readProjectFile('wwwroot/invoice-builder/js/api.js'),
 ]);
 
 function includes(source, expected, label) {
@@ -46,7 +47,7 @@ for (const [view, label] of [
 includes(mainHtml, '<script src="/js/app.js?v=20260619-ar-prefill"></script>', 'main shell app script entry');
 includes(mainShell, "fetch('/invoice-builder/index.html')", 'embedded invoice shell fetch');
 includes(mainShell, "doc.querySelector('#main')", 'embedded invoice workspace extraction');
-includes(mainShell, "await import('/invoice-builder/js/app.js?v=37')", 'embedded invoice app module import');
+includes(mainShell, "await import('/invoice-builder/js/app.js?v=39')", 'embedded invoice app module import');
 includes(mainShell, 'await module.init({ initialView, restoreSnapshot, newType, prefill });', 'embedded invoice app init');
 
 includes(mainShell, "const invoicePages = ['invoiceCenter','estimates','invoices','pricingCalculator','invoiceRecords'];", 'invoice route group');
@@ -68,6 +69,16 @@ includes(invoiceHtml, 'id="btnImportPdfDraft">AI Import PDF</button>', 'records 
 matches(invoiceHtml, /id="invoicePdfImportFile"[^>]*accept="\.pdf,application\/pdf"[^>]*style="display:none"/, 'AI Import PDF input');
 includes(invoiceApp, "on('btnImportPdfDraft', () => el('invoicePdfImportFile')?.click());", 'records AI Import PDF picker click');
 includes(invoiceApp, "on('invoicePdfImportFile', (e) => onImportPdfDraft(e));", 'AI Import PDF onchange import');
+
+matches(invoiceHtml, /data-ai-assistant-open[\s\S]*AI Intake/, 'AI intake modal open buttons');
+includes(invoiceApp, "document.querySelectorAll('[data-ai-assistant-open]')", 'AI intake modal button binding');
+includes(invoiceApp, 'openAiAssistantModal', 'AI intake modal open function');
+includes(invoiceApp, 'await refreshAiAssistantStatus(true);', 'AI intake modal local model start on open');
+includes(invoiceApp, 'applyDocumentPrefill(prefill);', 'AI intake draft applies through builder prefill');
+matches(invoiceApp, /function applyDocumentPrefill[\s\S]*restoreCalcState\(calcFields\);[\s\S]*const fields = \{/, 'AI prefill restores calculator before document fields');
+includes(invoiceApi, "request('/api/ai/estimate-draft/upload'", 'AI intake draft upload API');
+includes(invoiceApi, "request('/api/ai/estimate-chat/upload'", 'AI intake chat upload API');
+includes(invoiceApi, "request('/api/ai/local/start'", 'AI intake local start API');
 
 includes(mainShell, 'data-proof-upload="${field.name}"', 'row proof upload button');
 includes(mainShell, 'id="proof_file_${field.name}" type="file"', 'row proof upload input');

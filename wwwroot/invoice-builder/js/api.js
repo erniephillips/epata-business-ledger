@@ -38,6 +38,11 @@ export const api = {
     fd.append('files', file, file?.name || 'invoice-document.pdf');
     return request('/api/ai/invoice-document-draft/upload', { method: 'POST', body: fd });
   },
+  aiEstimateStatus: ()         => request('/api/ai/estimate/status'),
+  aiEstimateDraft: (formData)  => request('/api/ai/estimate-draft/upload', { method: 'POST', body: formData }),
+  aiEstimateChat: (formData)   => request('/api/ai/estimate-chat/upload', { method: 'POST', body: formData }),
+  localAiStatus: ()            => request('/api/ai/local/status'),
+  startLocalAi: ()             => request('/api/ai/local/start', { method: 'POST', body: '{}' }),
 
   // Settings
   getConfig:   ()              => request('/api/config'),

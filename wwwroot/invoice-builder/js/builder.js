@@ -15,6 +15,8 @@ const FORM_FIELD_IDS = [
   'docStatus',
 ];
 
+const UNPAID_INVOICE_STATUSES = new Set(['Draft', 'Sent']);
+
 const DEFAULT_PRICING_GUIDE = `Print-Only Jobs
 - $15 minimum, or setup + material + machine time
 Basic Modeling
@@ -85,11 +87,24 @@ export function initBuilder() {
   FORM_FIELD_IDS.forEach(id => {
     const node = el(id);
     if (!node) return;
+    if (id === 'docStatus') {
+      node.addEventListener('change', onDocStatusChange);
+      return;
+    }
+    if (id === 'amountPaid') {
+      const handler = () => {
+        rememberEditableAmountPaid();
+        updateTotals();
+      };
+      node.addEventListener('input', handler);
+      node.addEventListener('change', handler);
+      return;
+    }
     node.addEventListener('input', updateTotals);
     node.addEventListener('change', updateTotals);
   });
   el('docType')?.addEventListener('change', onDocTypeChange);
-  el('docStatus')?.addEventListener('change', () => {});
+  syncPaymentStateMarkers(true);
   addLineItem();  // Start with one blank row
 }
 
@@ -189,7 +204,9 @@ export function calculateDocumentTotals({
   const isInvoice = docType === 'INVOICE';
   const isPaid = isInvoice && status === 'Paid';
   const isVoid = isInvoice && status === 'Void';
-  const paid = isInvoice && !isVoid ? (isPaid ? total : Math.max(0, Number(amountPaid) || 0)) : 0;
+  const isUnpaid = isInvoice && isUnpaidInvoiceStatus(status);
+  const editablePaid = Math.min(total, Math.max(0, Number(amountPaid) || 0));
+  const paid = isInvoice && !isVoid ? (isPaid ? total : isUnpaid ? 0 : editablePaid) : 0;
   const balance = isInvoice && !isVoid ? Math.max(0, total - paid) : 0;
 
   return { subtotal, discountAmount: cleanDiscount, rushAmount: rush, taxAmount: tax, total, amountPaid: paid, balance };
@@ -211,9 +228,10 @@ export function updateTotals() {
   const isInvoice = docType === 'INVOICE';
   const isPaid   = isInvoice && closedStatus === 'Paid';
   const isVoid   = isInvoice && closedStatus === 'Void';
+  const isUnpaid = isInvoice && isUnpaidInvoiceStatus(closedStatus);
 
   if (isPaid) setVal('amountPaid', totals.total.toFixed(2));
-  else if (!isInvoice || isVoid) setVal('amountPaid', '0');
+  else if (!isInvoice || isVoid || isUnpaid) setVal('amountPaid', '0');
 
   setText('bSubtotal',  money(totals.subtotal));
   setText('bDiscount',  '-' + money(totals.discountAmount));
@@ -230,6 +248,78 @@ export function updateTotals() {
 function setText(id, text) {
   const e = el(id);
   if (e) e.textContent = text;
+}
+
+function isUnpaidInvoiceStatus(status) {
+  return UNPAID_INVOICE_STATUSES.has(status);
+}
+
+function onDocStatusChange() {
+  applyInvoiceStatusTransition();
+  updateTotals();
+}
+
+function applyInvoiceStatusTransition() {
+  const statusNode = el('docStatus');
+  const paidNode = el('amountPaid');
+  if (!statusNode || !paidNode) return;
+
+  const docType = textVal('docType');
+  const status = statusNode.value || 'Draft';
+  const previousStatus = statusNode.dataset.previousInvoiceStatus || '';
+
+  if (docType !== 'INVOICE') {
+    paidNode.dataset.lastEditableInvoicePaid = '0';
+    statusNode.dataset.previousInvoiceStatus = status;
+    return;
+  }
+
+  if (status === 'Paid' && previousStatus !== 'Paid') {
+    if (previousStatus !== 'Partial' || !paidNode.dataset.lastEditableInvoicePaid) {
+      paidNode.dataset.lastEditableInvoicePaid = normalizePaidInput(paidNode.value);
+    }
+  } else if (previousStatus === 'Paid' && status === 'Partial') {
+    setVal('amountPaid', paidNode.dataset.lastEditableInvoicePaid || '0');
+  } else if (status === 'Void' || isUnpaidInvoiceStatus(status)) {
+    setVal('amountPaid', '0');
+    paidNode.dataset.lastEditableInvoicePaid = '0';
+  } else if (status === 'Partial') {
+    rememberEditableAmountPaid();
+  }
+
+  statusNode.dataset.previousInvoiceStatus = status;
+}
+
+function rememberEditableAmountPaid() {
+  const paidNode = el('amountPaid');
+  if (!paidNode || textVal('docType') !== 'INVOICE') return;
+
+  const status = textVal('docStatus');
+  if (status === 'Partial') {
+    paidNode.dataset.lastEditableInvoicePaid = normalizePaidInput(paidNode.value);
+  } else if (status === 'Void' || isUnpaidInvoiceStatus(status)) {
+    paidNode.dataset.lastEditableInvoicePaid = '0';
+  }
+}
+
+function syncPaymentStateMarkers(resetEditableAmount = false) {
+  const statusNode = el('docStatus');
+  const paidNode = el('amountPaid');
+  if (!statusNode || !paidNode) return;
+
+  const status = statusNode.value || 'Draft';
+  statusNode.dataset.previousInvoiceStatus = status;
+  if (!resetEditableAmount) return;
+
+  paidNode.dataset.lastEditableInvoicePaid =
+    textVal('docType') === 'INVOICE' && status === 'Partial'
+      ? normalizePaidInput(paidNode.value)
+      : '0';
+}
+
+function normalizePaidInput(value) {
+  const paid = Math.max(0, Number(value) || 0);
+  return Number.isInteger(paid) ? String(paid) : paid.toFixed(2);
 }
 
 // ── Doc Type changes ──────────────────────────────────
@@ -255,6 +345,7 @@ function onDocTypeChange() {
   syncTermsNotesToDocType(type);
 
   updateTotals();
+  syncPaymentStateMarkers(true);
 }
 
 function syncStatusOptionsToDocType(type) {
@@ -317,6 +408,7 @@ export function restoreState(state) {
   if (!items.length) addLineItem();
 
   updateTotals();
+  syncPaymentStateMarkers(true);
 }
 
 export function getFormData() {
@@ -391,4 +483,5 @@ export function newDocument(type = 'ESTIMATE', nextNumber = '') {
   if (tbody) tbody.innerHTML = '';
   addLineItem();
   updateTotals();
+  syncPaymentStateMarkers(true);
 }
