@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>EPATA PDF Generator (copy)</title>
+  <style>body{font-family:Arial,Helvetica,sans-serif;padding:24px;background:#f6f8fb}button{margin-right:8px;padding:10px 14px}</style>
+</head>
+<body>
+  <h2>EPATA PDF generator (mirror)</h2>
+  <p>This page loads the invoice PDF generator scripts from the running site and lets you preview or download a sample PDF.</p>
+  <div>
+    <button id="btnPreview">Open Preview</button>
+    <button id="btnDownload">Save PDF</button>
+  </div>
+
+  <script type="module">
+    // This page uses the local copies in this folder.
+    import { generatePdf } from './js/pdf.js';
+
+    const sample = {
+      docType: 'INVOICE',
+      docNumber: 'INV-0001-0001',
+      docDate: new Date().toISOString().slice(0,10),
+      dueDate: new Date(Date.now()+7*24*60*60*1000).toISOString().slice(0,10),
+      businessName: 'EPATA 3D Prints',
+      businessLocation: 'Hometown, USA',
+      businessEmail: 'hello@example.com',
+      businessPhone: '(555) 123-4567',
+      preparedFor: 'Sample Customer',
+      customerName: 'Sample Customer',
+      projectName: 'Sample Print',
+      projectDescription: 'Test invoice generated from mirrored folder',
+      material: 'PLA',
+      color: 'White',
+      infill: '20%',
+      subtotal: 50.00,
+      discountAmount: 0,
+      rushAmount: 0,
+      taxAmount: 0,
+      total: 50.00,
+      balance: 50.00,
+      docRushPercent: 0,
+      docTaxRate: 0,
+      docDiscount: 0,
+      standardTurnaround: '3-5 business days',
+      rushTurnaround: '1-2 business days',
+      brandColor: '#17468f',
+      pageSize: 'A4',
+      status: 'Sent',
+      lineItems: [ { description: '3D print (1)', details: '0.5 kg', quantity: 1, rate: 50, amount: 50 } ]
+    };
+
+    document.getElementById('btnPreview').addEventListener('click', async () => {
+      try { await generatePdf(sample, true); } catch (e) { alert('Error: ' + (e?.message || e)); }
+    });
+
+    document.getElementById('btnDownload').addEventListener('click', async () => {
+      try { await generatePdf(sample, false); } catch (e) { alert('Error: ' + (e?.message || e)); }
+    });
+  </script>
+</body>
+</html>
