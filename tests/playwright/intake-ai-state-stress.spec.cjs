@@ -455,7 +455,7 @@ test.describe('Document Intake and AI Operations state machines', () => {
     await page.route('**/api/ai/operations/marketplace-order-import', async route => {
       await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(marketplaceDraft('SAVE-PERSIST-001', 'Persistent Buyer', 70)) });
     });
-    await page.route('**/api/sales', route => route.fulfill({
+    await page.route('**/api/sales*', route => route.fulfill({
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify([{ id: 98301, saleDate: '2026-09-10', platform: 'Etsy', paymentMethod: 'Etsy Payments', orderNumber: 'SAVE-PERSIST-001', customerName: 'Persistent Buyer', productName: 'Persistent Product', quantity: 1, customerPaid: 77.25, status: 'Paid' }]),

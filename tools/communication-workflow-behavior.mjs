@@ -74,6 +74,10 @@ const cssSource = await readFile(new URL('../wwwroot/css/site.css', import.meta.
 assert.ok(indexSource.includes('/js/communication-state.js?v=1'), 'Main shell should load the Communication state helper before app.js.');
 assert.ok(appSource.includes('EpataCommunicationState?.communicationCardPlan'), 'Communication cards should use shared card planning.');
 assert.ok(appSource.includes('communication-summary ${plan.hasLongSummary ?'), 'Long summaries should receive the long-summary class.');
+assert.ok(appSource.includes("api('/api/customer-communications?includeArchived=true')"), 'Communication timeline should count archived rows and reveal them only when requested.');
+assert.ok(appSource.includes("restoreLedgerEntityRecord('communications'"), 'Archived communications should expose Restore.');
+assert.ok(appSource.includes("archiveLedgerEntityRecord('communications'"), 'Active communications should expose Archive.');
+assert.ok(appSource.includes("plan.overdue && !row.isArchived"), 'Archived communications should not retain active overdue urgency styling.');
 assert.ok(cssSource.includes('.communication-summary') && cssSource.includes('overflow-wrap: anywhere'), 'Communication summaries should wrap long pasted text.');
 assert.ok(cssSource.includes('.communication-reference') && cssSource.includes('word-break: break-word'), 'Communication references should wrap long linked record text.');
 
@@ -81,5 +85,6 @@ console.log(JSON.stringify({
   CommunicationWorkflowBehavior: 'pass',
   CommunicationDisplayRound54: 'pass',
   CommunicationFollowUpRound54: 'pass',
-  CommunicationLongSummaryRound54: 'pass'
+  CommunicationLongSummaryRound54: 'pass',
+  CommunicationArchiveRound57: 'pass'
 }));

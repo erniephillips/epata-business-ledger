@@ -31,14 +31,31 @@ function Remove-RehearsalPath([string]$path) {
 }
 
 function Stop-PortOwner([int]$port) {
-    $owners = @(Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue |
-        Select-Object -ExpandProperty OwningProcess -Unique)
+    $owners = @(
+        netstat.exe -ano -p tcp |
+            ForEach-Object {
+                $fields = $_.Trim() -split '\s+'
+                if ($fields.Count -ge 5 -and
+                    $fields[0] -eq 'TCP' -and
+                    $fields[1].EndsWith(":$port", [System.StringComparison]::OrdinalIgnoreCase) -and
+                    $fields[3] -eq 'LISTENING') {
+                    [int]$fields[4]
+                }
+            } |
+            Select-Object -Unique
+    )
     foreach ($owner in $owners) {
         if ($owner -gt 0) {
-            Stop-Process -Id $owner -Force -ErrorAction SilentlyContinue
+            Stop-Process -Id $owner -Force -ErrorAction Stop
+            foreach ($attempt in 1..20) {
+                if (-not (Get-Process -Id $owner -ErrorAction SilentlyContinue)) {
+                    break
+                }
+                Start-Sleep -Milliseconds 100
+            }
+            Assert-Rehearsal (-not (Get-Process -Id $owner -ErrorAction SilentlyContinue)) "Rehearsal process $owner on port $port did not stop."
         }
     }
-    Start-Sleep -Milliseconds 500
 }
 
 function Format-RehearsalArgument([string]$value) {
@@ -49,13 +66,16 @@ function Format-RehearsalArgument([string]$value) {
     return '"' + ($value -replace '"', '\"') + '"'
 }
 
-function Wait-RehearsalHealth([string]$baseUrl, [string]$dbName, [string]$label, [string]$errPath) {
+function Wait-RehearsalHealth([string]$baseUrl, [string]$expectedDatabasePath, [string]$label, [string]$errPath) {
     $lastError = $null
     foreach ($attempt in 1..60) {
         try {
             $health = Invoke-RestMethod "$baseUrl/api/health"
             Assert-Rehearsal ($health.status -eq 'ok') "$label health did not report ok."
-            Assert-Rehearsal ($health.database -like "*$dbName") "$label used the wrong database. Reported: $($health.database)"
+            Assert-Rehearsal ($health.mode -eq 'unified-ledger') "$label health reported the wrong application mode: $($health.mode)"
+            $reportedDatabasePath = [System.IO.Path]::GetFullPath([string]$health.database)
+            $normalizedExpectedPath = [System.IO.Path]::GetFullPath($expectedDatabasePath)
+            Assert-Rehearsal ($reportedDatabasePath.Equals($normalizedExpectedPath, [System.StringComparison]::OrdinalIgnoreCase)) "$label used the wrong database. Expected: $normalizedExpectedPath. Reported: $reportedDatabasePath"
             return $health
         } catch {
             $lastError = $_.Exception.Message
@@ -95,7 +115,8 @@ function Start-RehearsalProcess(
 
     try {
         $baseUrl = "http://127.0.0.1:$port"
-        $health = Wait-RehearsalHealth $baseUrl $dbName $label $errPath
+        $expectedDatabasePath = Join-Path $dataDir $dbName
+        $health = Wait-RehearsalHealth $baseUrl $expectedDatabasePath $label $errPath
         return [pscustomobject]@{
             Label = $label
             Port = $port

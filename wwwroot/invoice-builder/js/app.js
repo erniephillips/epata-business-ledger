@@ -3,7 +3,7 @@
 //  .NET 10 SPA Entry Point
 // ═══════════════════════════════════════════════════════
 
-import { api }                                    from './api.js?v=6';
+import { api }                                    from './api.js?v=7';
 import { el, toast, money, setVal, textVal,
          fmtDateTime, statusBadge, typeBadge,
          debounce, escapeHtml, todayStr }         from './utils.js?v=5';
@@ -17,7 +17,8 @@ import { initBuilder, addLineItem, removeLineItem,
 import { initRecords, refreshRecords, loadRecord,
          duplicateRecord, deleteRecord, exportCsv,
          getRecords, convertEstimateToInvoice,
-         restoreRecord, isRecordActionInFlight }  from './records.js?v=13';
+         restoreRecord, isRecordActionInFlight,
+         openReceivableRecord }                   from './records.js?v=15';
 import { buildSaveRequestPlan, canReuseInFlightSave, getSaveIntent } from './save-intent.js?v=3';
 import { activeRecordBarText, buildSaveFailureUiState,
          emptyActiveRecordIdentity, identityAfterArchivedRecord,
@@ -100,6 +101,7 @@ export async function init(initialView = 'dashboard') {
   window._convertEstimate = (id) => onConvertEstimate(id);
   window._delRecord      = (id) => onDeleteRecord(id);
   window._restoreRecord  = (id) => onRestoreRecord(id);
+  window._openReceivableRecord = (id) => openReceivableRecord(id);
   window._copyText       = copyText;
   window._invoiceToolSnapshot = createDocumentSnapshot;
   window._invoiceToolShowView = showView;
@@ -125,7 +127,7 @@ export async function init(initialView = 'dashboard') {
   on('btnPushToBuilder',     () => onPushToBuilder());
   on('btnPushToBuilderCard', () => onPushToBuilder());
   on('btnExportDb',     () => { window.location.href = api.backupUrl(); });
-  on('btnExportCsv',    () => exportCsv());
+  on('btnExportCsv',    () => void exportCsv());
   on('btnImportPdfDraft', () => el('invoicePdfImportFile')?.click());
   on('invoicePdfImportFile', (e) => onImportPdfDraft(e));
   on('btnSaveSettings', () => saveSettings());
@@ -465,7 +467,7 @@ async function loadDashboardStats() {
     if (tbody) {
       tbody.innerHTML = rows.length ? rows.map(r => `
         <tr>
-          <td class="doc-number"><button class="record-link" type="button" onclick="${r.sourceKind === 'receivable' ? `window.openLedgerEntityRecord && window.openLedgerEntityRecord('receivables', ${r.sourceId || r.id})` : `window._loadRecord(${r.id})`}">${escapeHtml(r.docNumber || '—')}</button></td>
+          <td class="doc-number"><button class="record-link" type="button" onclick="${r.sourceKind === 'receivable' ? `window._openReceivableRecord(${r.sourceId || r.id})` : `window._loadRecord(${r.id})`}">${escapeHtml(r.docNumber || '—')}</button></td>
           <td>${typeBadge(r.docType)}</td>
           <td>${statusBadge(r.status||'Draft')}</td>
           <td>${escapeHtml(r.customerName || '—')}</td>

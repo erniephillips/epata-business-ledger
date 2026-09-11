@@ -74,8 +74,8 @@ matches(
 
 matches(
   mainCss,
-  /\.printer-board\s*\{[\s\S]*?grid-template-columns:\s*repeat\(5,\s*minmax\(245px,\s*1fr\)\);[\s\S]*?overflow-x:\s*auto;[\s\S]*?\}/,
-  'Printer board should preserve five lanes with intentional horizontal scroll when needed.',
+  /\.printer-board\s*\{[\s\S]*?grid-template-columns:\s*repeat\(var\(--printer-board-columns,\s*5\),\s*minmax\(245px,\s*1fr\)\);[\s\S]*?overflow-x:\s*auto;[\s\S]*?\}/,
+  'Printer board should keep every rendered lane on one horizontally scrollable row.',
 );
 matches(
   mainCss,
@@ -92,7 +92,10 @@ matches(
   /\.printer-queue-card p,\s*\.printer-queue-card small\s*\{[\s\S]*?overflow-wrap:\s*anywhere;[\s\S]*?\}/,
   'Printer card metadata should wrap long customers, printers, material names, and notes.',
 );
-includes(mainApp, "['Completed', rows.filter(row => row.status === 'Completed').slice(0, 12)]", 'Printer board should cap the completed lane so many old cards do not dominate the board.');
+includes(mainApp, "['Completed', completed.slice(0, 12), completed.length]", 'Printer board should cap the completed lane while keeping its badge count truthful.');
+includes(mainApp, "columns.map(([status, items, totalCount = items.length])", 'Printer board lanes should keep the complete count separate from rendered cards.');
+includes(mainApp, '<span class="badge">${totalCount}</span>', 'Printer board lane badges should display the complete count.');
+includes(mainApp, 'Showing the latest ${items.length} of ${totalCount} completed prints.', 'A capped completed lane should disclose both shown and total counts.');
 matches(
   mainApp,
   /items\.length \? items\.map\(renderPrinterQueueCard\)\.join\(''\) : `<div class="empty-state compact">/,

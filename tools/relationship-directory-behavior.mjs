@@ -123,7 +123,9 @@ assert.deepEqual(plain(linkedProofTarget), { kind: 'modal', configKey: 'auditDoc
 const arOnlyRecordTarget = relationshipLinkedRowTarget('', { id: 325, sourceKind: 'receivable', sourceId: 326 });
 assert.deepEqual(plain(arOnlyRecordTarget), { kind: 'ledger', configKey: 'receivables', rowId: 326, label: 'Open AR' });
 const pdfRecordTarget = relationshipLinkedRowTarget(null, { id: 327, docNumber: 'INV-R40-001' });
-assert.deepEqual(plain(pdfRecordTarget), { kind: 'page', page: 'invoiceRecords', rowId: 327, label: 'Open Records' });
+assert.deepEqual(plain(pdfRecordTarget), { kind: 'invoice-record', docNumber: 'INV-R40-001', includeArchived: false, label: 'Open Record' });
+const archivedPdfRecordTarget = relationshipLinkedRowTarget(null, { id: 328, docNumber: 'INV-R40-ARCHIVED', isArchived: true });
+assert.deepEqual(plain(archivedPdfRecordTarget), { kind: 'invoice-record', docNumber: 'INV-R40-ARCHIVED', includeArchived: true, label: 'Open Record' });
 assert.deepEqual(plain(relationshipLinkedRowTarget(null, {})), { kind: 'none', rowId: 0, label: '' });
 
 const customerDetailSections = plain(customerDetailSectionPlan('Round 55 Relationship Customer', {
@@ -226,6 +228,34 @@ assert.equal(duplicateVendorRows[0].nameStatus, 'Duplicate contacts');
 assert.match(duplicateVendorRows[0].duplicateNameWarning, /2 saved contact cards/);
 assert.equal(duplicateVendorRows[0].sources, 'People, Expenses');
 
+const archivedContactRows = buildCustomerRows(
+  [
+    { id: 921, name: 'Round 57 Recoverable Contact', partyType: 'Customer', isArchived: false },
+    { id: 922, name: 'Round 57 Recoverable Contact', partyType: 'Customer', isArchived: true },
+    { id: 923, name: 'Round 57 Archived Only', partyType: 'Customer', isArchived: true },
+  ],
+  [],
+  [],
+  [],
+  [],
+  [],
+);
+const recoverableContact = archivedContactRows.find(row => row.name === 'Round 57 Recoverable Contact');
+assert.equal(recoverableContact.activePartyCount, 1);
+assert.equal(recoverableContact.archivedPartyCount, 1);
+assert.deepEqual(plain(recoverableContact.partyRecords), [
+  { id: 921, partyType: 'Customer', isArchived: false },
+  { id: 922, partyType: 'Customer', isArchived: true },
+]);
+const archivedOnlyContact = archivedContactRows.find(row => row.name === 'Round 57 Archived Only');
+assert.equal(archivedOnlyContact.activePartyCount, 0);
+assert.equal(archivedOnlyContact.archivedPartyCount, 1);
+
+const appSource = await readFile(new URL('../wwwroot/js/app.js', import.meta.url), 'utf8');
+assert.ok(appSource.includes('Show Contact Archive'), 'Relationship directories should expose archived contact cards on demand.');
+assert.ok(appSource.includes('data-rel-restore'), 'Archived contact cards should expose Restore.');
+assert.ok(appSource.includes('data-rel-archive'), 'Active contact cards should expose Archive.');
+
 console.log(JSON.stringify({
   RelationshipDirectoryBehavior: 'pass',
   RelationshipOpenRound40: 'pass',
@@ -233,6 +263,7 @@ console.log(JSON.stringify({
   RelationshipContactRound55: 'pass',
   RelationshipPaginationRound55: 'pass',
   RelationshipDuplicateNamesRound56: 'pass',
+  RelationshipArchiveRound57: 'pass',
   CustomerRows: customerRows.length,
   VendorRows: vendorRows.length,
   NameOnlyCustomers: ['Round 17 Sale Only', 'Round 17 Message Only', 'Round 17 Paid Only', 'Round 17 Void Only'],

@@ -1131,7 +1131,7 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
         var savedProduct = products.FirstOrDefault(product =>
             (!string.IsNullOrWhiteSpace(product.Sku) && source.Contains(product.Sku, StringComparison.OrdinalIgnoreCase))
             || (!string.IsNullOrWhiteSpace(product.Name) && source.Contains(product.Name, StringComparison.OrdinalIgnoreCase)));
-        var projectName = Trim(subject ?? sourcePageTitle ?? savedProduct?.Name ?? FirstMeaningfulLine(source), 100);
+        var projectName = Trim(subject ?? sourcePageTitle ?? savedProduct?.Name ?? ProjectNameFromSource(source), 100);
         var material = new[] { "PLA", "PETG", "ABS", "ASA", "TPU", "Nylon", "Resin" }
             .FirstOrDefault(x => Regex.IsMatch(source, $@"(?i)\b{Regex.Escape(x)}\b"))
             ?? savedProduct?.Material
@@ -1829,8 +1829,7 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
         cleaned = Regex.Replace(cleaned, @"(?i)\bOK\s+No thanks\b", " ");
         cleaned = Regex.Replace(cleaned, @"(?i)\b\d+\s+of\s+\d+\b", " ");
         cleaned = Regex.Replace(cleaned, @"(?i)\b(?:Inbox|Attachments?)\b", " ");
-        cleaned = Regex.Replace(cleaned, @"(?i)\bErnest\s+Phillips\s+III\s*<\s*epata\.llc\.co@gmail\.com\s*>", "EPATA LLC");
-        cleaned = Regex.Replace(cleaned, @"(?i)\bepata\.llc\.co@gmail\.com\b", " ");
+        cleaned = Regex.Replace(cleaned, @"(?i)\b[\w.+-]*(?:epata|ernest|ernie)[\w.+-]*@[\w.-]+\.[a-z]{2,}\b", " ");
         cleaned = Regex.Replace(cleaned, @"(?i)\bAttached is the estimate for your custom 3D print request\.?", " ");
         cleaned = Regex.Replace(cleaned, @"(?i)\bPlease review the price, project details, material, and notes\.?", " ");
         cleaned = Regex.Replace(cleaned, @"(?i)\bIf everything looks good, reply with approval and I(?:'|’)ll move forward\.?", " ");
@@ -1902,14 +1901,19 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
 
     private static string BuildProjectDescription(string source, string? projectName)
     {
-        var title = NormalizeProjectTitle(ExtractProjectTitle(source) ?? projectName);
+        var title = NormalizeProjectTitle(ExtractProjectTitle(source));
         if (!string.IsNullOrWhiteSpace(title))
         {
             return Trim($"Custom 3D print estimate for {title.ToLowerInvariant()}.", 500);
         }
 
-        var line = FirstMeaningfulLine(source);
-        return Trim(line ?? "Custom 3D print / design service.", 500);
+        var sourceSummary = BuildSourceDescription(source);
+        if (!string.IsNullOrWhiteSpace(sourceSummary)) return Trim(sourceSummary, 500);
+
+        var fallbackTitle = NormalizeProjectTitle(projectName);
+        return !string.IsNullOrWhiteSpace(fallbackTitle)
+            ? Trim($"Custom 3D print estimate for {fallbackTitle.ToLowerInvariant()}.", 500)
+            : "Custom 3D print / design service.";
     }
 
     private static void RepairCustomerIdentity(AiEstimatePrefill prefill, string? source)
@@ -1975,7 +1979,7 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
             || value.Contains("Ernie Phillips", StringComparison.OrdinalIgnoreCase));
 
     private static bool IsGmailJunkText(string? value) => !string.IsNullOrWhiteSpace(value)
-        && Regex.IsMatch(value, @"(?i)(Skip to content|Using Gmail|screen readers|desktop notifications|OK\s+No thanks|\b\d+\s+of\s+\d+\b|\bGmail\b|\bInbox\b|epata\.llc\.co@gmail\.com|Attached is the estimate|Please review the price|If everything looks good|If anything needs to be adjusted)");
+        && Regex.IsMatch(value, @"(?i)(Skip to content|Using Gmail|screen readers|desktop notifications|OK\s+No thanks|\b\d+\s+of\s+\d+\b|\bGmail\b|\bInbox\b|[\w.+-]*(?:epata|ernest|ernie)[\w.+-]*@[\w.-]+\.[a-z]{2,}|Attached is the estimate|Please review the price|If everything looks good|If anything needs to be adjusted)");
 
     private static string CleanTextFragment(string value)
     {
@@ -1995,11 +1999,84 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
         ? value.Trim()
         : System.Globalization.CultureInfo.InvariantCulture.TextInfo.ToTitleCase(value.ToLowerInvariant()).Trim();
 
-    private static string? FirstMeaningfulLine(string source) => Regex.Split(CleanPastedSourceText(source), @"(?<=[.!?])\s+|\r?\n+")
-        .Select(line => CleanTextFragment(line))
-        .FirstOrDefault(line => line.Length >= 3
-            && !Regex.IsMatch(line, @"(?i)^(from|to|sent|subject|date)\s*:")
-            && !IsGmailJunkText(line));
+    private static string? ProjectNameFromSource(string source)
+    {
+        var line = SourceDescriptionGroups(source).SelectMany(group => group).FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(line)) return null;
+        return NormalizeProjectTitle(line);
+    }
+
+    private static string? FirstMeaningfulLine(string source) => MeaningfulSourceLines(source).FirstOrDefault();
+
+    private static IEnumerable<string> MeaningfulSourceLines(string source) =>
+        Regex.Split(CleanPastedSourceText(source), @"(?<=[.!?])\s+|\r?\n+")
+            .Select(CleanTextFragment)
+            .Where(line => line.Length >= 3
+                && !Regex.IsMatch(line, @"(?i)^(?:SOURCE FILE|UPLOADED REFERENCE PICTURES)\b")
+                && !Regex.IsMatch(line, @"(?i)^(?:from|to|sent|subject|date)\s*:")
+                && !IsGmailJunkText(line))
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+
+    private static string? BuildSourceDescription(string source)
+    {
+        var groups = SourceDescriptionGroups(source);
+        if (groups.Count == 0) return null;
+
+        var selected = groups.Select(group => group[0]).ToList();
+        var maximumLines = Math.Max(groups.Count, 6);
+        for (var offset = 1; selected.Count < maximumLines; offset++)
+        {
+            var added = false;
+            foreach (var group in groups)
+            {
+                if (offset >= group.Count) continue;
+                selected.Add(group[offset]);
+                added = true;
+                if (selected.Count >= maximumLines) break;
+            }
+            if (!added) break;
+        }
+
+        var perLineLimit = Math.Max(36, 470 / selected.Count);
+        return Trim(string.Join(" ", selected.Select(line => WithSentenceEnding(Trim(line, perLineLimit)))), 500);
+    }
+
+    private static List<List<string>> SourceDescriptionGroups(string source) =>
+        Regex.Split(
+                CleanPastedSourceText(source),
+                @"(?im)^\s*SOURCE FILE\s*:[^\r\n]*(?:\r?\n|$)")
+            .Select(block => MeaningfulSourceLines(block)
+                .Select(NormalizeWorkDescriptionLine)
+                .Where(line => !string.IsNullOrWhiteSpace(line))
+                .Select(line => line!)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList())
+            .Where(group => group.Count > 0)
+            .ToList();
+
+    private static string? NormalizeWorkDescriptionLine(string line)
+    {
+        if (Regex.IsMatch(
+                line,
+                @"(?i)^(?:customer(?:\s+name)?|name|prepared\s+for|bill\s+to|ship\s+to|email|e-mail|phone|telephone|address|from|to|sent|date)\s*:"))
+        {
+            return null;
+        }
+        if (Regex.IsMatch(line, @"(?i)^https?://\S+$|\.(?:pdf|docx?|txt|eml|csv|json)$")) return null;
+
+        var cleaned = Regex.Replace(
+            line,
+            @"(?i)^(?:project\s+description|description|work\s+requested|request|item|product)\s*:\s*",
+            string.Empty);
+        cleaned = Regex.Replace(cleaned, @"(?i)^\s*\d{1,4}\s*(?:x|×)\s+", string.Empty);
+        cleaned = Regex.Replace(cleaned, @"\s*[-–:]?\s*\$\s*\d+(?:\.\d{1,2})?(?:\s*(?:each|ea))?\s*$", string.Empty);
+        cleaned = CleanTextFragment(cleaned);
+        return cleaned.Length >= 3 && !IsGmailJunkText(cleaned) ? cleaned : null;
+    }
+
+    private static string WithSentenceEnding(string value) => value.EndsWith('.') || value.EndsWith('!') || value.EndsWith('?')
+        ? value
+        : value + ".";
 
     private static string? ExtractDimensions(string source) => Match(source,
         @"(?i)\b\d+(?:\.\d+)?\s*(?:mm|cm|in|inch|inches|"")\s*[x×]\s*\d+(?:\.\d+)?\s*(?:mm|cm|in|inch|inches|"")(?:\s*[x×]\s*\d+(?:\.\d+)?\s*(?:mm|cm|in|inch|inches|""))?");

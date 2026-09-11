@@ -64,8 +64,8 @@ mustInclude(builderIndex, 'Database restore unavailable', 'Standalone destructiv
 
 mustInclude(recordsApp, 'const _recordActionsInFlight = new Set();', 'Standalone records should track in-flight actions.');
 mustInclude(recordsApp, 'async function runRecordAction', 'Standalone records should expose a record action guard.');
-mustInclude(recordsApp, 'function recordActionKey(id)', 'Standalone record actions should share a record-level conflict key.');
-mustInclude(recordsApp, 'return `document:${Number(id || 0)}`;', 'Standalone record actions should be keyed by record id.');
+mustInclude(recordsApp, "function recordActionKey(id, kind = 'document')", 'Standalone record actions should share a typed record-level conflict key.');
+mustInclude(recordsApp, 'return `${kind}:${Number(id || 0)}`;', 'Standalone record actions should be keyed by record kind and id.');
 mustInclude(recordsApp, "return runRecordAction(id, 'Another action for this record is already in progress.'", 'Standalone duplicate should use the record-level guard.');
 mustInclude(recordsApp, "return runRecordAction(id, 'Another action for this estimate is already in progress.'", 'Standalone conversion should use the record-level guard.');
 mustInclude(recordsApp, 'return runRecordAction(id, `Another action for ${label} is already in progress.`', 'Standalone archive and restore should use the record-level guard.');

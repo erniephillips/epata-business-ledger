@@ -53,11 +53,14 @@ const appState = {
   timelineTimer: null,
   communicationQuery: '',
   communicationCustomer: '',
+  communicationIncludeArchived: false,
   communicationTimer: null,
   invoiceCenterQuery: '',
   invoiceCenterType: '',
   printerQueueRows: [],
   printerQueueJobs: [],
+  printerQueueIncludeArchived: false,
+  relationshipArchiveVisibility: { customer: false, vendor: false },
   taxYear: new Date().getFullYear(),
   dashboardBreakdowns: {},
   pageHistory: [],
@@ -83,6 +86,16 @@ function createPageRenderContext(page = appState.currentPage) {
 function isPageRenderContextCurrent(context) {
   return !!context
     && context.sequence === pageRenderSequence
+    && context.page === appState.currentPage;
+}
+
+function createPageVisitContext(page = appState.currentPage) {
+  return { page, sequence: pageVisitSequence };
+}
+
+function isPageVisitContextCurrent(context) {
+  return !!context
+    && context.sequence === pageVisitSequence
     && context.page === appState.currentPage;
 }
 
@@ -219,6 +232,7 @@ const help = {
 
 const proofFieldNames = new Set(['sourceProof', 'receiptProof', 'filePathOrUrl']);
 let pageRenderSequence = 0;
+let pageVisitSequence = 0;
 
 const configs = {
   customerJobs: {
@@ -720,6 +734,11 @@ function defaultPaymentMethod(row = {}) {
 function qs(sel) { return document.querySelector(sel); }
 function qsa(sel) { return [...document.querySelectorAll(sel)]; }
 window.openLedgerEntityRecord = openLedgerEntityRecord;
+window.archiveLedgerEntityRecord = archiveLedgerEntityRecord;
+window.restoreLedgerEntityRecord = restoreLedgerEntityRecord;
+window.openInvoiceRecordSource = openInvoiceRecordSource;
+window.openLedgerSourceRecord = openLedgerSourceRecord;
+window.openLedgerSourceList = openLedgerSourceList;
 window.openCustomerDetail = name => {
   const clean = String(name || '').trim();
   if (clean) showPage(`customerDetail:${encodeURIComponent(clean)}`);
@@ -736,14 +755,101 @@ async function openLedgerEntityRecord(page, id) {
     return;
   }
   try {
-    const context = createPageRenderContext(appState.currentPage);
+    const context = createPageVisitContext(appState.currentPage);
     const rows = await api(`/api/${config.route}`);
-    if (!isPageRenderContextCurrent(context)) return;
+    if (!isPageVisitContextCurrent(context)) return;
     const row = rows.find(r => Number(r.id) === Number(id));
-    if (row) openModal(config, row);
+    if (row && generatedLedgerRecordSource(config, row)) await openGeneratedLedgerSource(config, row);
+    else if (row) openModal(config, row);
     else toast('The requested record is no longer active.', 'error');
   } catch (err) {
     toast(`Record open failed: ${friendlyApiError(err.message)}`, 'error');
+  }
+}
+
+async function restoreLedgerEntityRecord(page, id, button = null) {
+  const config = configs[page] || Object.values(configs).find(item => item.route === page);
+  if (!config) {
+    toast('The requested ledger area is not available.', 'error');
+    return null;
+  }
+  return restoreRow(config, id, button);
+}
+
+async function archiveLedgerEntityRecord(page, id, button = null) {
+  const config = configs[page] || Object.values(configs).find(item => item.route === page);
+  if (!config) {
+    toast('The requested ledger area is not available.', 'error');
+    return null;
+  }
+  return archiveRow(config, id, button);
+}
+
+async function openInvoiceRecordSource(docNumber, includeArchived = false) {
+  const number = String(docNumber || '').trim();
+  await showPage('invoiceRecords');
+  const search = qs('#recSearch');
+  const type = qs('#recType');
+  const status = qs('#recStatus');
+  const archive = qs('#recIncludeArchived');
+  if (type) {
+    type.value = '';
+    type.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  if (status) {
+    status.value = '';
+    status.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  if (search) {
+    search.value = number;
+    search.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  if (includeArchived && archive && !archive.checked) {
+    archive.checked = true;
+    archive.dispatchEvent(new Event('change', { bubbles: true }));
+    return;
+  }
+}
+
+async function openLedgerSourceList(page, route, filter = '') {
+  const config = configs[page];
+  if (!config || config.route !== route) {
+    toast('The requested source ledger is not available.', 'error');
+    return;
+  }
+  const state = tablePageState[route]
+    || (tablePageState[route] = { page: 0, pageSize: 25, filter: '', statusFilter: '', ...defaultSortFor(config) });
+  state.includeArchived = true;
+  state.statusFilter = '';
+  state.filter = String(filter || '').trim();
+  state.page = 0;
+  await showPage(page);
+}
+
+async function openLedgerSourceRecord(page, id, filter = '') {
+  const config = configs[page];
+  if (!config) {
+    toast('The requested source ledger is not available.', 'error');
+    return;
+  }
+  const context = createPageVisitContext(appState.currentPage);
+  try {
+    const rows = await api(`/api/${config.route}?includeArchived=true`);
+    if (!isPageVisitContextCurrent(context)) return;
+    const row = rows.find(item => Number(item.id) === Number(id));
+    if (!row) {
+      await openLedgerSourceList(page, config.route, filter);
+      toast('The exact source record was not found; showing the matching ledger search.', 'info');
+      return;
+    }
+    if (row.isArchived === true) {
+      await openLedgerSourceList(page, config.route, filter || row.invoiceNumber || row.originalInvoiceNumber || '');
+      return;
+    }
+    if (generatedLedgerRecordSource(config, row)) await openGeneratedLedgerSource(config, row);
+    else openModal(config, row);
+  } catch (err) {
+    toast(`Source record open failed: ${friendlyApiError(err.message)}`, 'error');
   }
 }
 
@@ -925,6 +1031,7 @@ function initializeTopbarLayout() {
 async function showPage(page, options = {}) {
   const previousPage = appState.currentPage;
   const pageChanged = previousPage !== page;
+  if (pageChanged) pageVisitSequence += 1;
   if (window.EpataNavigationHistory?.nextPageHistory) {
     appState.pageHistory = window.EpataNavigationHistory.nextPageHistory(appState.pageHistory, previousPage, page, {
       skipHistory: options.skipHistory,
@@ -1433,6 +1540,8 @@ function navIcon(name) {
 }
 
 async function renderJobTimeline(el) {
+  clearTimeout(appState.timelineTimer);
+  appState.timelineTimer = null;
   const params = new URLSearchParams();
   if (appState.timelineQuery) params.set('q', appState.timelineQuery);
   if (appState.timelineCustomer) params.set('customer', appState.timelineCustomer);
@@ -1616,17 +1725,30 @@ function renderTimelineEvent(event) {
 }
 
 async function renderCommunicationTimeline(el) {
-  const rows = await api('/api/customer-communications');
+  const allRows = await api('/api/customer-communications?includeArchived=true');
+  const activeRows = allRows.filter(row => !row.isArchived);
+  const archivedCount = allRows.length - activeRows.length;
+  const rows = appState.communicationIncludeArchived ? allRows : activeRows;
   const query = String(appState.communicationQuery || '').toLowerCase();
   const customer = appState.communicationCustomer || '';
   const filtered = rows
     .filter(row => !customer || sameName(row.customerName, customer))
     .filter(row => !query || JSON.stringify(row).toLowerCase().includes(query))
     .sort((a, b) => new Date(b.occurredAt || b.updatedAtUtc || 0) - new Date(a.occurredAt || a.updatedAtUtc || 0));
-  const customers = [...new Set(rows.map(row => row.customerName).filter(Boolean))].sort();
-  const openFollowUps = rows.filter(row => row.followUpStatus === 'Open');
+  const filteredArchivedCount = filtered.filter(row => row.isArchived).length;
+  const seenCustomers = new Set();
+  const customers = rows
+    .map(row => String(row.customerName || '').trim())
+    .filter(name => {
+      const key = name.toLowerCase();
+      if (!key || seenCustomers.has(key)) return false;
+      seenCustomers.add(key);
+      return true;
+    })
+    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+  const openFollowUps = activeRows.filter(row => row.followUpStatus === 'Open');
   const overdue = openFollowUps.filter(row => row.followUpDate && new Date(`${String(row.followUpDate).substring(0, 10)}T23:59:59`) < new Date());
-  const incoming = rows.filter(row => row.direction === 'Incoming').length;
+  const incoming = activeRows.filter(row => row.direction === 'Incoming').length;
 
   el.innerHTML = `
     <section class="workspace-hero">
@@ -1638,19 +1760,21 @@ async function renderCommunicationTimeline(el) {
       <div class="hero-actions">
         <button class="primary-button" onclick="quickOpen('communications','communication')">Log Communication</button>
         <button class="ghost-button dark" onclick="showPage('jobTimeline')">Open Job Timeline</button>
-        <a class="ghost-button dark" href="/api/export/customer-communications">Export CSV</a>
+        <button class="ghost-button dark" id="communicationArchiveToggle" type="button" aria-pressed="${appState.communicationIncludeArchived ? 'true' : 'false'}">${appState.communicationIncludeArchived ? 'Hide Archive' : `Show Archive (${archivedCount})`}</button>
+        <a class="ghost-button dark" href="/api/export/customer-communications${appState.communicationIncludeArchived ? '?includeArchived=true' : ''}">Export CSV</a>
       </div>
     </section>
     <section class="kpi-grid">
-      ${kpi('Logged Conversations', rows.length, 'Important customer messages, calls, and notes.', '', false)}
+      ${kpi('Logged Conversations', activeRows.length, 'Active customer messages, calls, and notes.', '', false)}
       ${kpi('Open Follow-Ups', openFollowUps.length, 'Conversations that still need a response or check-in.', openFollowUps.length ? 'warn' : 'good', false)}
       ${kpi('Overdue Follow-Ups', overdue.length, 'Open follow-ups whose due date has passed.', overdue.length ? 'bad' : 'good', false)}
       ${kpi('Incoming Messages', incoming, 'Requests or replies received from customers.', '', false)}
     </section>
+    ${appState.communicationIncludeArchived ? `<p class="muted">Showing ${filteredArchivedCount} archived communication${filteredArchivedCount === 1 ? '' : 's'} matching the current filters, with restore controls.</p>` : ''}
     <section class="timeline-command">
       <div class="timeline-search">
         <label class="timeline-filter wide"><span>Search</span><input id="communicationSearch" type="search" placeholder="Customer, subject, requirement, approval, order, invoice..." value="${escapeHtml(appState.communicationQuery || '')}"></label>
-        <label class="timeline-filter"><span>Customer</span><select id="communicationCustomer"><option value="">All customers</option>${customers.map(name => `<option value="${escapeHtml(name)}"${name === customer ? ' selected' : ''}>${escapeHtml(name)}</option>`).join('')}</select></label>
+        <label class="timeline-filter"><span>Customer</span><select id="communicationCustomer"><option value="">All customers</option>${customers.map(name => `<option value="${escapeHtml(name)}"${sameName(name, customer) ? ' selected' : ''}>${escapeHtml(name)}</option>`).join('')}</select></label>
         <div class="timeline-filter-actions"><button class="ghost-button timeline-clear" id="communicationClear" type="button">Clear</button></div>
       </div>
     </section>
@@ -1675,6 +1799,14 @@ async function renderCommunicationTimeline(el) {
     appState.communicationCustomer = '';
     void showPage('communications', { replace: true });
   };
+  qs('#communicationArchiveToggle').onclick = () => {
+    if (appState.communicationIncludeArchived && appState.communicationCustomer) {
+      const activeMatch = activeRows.find(row => sameName(row.customerName, appState.communicationCustomer));
+      appState.communicationCustomer = activeMatch?.customerName || '';
+    }
+    appState.communicationIncludeArchived = !appState.communicationIncludeArchived;
+    void showPage('communications', { replace: true });
+  };
 }
 
 function renderCommunicationCard(row) {
@@ -1693,12 +1825,15 @@ function renderCommunicationCard(row) {
     reference: [row.relatedJobNumber, row.relatedOrderNumber, row.relatedInvoiceNumber].filter(Boolean).join(' · '),
     hasLongSummary: String(row.summary || '').length > 280
   };
-  return `<article class="communication-card ${plan.overdue ? 'overdue' : ''}">
+  const actions = row.isArchived
+    ? `<span class="badge">Archived</span><button class="ghost-button" onclick="restoreLedgerEntityRecord('communications',${Number(row.id)},this)">Restore</button>`
+    : `<button class="ghost-button" onclick="openCommunication(${Number(row.id)})">Edit</button><button class="danger-button" onclick="archiveLedgerEntityRecord('communications',${Number(row.id)},this)">Archive</button>`;
+  return `<article class="communication-card ${plan.overdue && !row.isArchived ? 'overdue' : ''} ${row.isArchived ? 'archived-record' : ''}">
     <div class="communication-rail"><span>${escapeHtml(plan.direction)}</span><i></i></div>
     <div class="communication-main">
       <div class="card-header-lite">
         <div><h3>${escapeHtml(plan.subject)}</h3><p class="muted">${escapeHtml(plan.customerName)} · ${escapeHtml(plan.channel)} · <span title="${escapeHtml(when.full)}">${escapeHtml(when.relative || when.exact)}</span></p></div>
-        <div class="actions">${badgeFor(plan.direction, row.needsReview)}${plan.followUpOpen ? `<span class="badge ${plan.overdue ? 'bad' : 'warn'}">${escapeHtml(plan.followUpBadge)}</span>` : ''}<button class="ghost-button" onclick="openCommunication(${Number(row.id)})">Edit</button></div>
+        <div class="actions">${badgeFor(plan.direction, row.needsReview && !row.isArchived)}${plan.followUpOpen && !row.isArchived ? `<span class="badge ${plan.overdue ? 'bad' : 'warn'}">${escapeHtml(plan.followUpBadge)}</span>` : ''}${actions}</div>
       </div>
       <p class="communication-summary ${plan.hasLongSummary ? 'long-summary' : ''}">${escapeHtml(plan.summary)}</p>
       ${plan.reference ? `<small class="communication-reference">Linked: ${escapeHtml(plan.reference)}</small>` : ''}
@@ -1708,10 +1843,10 @@ function renderCommunicationCard(row) {
 }
 
 window.openCommunication = async id => {
-  const context = createPageRenderContext('communications');
+  const context = createPageVisitContext('communications');
   try {
     const rows = await api('/api/customer-communications');
-    if (!isPageRenderContextCurrent(context)) return;
+    if (!isPageVisitContextCurrent(context)) return;
     const row = rows.find(item => Number(item.id) === Number(id));
     if (row) openModal(configs.communications, row);
     else toast('The communication is no longer active.', 'error');
@@ -1721,18 +1856,26 @@ window.openCommunication = async id => {
 };
 
 async function renderPrinterQueue(el) {
-  const [rows, jobs] = await Promise.all([api('/api/printer-queue-items'), api('/api/customer-jobs')]);
+  const [allRows, jobs] = await Promise.all([
+    api('/api/printer-queue-items?includeArchived=true'),
+    api('/api/customer-jobs')
+  ]);
+  const activeRows = allRows.filter(row => !row.isArchived);
+  const archivedRows = allRows.filter(row => row.isArchived);
+  const rows = appState.printerQueueIncludeArchived ? allRows : activeRows;
   const activeJobs = jobs.filter(job => !['Paid','Completed','Cancelled'].includes(job.status));
-  const active = rows.filter(row => !['Completed','Cancelled'].includes(row.status));
-  const printing = rows.filter(row => row.status === 'Printing');
-  const attention = rows.filter(row => row.status === 'Needs Attention' || row.status === 'Paused');
+  const active = activeRows.filter(row => !['Completed','Cancelled'].includes(row.status));
+  const printing = activeRows.filter(row => row.status === 'Printing');
+  const attention = activeRows.filter(row => row.status === 'Needs Attention' || row.status === 'Paused');
+  const completed = activeRows.filter(row => row.status === 'Completed');
   const queuedHours = active.reduce((total, row) => total + Number(row.estimatedHours || 0), 0);
   const columns = [
-    ['Queued', rows.filter(row => row.status === 'Queued')],
-    ['Ready', rows.filter(row => row.status === 'Ready')],
+    ['Queued', activeRows.filter(row => row.status === 'Queued')],
+    ['Ready', activeRows.filter(row => row.status === 'Ready')],
     ['Printing', printing],
     ['Paused / Attention', attention],
-    ['Completed', rows.filter(row => row.status === 'Completed').slice(0, 12)]
+    ['Completed', completed.slice(0, 12), completed.length],
+    ...(appState.printerQueueIncludeArchived ? [['Archived', archivedRows]] : [])
   ];
 
   el.innerHTML = `
@@ -1745,7 +1888,8 @@ async function renderPrinterQueue(el) {
       <div class="hero-actions">
         <button class="primary-button" onclick="quickOpen('printerQueue','queue')">Add Queue Item</button>
         <button class="ghost-button dark" onclick="showPage('customerJobs')">Open Customer Jobs</button>
-        <a class="ghost-button dark" href="/api/export/printer-queue-items">Export CSV</a>
+        <button class="ghost-button dark" id="printerQueueArchiveToggle" type="button" aria-pressed="${appState.printerQueueIncludeArchived ? 'true' : 'false'}">${appState.printerQueueIncludeArchived ? 'Hide Archive' : `Show Archive (${archivedRows.length})`}</button>
+        <a class="ghost-button dark" href="/api/export/printer-queue-items${appState.printerQueueIncludeArchived ? '?includeArchived=true' : ''}">Export CSV</a>
       </div>
     </section>
     <section class="kpi-grid">
@@ -1761,32 +1905,40 @@ async function renderPrinterQueue(el) {
         <button class="primary-button" onclick="queueSelectedCustomerJob()">Add Selected Job to Queue</button>
       </div>
     </section>
-    <section class="printer-board">
-      ${columns.map(([status, items]) => `<section class="printer-board-column">
-        <div class="printer-board-column-head"><h3>${escapeHtml(status)}</h3><span class="badge">${items.length}</span></div>
+    <section class="printer-board" style="--printer-board-columns:${columns.length}">
+      ${columns.map(([status, items, totalCount = items.length]) => `<section class="printer-board-column">
+        <div class="printer-board-column-head"><h3>${escapeHtml(status)}</h3><span class="badge">${totalCount}</span></div>
+        ${totalCount > items.length ? `<p class="muted">Showing the latest ${items.length} of ${totalCount} completed prints.</p>` : ''}
         <div class="printer-board-cards">${items.length ? items.map(renderPrinterQueueCard).join('') : `<div class="empty-state compact"><div class="empty-title">No ${escapeHtml(status.toLowerCase())} prints.</div><div class="empty-desc">Queue items will appear here when their status changes.</div></div>`}</div>
       </section>`).join('')}
     </section>`;
   appState.printerQueueRows = rows;
   appState.printerQueueJobs = jobs;
+  qs('#printerQueueArchiveToggle').onclick = () => {
+    appState.printerQueueIncludeArchived = !appState.printerQueueIncludeArchived;
+    void showPage('printerQueue', { replace: true });
+  };
 }
 
 function renderPrinterQueueCard(row) {
   const progress = Math.max(0, Math.min(100, Number(row.progressPercent || 0)));
-  const buttons = row.status === 'Printing'
+  const statusButtons = row.status === 'Printing'
     ? `<button class="ghost-button" onclick="updatePrinterQueueStatus(${Number(row.id)},'Paused')">Pause</button><button class="primary-button" onclick="updatePrinterQueueStatus(${Number(row.id)},'Completed')">Complete</button>`
     : row.status === 'Completed' || row.status === 'Cancelled'
       ? ''
       : `<button class="ghost-button" onclick="updatePrinterQueueStatus(${Number(row.id)},'Ready')">Ready</button><button class="primary-button" onclick="updatePrinterQueueStatus(${Number(row.id)},'Printing')">Start</button>`;
-  return `<article class="printer-queue-card ${row.status === 'Needs Attention' ? 'attention' : ''}">
-    <div class="printer-queue-card-head"><span class="badge ${row.priority === 'High' ? 'bad' : row.priority === 'Normal' ? 'warn' : ''}">${escapeHtml(row.priority)}</span><button class="table-link" onclick="openPrinterQueueItem(${Number(row.id)})">Edit</button></div>
+  const actions = row.isArchived
+    ? `<button class="ghost-button" onclick="restoreLedgerEntityRecord('printerQueue',${Number(row.id)},this)">Restore</button>`
+    : `${statusButtons}<button class="danger-button" onclick="archiveLedgerEntityRecord('printerQueue',${Number(row.id)},this)">Archive</button>`;
+  return `<article class="printer-queue-card ${row.status === 'Needs Attention' && !row.isArchived ? 'attention' : ''} ${row.isArchived ? 'archived-record' : ''}">
+    <div class="printer-queue-card-head"><span class="badge ${row.isArchived ? '' : row.priority === 'High' ? 'bad' : row.priority === 'Normal' ? 'warn' : ''}">${escapeHtml(row.isArchived ? 'Archived' : row.priority)}</span>${row.isArchived ? '' : `<button class="table-link" onclick="openPrinterQueueItem(${Number(row.id)})">Edit</button>`}</div>
     <h4>${escapeHtml(row.jobName || 'Unnamed print')}</h4>
     <p>${escapeHtml(row.customerName || 'No customer')} · ${escapeHtml(row.printerName || 'Unassigned printer')}</p>
     <div class="queue-progress"><i style="width:${progress}%"></i></div>
     <small>${progress.toFixed(0)}% · ${Number(row.estimatedHours || 0).toFixed(1)}h est. · ${Number(row.quantity || 1)} unit${Number(row.quantity || 1) === 1 ? '' : 's'}</small>
     <small>${escapeHtml([row.material, row.color].filter(Boolean).join(' / ') || 'Material not assigned')}${row.failureCount ? ` · ${Number(row.failureCount)} failed attempt${Number(row.failureCount) === 1 ? '' : 's'}` : ''}</small>
     ${row.estimatedFinish ? `<small>Finish: ${escapeHtml(formatTimelineDateTime(row.estimatedFinish).exact)}</small>` : ''}
-    <div class="actions">${buttons}</div>
+    <div class="actions">${actions}</div>
   </article>`;
 }
 
@@ -1838,7 +1990,7 @@ window.updatePrinterQueueStatus = async (id, status) => {
         body: JSON.stringify({ ...latest, status })
       });
       toast(`Production item marked ${status}.`, 'success');
-      if (isPageRenderContextCurrent(origin)) await showPage('printerQueue', { replace: true });
+      if (appState.currentPage === origin.page) await showPage(origin.page, { replace: true });
     } catch (err) {
       toast(`Production status update failed: ${friendlyApiError(err.message)}`, 'error');
     }
@@ -1909,13 +2061,16 @@ function formatShortDate(value) {
 }
 
 async function renderEntity(el, config) {
-  const rows = await api(`/api/${config.route}`);
   const tableState = tablePageState[config.route]
     || (tablePageState[config.route] = { page: 0, pageSize: 25, filter: '', statusFilter: '', ...defaultSortFor(config) });
+  const allRows = await api(`/api/${config.route}?includeArchived=true`);
+  const activeRows = allRows.filter(row => !row.isArchived);
+  const archivedCount = allRows.length - activeRows.length;
+  const rows = tableState.includeArchived ? allRows : activeRows;
   const supportsReview = (config.fields || []).some(field => field.name === 'needsReview')
     || (config.columns || []).includes('needsReview');
-  const reviewCount = rows.filter(x => x.needsReview === true).length;
-  const moneyTotal = summarizeMoney(rows, config);
+  const reviewCount = activeRows.filter(x => x.needsReview === true).length;
+  const moneyTotal = summarizeMoney(activeRows, config);
   el.innerHTML = `
     <div class="page-head">
       <div>
@@ -1926,17 +2081,18 @@ async function renderEntity(el, config) {
         ${config.route === 'products' ? '<button class="ghost-button" onclick="showPage(\'aiOperations\'); setTimeout(()=>document.getElementById(\'aiProductImportCard\')?.scrollIntoView({behavior:\'smooth\'}),120)">AI Product Tools</button>' : ''}
         ${config.route === 'customer-jobs' ? '<button class="ghost-button" onclick="showPage(\'aiOperations\'); setTimeout(()=>document.getElementById(\'aiJobPlannerCard\')?.scrollIntoView({behavior:\'smooth\'}),120)">AI Job Planner</button>' : ''}
         <button class="primary-button" id="addRowBtn">Add New</button>
+        <button class="ghost-button" id="archiveRowsBtn" type="button" aria-pressed="${tableState.includeArchived ? 'true' : 'false'}" title="${tableState.includeArchived ? 'Hide archived records from this table.' : 'Show archived records so they can be restored.'}">${tableState.includeArchived ? 'Hide Archive' : `Show Archive (${archivedCount})`}</button>
         ${supportsReview ? `<button class="ghost-button" id="reviewQueueBtn" type="button" aria-pressed="${tableState.statusFilter === 'needs-review'}" title="${tableState.statusFilter === 'needs-review' ? 'Show every active record again.' : 'Show only records that still need review.'}">${tableState.statusFilter === 'needs-review' ? 'Show All' : 'Review Queue'}</button>` : ''}
-        <a class="ghost-button" href="/api/export/${config.route}" title="Export this table to a CSV file you can open in Excel.">Export CSV</a>
+        <a class="ghost-button" href="/api/export/${config.route}${tableState.includeArchived ? '?includeArchived=true' : ''}" title="Export the records currently included by the archive visibility setting to a CSV file you can open in Excel.">Export CSV</a>
       </div>
     </div>
     <section class="entity-strip">
-      <div><span>Active Rows</span><strong>${rows.length}</strong></div>
+      <div><span>Active Rows</span><strong>${activeRows.length}</strong></div>
       ${supportsReview
         ? `<div><span>Review Queue</span><strong>${reviewCount}</strong></div>`
         : '<div><span>Review Workflow</span><strong>Not used</strong></div>'}
-      <div><span>Visible Money</span><strong>${formatMoney(moneyTotal)}</strong></div>
-      <div><span>Export Ready</span><strong>CSV</strong></div>
+      <div><span>Active Money</span><strong>${formatMoney(moneyTotal)}</strong></div>
+      <div><span>Archived</span><strong>${archivedCount}</strong></div>
     </section>
     <div class="card">
       <div class="table-tools">
@@ -1946,12 +2102,19 @@ async function renderEntity(el, config) {
           ${supportsReview ? `<option value="needs-review"${tableState.statusFilter === 'needs-review' ? ' selected' : ''}>Needs review</option>` : ''}
           <option value="open"${tableState.statusFilter === 'open' ? ' selected' : ''}>Open / sent / unpaid</option>
           <option value="paid"${tableState.statusFilter === 'paid' ? ' selected' : ''}>Paid / done / refunded</option>
+          ${tableState.includeArchived ? `<option value="archived"${tableState.statusFilter === 'archived' ? ' selected' : ''}>Archived only</option>` : ''}
         </select>
-        <span class="badge">${rows.length} active rows</span>
+        <span class="badge">${activeRows.length} active${tableState.includeArchived ? ` · ${archivedCount} archived` : ''}</span>
       </div>
       <div id="tableArea"></div>
     </div>`;
   qs('#addRowBtn').onclick = () => openModal(config, null);
+  qs('#archiveRowsBtn').onclick = async () => {
+    tableState.includeArchived = !tableState.includeArchived;
+    if (!tableState.includeArchived && tableState.statusFilter === 'archived') tableState.statusFilter = '';
+    tableState.page = 0;
+    await showPage(appState.currentPage, { replace: true });
+  };
   if (supportsReview) qs('#reviewQueueBtn').onclick = () => {
     tableState.statusFilter = tableState.statusFilter === 'needs-review' ? '' : 'needs-review';
     tableState.page = 0;
@@ -1976,16 +2139,19 @@ async function renderEntity(el, config) {
 }
 
 async function renderActionCenter(el) {
-  const [rawRows, preview] = await Promise.all([
-    api('/api/action-items'),
-    api('/api/action-items/automation-preview')
-  ]);
-  const rows = rawRows.map(row => ({ ...row, origin: actionItemOrigin(row) }));
   const tableState = tablePageState[configs.actions.route]
     || (tablePageState[configs.actions.route] = { page: 0, pageSize: 25, filter: '', statusFilter: '', ...defaultSortFor(configs.actions) });
-  const open = rows.filter(row => row.status !== 'Done').length;
-  const high = rows.filter(row => row.status !== 'Done' && row.priority === 'High').length;
-  const waiting = rows.filter(row => row.status === 'Waiting').length;
+  const [allRawRows, preview] = await Promise.all([
+    api('/api/action-items?includeArchived=true'),
+    api('/api/action-items/automation-preview')
+  ]);
+  const allRows = allRawRows.map(row => ({ ...row, origin: actionItemOrigin(row) }));
+  const activeRows = allRows.filter(row => !row.isArchived);
+  const archivedCount = allRows.length - activeRows.length;
+  const rows = tableState.includeArchived ? allRows : activeRows;
+  const open = activeRows.filter(row => row.status !== 'Done').length;
+  const high = activeRows.filter(row => row.status !== 'Done' && row.priority === 'High').length;
+  const waiting = activeRows.filter(row => row.status === 'Waiting').length;
   const ready = Number(preview.readyToCreateCount || 0);
   const candidates = preview.candidates || [];
 
@@ -2033,7 +2199,8 @@ async function renderActionCenter(el) {
       <div><h2>Action Items</h2><p>Open means work remains, Waiting means parked for missing information, and Done means resolved. Generated task notes preserve their trigger and assistance source.</p></div>
       <div class="actions">
         <button class="primary-button" id="addRowBtn">Add New</button>
-        <a class="ghost-button" href="/api/export/action-items">Export CSV</a>
+        <button class="ghost-button" id="archiveRowsBtn" type="button" aria-pressed="${tableState.includeArchived ? 'true' : 'false'}">${tableState.includeArchived ? 'Hide Archive' : `Show Archive (${archivedCount})`}</button>
+        <a class="ghost-button" href="/api/export/action-items${tableState.includeArchived ? '?includeArchived=true' : ''}">Export CSV</a>
       </div>
     </div>
     <div class="card">
@@ -2043,13 +2210,20 @@ async function renderActionCenter(el) {
           <option value=""${tableState.statusFilter ? '' : ' selected'}>All actions</option>
           <option value="open"${tableState.statusFilter === 'open' ? ' selected' : ''}>Open / Waiting</option>
           <option value="paid"${tableState.statusFilter === 'paid' ? ' selected' : ''}>Done</option>
+          ${tableState.includeArchived ? `<option value="archived"${tableState.statusFilter === 'archived' ? ' selected' : ''}>Archived only</option>` : ''}
         </select>
-        <span class="badge">${rows.length} active rows</span>
+        <span class="badge">${activeRows.length} active${tableState.includeArchived ? ` · ${archivedCount} archived` : ''}</span>
       </div>
       <div id="tableArea"></div>
     </div>`;
 
   qs('#addRowBtn').onclick = () => openModal(configs.actions, null);
+  qs('#archiveRowsBtn').onclick = async () => {
+    tableState.includeArchived = !tableState.includeArchived;
+    if (!tableState.includeArchived && tableState.statusFilter === 'archived') tableState.statusFilter = '';
+    tableState.page = 0;
+    await showPage('actions', { replace: true });
+  };
   qs('#searchBox').oninput = event => {
     tableState.filter = event.target.value;
     renderEntityTable(configs.actions, rows, tableState.filter);
@@ -2106,10 +2280,10 @@ async function renderPersonDetail(el, mode, name) {
   const nameArg = jsStringAttr(name);
   const relationshipTypeArg = jsStringAttr(isCustomer ? 'Customer' : 'Vendor');
   const [parties, sales, invoices, docs, jobs, communications, expenses, bills, assets, auditDocs] = await Promise.all([
-    api('/api/parties'),
+    api('/api/parties?includeArchived=true'),
     api('/api/sales'),
     api('/api/receivable-invoices'),
-    api('/api/documents?includeArchived=true'),
+    api('/api/documents'),
     api('/api/customer-jobs'),
     api('/api/customer-communications'),
     api('/api/expenses'),
@@ -2117,7 +2291,8 @@ async function renderPersonDetail(el, mode, name) {
     api('/api/assets'),
     api('/api/audit-documents')
   ]);
-  const party = parties.find(p => sameName(p.name, name) && (isCustomer ? ['customer','both'].includes(String(p.partyType || '').toLowerCase()) : ['vendor','both'].includes(String(p.partyType || '').toLowerCase())));
+  const matchingParties = parties.filter(p => sameName(p.name, name) && (isCustomer ? ['customer','both'].includes(String(p.partyType || '').toLowerCase()) : ['vendor','both'].includes(String(p.partyType || '').toLowerCase())));
+  const party = matchingParties.find(p => !p.isArchived) || matchingParties[0];
   const detailPlan = isCustomer
     ? window.EpataRelationshipDirectory?.customerDetailSectionPlan?.(name, { sales, invoices, docs, jobs, communications, auditDocs })
     : window.EpataRelationshipDirectory?.vendorDetailSectionPlan?.(name, { expenses, bills, assets, auditDocs });
@@ -2179,8 +2354,11 @@ function renderPersonBusinessCard(party, isCustomer, name) {
     ['Default Platform', escapeHtml(party.defaultPlatform || 'Not provided')],
     ['Contact Type', escapeHtml(party.partyType || '')]
   ];
+  const contactAction = party.isArchived
+    ? `<div class="actions"><span class="badge">Archived</span><button class="primary-button" onclick="restoreLedgerEntityRecord('parties',${Number(party.id)},this)">Restore Contact</button></div>`
+    : `<button class="primary-button" onclick="openPersonContact(${nameArg},${isCustomer},${Number(party.id)})">Edit Contact</button>`;
   return `<section class="card person-business-card">
-    <div class="card-header-lite"><div><h3>${isCustomer ? 'Customer' : 'Vendor'} Business Card</h3><p class="muted">Reusable contact details stored in People / Vendors.</p></div><button class="primary-button" onclick="openPersonContact(${nameArg},${isCustomer},${Number(party.id)})">Edit Contact</button></div>
+    <div class="card-header-lite"><div><h3>${isCustomer ? 'Customer' : 'Vendor'} Business Card</h3><p class="muted">${party.isArchived ? 'This saved contact is archived. Restore it to edit or use it as an active contact.' : 'Reusable contact details stored in People / Vendors.'}</p></div>${contactAction}</div>
     <div class="ai-field-preview">${contact.map(([label,value]) => `<div><span>${escapeHtml(label)}</span><strong>${value}</strong></div>`).join('')}</div>
     ${party.notes ? `<div class="callout"><strong>Relationship Notes</strong><p>${escapeHtml(party.notes)}</p></div>` : ''}
   </section>`;
@@ -2200,27 +2378,35 @@ window.openPersonContact = async (name, isCustomer, id) => {
 
 async function renderRelationshipDirectory(el, mode) {
   const isCustomer = mode === 'customer';
-  const [parties, sales, invoices, docs, jobs, communications, expenses, bills, assets] = await Promise.all([
-    api('/api/parties'),
+  const showArchived = appState.relationshipArchiveVisibility[mode] === true;
+  const [allParties, sales, invoices, docs, jobs, communications, expenses, bills, assets] = await Promise.all([
+    api('/api/parties?includeArchived=true'),
     api('/api/sales'),
     api('/api/receivable-invoices'),
-    api('/api/documents?includeArchived=true'),
+    api('/api/documents'),
     api('/api/customer-jobs'),
     api('/api/customer-communications'),
     api('/api/expenses'),
     api('/api/bills'),
     api('/api/assets')
   ]);
-  const rows = isCustomer
-    ? buildCustomerRows(parties, sales, invoices, docs, jobs, communications)
-    : buildVendorRows(parties, expenses, bills, assets);
+  const archivedPartyCount = allParties.filter(party => party.isArchived
+    && (isCustomer
+      ? ['customer', 'both'].includes(String(party.partyType || '').toLowerCase())
+      : ['vendor', 'both'].includes(String(party.partyType || '').toLowerCase()))).length;
+  const allRows = isCustomer
+    ? buildCustomerRows(allParties, sales, invoices, docs, jobs, communications)
+    : buildVendorRows(allParties, expenses, bills, assets);
+  const rows = showArchived
+    ? allRows
+    : allRows.filter(row => Number(row.activePartyCount || 0) > 0 || Number(row.linkedRows || 0) > Number(row.partyCount || 0));
   const key = isCustomer ? 'customers-directory' : 'vendors-directory';
   if (!tablePageState[key]) tablePageState[key] = { page: 0, pageSize: 25, sortColumn: 'lastActivity', sortDir: 'desc' };
   const state = tablePageState[key];
   const directoryFilter = String(state.filter || '');
   const cols = isCustomer
-    ? ['name','linkedRows','sources','nameStatus','salesTotal','invoiceTotal','openAr','lastActivity']
-    : ['name','linkedRows','sources','nameStatus','expenseTotal','openAp','assetTotal','lastActivity'];
+    ? ['name','linkedRows','sources','contactStatus','nameStatus','salesTotal','invoiceTotal','openAr','lastActivity']
+    : ['name','linkedRows','sources','contactStatus','nameStatus','expenseTotal','openAp','assetTotal','lastActivity'];
 
   el.innerHTML = `
     <div class="page-head">
@@ -2230,21 +2416,27 @@ async function renderRelationshipDirectory(el, mode) {
       </div>
       <div class="actions">
         <button class="primary-button" id="addRelationshipBtn">Add ${isCustomer ? 'Customer' : 'Vendor'}</button>
+        <button class="ghost-button" id="relationshipArchiveToggle" type="button" aria-pressed="${showArchived ? 'true' : 'false'}">${showArchived ? 'Hide Contact Archive' : `Show Contact Archive (${archivedPartyCount})`}</button>
         <button class="ghost-button" onclick="showPage('${isCustomer ? 'sales' : 'expenses'}')">${isCustomer ? 'Open Sales' : 'Open Expenses'}</button>
       </div>
     </div>
     <div class="card">
       <div class="table-tools">
         <input class="search" id="relationshipSearch" placeholder="Search ${isCustomer ? 'customers' : 'vendors'}..." value="${escapeAttr(directoryFilter)}">
-        <span class="badge">${rows.length} ${isCustomer ? 'customers' : 'vendors'}</span>
+        <span class="badge">${rows.length} ${isCustomer ? 'customers' : 'vendors'}${showArchived ? ` · ${archivedPartyCount} archived contact${archivedPartyCount === 1 ? '' : 's'}` : ''}</span>
       </div>
       <div id="relationshipTable"></div>
     </div>`;
   qs('#addRelationshipBtn').onclick = () => openModal(configs.parties, { partyType: isCustomer ? 'Customer' : 'Vendor' });
+  qs('#relationshipArchiveToggle').onclick = () => {
+    appState.relationshipArchiveVisibility[mode] = !showArchived;
+    void showPage(isCustomer ? 'customers' : 'vendors', { replace: true });
+  };
   qs('#relationshipSearch').oninput = e => {
     state.filter = e.target.value;
     renderRelationshipTable(rows, cols, mode, state, state.filter);
   };
+  state.includeArchived = showArchived;
   renderRelationshipTable(rows, cols, mode, state, directoryFilter);
 }
 
@@ -2294,8 +2486,8 @@ function renderRelationshipTable(rows, cols, mode, state, filter) {
         <button class="ghost-button pager-btn" data-rel-page="last" aria-label="Last page" title="${state.page >= totalPages - 1 ? 'Already on the last page' : 'Go to the last page'}" ${state.page >= totalPages - 1 ? 'disabled' : ''}>»</button>
       </span>
     </div>`;
-  target.innerHTML = `<div class="table-wrap"><table><thead><tr>${cols.map(c => sortableHeader(config, state, c)).join('')}</tr></thead><tbody>
-    ${pageRows.map(row => `<tr>${cols.map(c => `<td>${relationshipCell(row, c, mode)}</td>`).join('')}</tr>`).join('')}
+  target.innerHTML = `<div class="table-wrap"><table><thead><tr>${cols.map(c => c === 'contactStatus' ? '<th>Contact Status</th>' : sortableHeader(config, state, c)).join('')}<th>Contact Actions</th></tr></thead><tbody>
+    ${pageRows.map(row => `<tr class="${Number(row.activePartyCount || 0) === 0 && Number(row.archivedPartyCount || 0) > 0 && Number(row.linkedRows || 0) <= Number(row.partyCount || 0) ? 'archived-record' : ''}">${cols.map(c => `<td>${relationshipCell(row, c, mode)}</td>`).join('')}<td class="row-actions">${renderRelationshipContactActions(row, mode)}</td></tr>`).join('')}
   </tbody></table></div>${pagerHtml}`;
   qsa('[data-sort-col]').forEach(btn => btn.onclick = () => {
     const col = btn.dataset.sortCol;
@@ -2316,6 +2508,30 @@ function renderRelationshipTable(rows, cols, mode, state, filter) {
     state.page = 0;
     renderRelationshipTable(rows, cols, mode, state, filter);
   });
+  qsa('[data-rel-edit]').forEach(btn => btn.onclick = () => openLedgerEntityRecord('parties', Number(btn.dataset.relEdit)));
+  qsa('[data-rel-archive]').forEach(btn => btn.onclick = () => archiveLedgerEntityRecord('parties', Number(btn.dataset.relArchive), btn));
+  qsa('[data-rel-restore]').forEach(btn => btn.onclick = () => restoreLedgerEntityRecord('parties', Number(btn.dataset.relRestore), btn));
+  qsa('[data-rel-add]').forEach(btn => btn.onclick = () => openPersonContact(btn.dataset.relName || '', mode === 'customer', 0));
+  qsa('[data-rel-show-archive]').forEach(btn => btn.onclick = () => {
+    appState.relationshipArchiveVisibility[mode] = true;
+    void showPage(mode === 'customer' ? 'customers' : 'vendors', { replace: true });
+  });
+}
+
+function renderRelationshipContactActions(row, mode) {
+  const allRecords = Array.isArray(row.partyRecords) ? row.partyRecords : [];
+  const records = appState.relationshipArchiveVisibility[mode]
+    ? allRecords
+    : allRecords.filter(record => !record.isArchived);
+  if (!records.length && allRecords.some(record => record.isArchived)) {
+    return `<button class="ghost-button" type="button" data-rel-show-archive>Show Archived Contact${allRecords.filter(record => record.isArchived).length === 1 ? '' : 's'}</button>`;
+  }
+  if (!records.length) {
+    return `<button class="ghost-button" type="button" data-rel-add data-rel-name="${escapeAttr(row.name || '')}">Add Contact</button>`;
+  }
+  return records.map(record => record.isArchived
+    ? `<button class="ghost-button" type="button" data-rel-restore="${Number(record.id)}">Restore${records.length > 1 ? ` #${Number(record.id)}` : ''}</button>`
+    : `<button class="ghost-button" type="button" data-rel-edit="${Number(record.id)}">Edit${records.length > 1 ? ` #${Number(record.id)}` : ''}</button><button class="danger-button" type="button" data-rel-archive="${Number(record.id)}">Archive${records.length > 1 ? ` #${Number(record.id)}` : ''}</button>`).join('');
 }
 
 function relationshipCell(row, key, mode) {
@@ -2324,6 +2540,13 @@ function relationshipCell(row, key, mode) {
     return row.duplicateNameWarning
       ? `<span class="badge warn" title="${escapeAttr(row.duplicateNameWarning)}">${escapeHtml(row.nameStatus)}</span>`
       : `<span class="badge good">${escapeHtml(row.nameStatus || 'OK')}</span>`;
+  }
+  if (key === 'contactStatus') {
+    const active = Number(row.activePartyCount || 0);
+    const archived = Number(row.archivedPartyCount || 0);
+    if (active > 0) return `<span class="badge good">${active} active</span>${archived ? ` <span class="badge">${archived} archived</span>` : ''}`;
+    if (archived > 0) return `<span class="badge">Archived</span>`;
+    return '<span class="badge warn">Name-linked only</span>';
   }
   if (moneyFields.has(key) || ['salesTotal','invoiceTotal','openAr','expenseTotal','openAp','assetTotal'].includes(key)) return escapeHtml(formatMoney(row[key]));
   if (key === 'lastActivity') return escapeHtml(formatShortDate(row[key]));
@@ -2430,6 +2653,24 @@ function recordOpenButton(row) {
 }
 
 function relationshipOpenButton(configKey, row) {
+  const generatedSource = configKey && configs[configKey]
+    ? generatedLedgerRecordSource(configs[configKey], row)
+    : null;
+  if (generatedSource?.kind === 'invoice-record') {
+    return `<button class="ghost-button" data-rel-open-kind="invoice-record" data-rel-open-number="${escapeAttr(generatedSource.docNumber)}" onclick="openInvoiceRecordSource(${jsStringAttr(generatedSource.docNumber)}, ${generatedSource.includeArchived === true})">${escapeHtml(generatedSource.label)}</button>`;
+  }
+  if (generatedSource?.kind === 'modal') {
+    return `<button class="ghost-button" data-rel-open-kind="ledger" data-rel-open-config="${escapeAttr(generatedSource.configKey)}" data-rel-open-id="${Number(generatedSource.rowId)}" onclick="openLedgerEntityRecord(${jsStringAttr(generatedSource.configKey)}, ${Number(generatedSource.rowId)})">${escapeHtml(generatedSource.label)}</button>`;
+  }
+  if (generatedSource?.kind === 'ledger-record') {
+    return `<button class="ghost-button" data-rel-open-kind="ledger-record" data-rel-open-config="${escapeAttr(generatedSource.configKey)}" data-rel-open-id="${Number(generatedSource.rowId)}" onclick="openLedgerSourceRecord(${jsStringAttr(generatedSource.configKey)}, ${Number(generatedSource.rowId)}, ${jsStringAttr(generatedSource.filter || '')})">${escapeHtml(generatedSource.label)}</button>`;
+  }
+  if (generatedSource?.kind === 'ledger-list') {
+    return `<button class="ghost-button" data-rel-open-kind="ledger-list" onclick="openLedgerSourceList(${jsStringAttr(generatedSource.page)}, ${jsStringAttr(generatedSource.route)}, ${jsStringAttr(generatedSource.filter || '')})">${escapeHtml(generatedSource.label)}</button>`;
+  }
+  if (generatedSource?.kind === 'page') {
+    return `<button class="ghost-button" data-rel-open-kind="page" data-rel-open-page="${escapeAttr(generatedSource.page)}" onclick="showPage(${jsStringAttr(generatedSource.page)})">${escapeHtml(generatedSource.label)}</button>`;
+  }
   const target = window.EpataRelationshipDirectory?.relationshipLinkedRowTarget?.(configKey, row) || { kind: 'none' };
   const id = Number(target.rowId || 0);
   const label = escapeHtml(target.label || 'Open');
@@ -2438,6 +2679,9 @@ function relationshipOpenButton(configKey, row) {
   }
   if (target.kind === 'ledger' && target.configKey && id > 0) {
     return `<button class="ghost-button" data-rel-open-kind="ledger" data-rel-open-config="${escapeAttr(target.configKey)}" data-rel-open-id="${id}" onclick="openLedgerEntityRecord(${jsStringAttr(target.configKey)}, ${id})">${label}</button>`;
+  }
+  if (target.kind === 'invoice-record' && target.docNumber) {
+    return `<button class="ghost-button" data-rel-open-kind="invoice-record" data-rel-open-number="${escapeAttr(target.docNumber)}" onclick="openInvoiceRecordSource(${jsStringAttr(target.docNumber)}, ${target.includeArchived === true})">${label}</button>`;
   }
   if (target.kind === 'page' && target.page) {
     return `<button class="ghost-button" data-rel-open-kind="page" data-rel-open-page="${escapeAttr(target.page)}" data-rel-open-id="${id}" onclick="showPage(${jsStringAttr(target.page)})">${label}</button>`;
@@ -2527,6 +2771,70 @@ function sortableHeader(config, state, column) {
   return `<th><button class="sort-header ${active ? 'active' : ''}" type="button" data-sort-col="${escapeHtml(column)}">${labelize(column)} <span>${arrow}</span></button></th>`;
 }
 
+function generatedLedgerRecordSource(config, row) {
+  const route = String(config?.route || '');
+  const rawSourceProof = String(row?.sourceProof || '').trim();
+  const sourceProof = rawSourceProof.toLowerCase();
+  if (route === 'receivable-invoices' && sourceProof.startsWith('unified invoice ')) {
+    return { kind: 'invoice-record', docNumber: rawSourceProof.slice('Unified invoice '.length).trim(), includeArchived: true, label: 'Open Source Invoice' };
+  }
+  if (route === 'customer-jobs' && sourceProof.startsWith('unified estimate ')) {
+    return { kind: 'invoice-record', docNumber: rawSourceProof.slice('Unified estimate '.length).trim(), includeArchived: true, label: 'Open Source Estimate' };
+  }
+  if (route === 'sales' && sourceProof.startsWith('unified invoice ')) {
+    return { kind: 'invoice-record', docNumber: rawSourceProof.slice('Unified invoice '.length).trim(), includeArchived: true, label: 'Open Source Invoice' };
+  }
+  if (route === 'sales' && (Number(row?.sourceReceivableInvoiceId || 0) > 0
+    || (String(row?.notes || '').toLowerCase().includes('automatically')
+      && String(row?.notes || '').toLowerCase().includes('receivable invoice')))) {
+    const rowId = Number(row?.sourceReceivableInvoiceId || 0);
+    const filter = String(row?.invoiceNumber || row?.orderNumber || '').trim();
+    if (rowId > 0 && row?.isArchived !== true) return { kind: 'modal', configKey: 'receivables', rowId, label: 'Open Source AR' };
+    if (rowId > 0) return { kind: 'ledger-record', configKey: 'receivables', rowId, filter, label: 'Open Source AR' };
+    return { kind: 'ledger-list', page: 'receivables', route: 'receivable-invoices', filter, label: 'Open Source AR' };
+  }
+  return null;
+}
+
+async function openGeneratedLedgerSource(config, row) {
+  const target = generatedLedgerRecordSource(config, row);
+  if (!target) return;
+  if (target.kind === 'invoice-record') {
+    await openInvoiceRecordSource(target.docNumber, target.includeArchived);
+    return;
+  }
+  if (target.kind === 'modal') {
+    await openLedgerEntityRecord(target.configKey, target.rowId);
+    return;
+  }
+  if (target.kind === 'ledger-record') {
+    await openLedgerSourceRecord(target.configKey, target.rowId, target.filter);
+    return;
+  }
+  if (target.kind === 'ledger-list') {
+    await openLedgerSourceList(target.page, target.route, target.filter);
+    return;
+  }
+  await showPage(target.page);
+}
+
+function renderEntityRowActions(config, row) {
+  const generatedSource = generatedLedgerRecordSource(config, row);
+  const viewFile = config.route === 'audit-documents' && row.filePathOrUrl
+    ? `<button class="ghost-button" type="button" onclick="openAuditDocFile(${Number(row.id)})">View File</button>`
+    : '';
+  if (generatedSource) {
+    return `${viewFile}<button class="ghost-button" type="button" data-open-generated="${Number(row.id)}" title="This row is controlled by its source record.">${escapeHtml(generatedSource.label)}</button>`;
+  }
+  if (row.isArchived === true) {
+    return `${viewFile}<button class="ghost-button" type="button" data-restore="${Number(row.id)}">Restore</button>`;
+  }
+  return `${viewFile}
+    <button class="ghost-button" data-edit="${Number(row.id)}">Edit</button>
+    ${row.needsReview === true ? `<button class="ghost-button" data-reviewed="${Number(row.id)}">Reviewed</button>` : ''}
+    <button class="danger-button" data-delete="${Number(row.id)}">Archive</button>`;
+}
+
 function renderEntityTable(config, rows, filter) {
   const statusFilter = qs('#statusFilter')?.value || '';
   const cols = config.columns;
@@ -2575,13 +2883,10 @@ function renderEntityTable(config, rows, filter) {
     </div>`;
 
   tableArea.innerHTML = `<div class="table-wrap"><table><thead><tr>${cols.map(c=>sortableHeader(config, state, c)).join('')}<th>Actions</th></tr></thead><tbody>${pageRows.map(row => `
-    <tr>
+    <tr class="${row.isArchived === true ? 'archived-record' : ''}">
       ${cols.map(c => `<td>${cell(row, c)}</td>`).join('')}
       <td class="row-actions">
-        ${config.route === 'audit-documents' && row.filePathOrUrl ? `<button class="ghost-button" type="button" onclick="openAuditDocFile(${Number(row.id)})">View File</button>` : ''}
-        <button class="ghost-button" data-edit="${row.id}">Edit</button>
-        ${row.needsReview === true ? `<button class="ghost-button" data-reviewed="${row.id}">Reviewed</button>` : ''}
-        <button class="danger-button" data-delete="${row.id}">Archive</button>
+        ${renderEntityRowActions(config, row)}
       </td>
     </tr>`).join('')}</tbody></table></div>${pagerHtml}`;
 
@@ -2595,6 +2900,8 @@ function renderEntityTable(config, rows, filter) {
   qsa('[data-edit]').forEach(btn => btn.onclick = () => openModal(config, sorted.find(r => r.id == btn.dataset.edit)));
   qsa('[data-reviewed]').forEach(btn => btn.onclick = () => markReviewed(config, sorted.find(r => r.id == btn.dataset.reviewed), btn));
   qsa('[data-delete]').forEach(btn => btn.onclick = () => archiveRow(config, btn.dataset.delete, btn));
+  qsa('[data-restore]').forEach(btn => btn.onclick = () => restoreRow(config, btn.dataset.restore, btn));
+  qsa('[data-open-generated]').forEach(btn => btn.onclick = () => openGeneratedLedgerSource(config, sorted.find(r => r.id == btn.dataset.openGenerated)));
 
   qs('#pgFirst')?.addEventListener('click', () => { state.page = 0; renderEntityTable(config, rows, filter); });
   qs('#pgPrev')?.addEventListener('click', () => { state.page = Math.max(0, state.page - 1); renderEntityTable(config, rows, filter); });
@@ -2609,6 +2916,8 @@ function fallbackEntityTableModel(rows, config, state, filter, statusFilter) {
     const blob = JSON.stringify(row).toLowerCase();
     const status = String(row.status || '').toLowerCase();
     if (term && !blob.includes(term)) return false;
+    if (statusFilter === 'archived') return row.isArchived === true;
+    if (statusFilter && row.isArchived === true) return false;
     if (statusFilter === 'needs-review') return row.needsReview === true || status.includes('review');
     if (statusFilter === 'open') return /open|sent|unpaid|partial|waiting|lead|quoted|progress/.test(blob);
     if (statusFilter === 'paid') return /paid|done|completed|fulfilled|refunded/.test(blob);
@@ -2649,16 +2958,22 @@ function cell(row, key) {
   if (key === 'vendorName' && row[key]) {
     return `<button class="table-link" onclick="event.stopPropagation(); showPage(${jsStringAttr(`vendorDetail:${encodeURIComponent(row[key])}`)})">${escapeHtml(row[key])}</button>`;
   }
-  if (key === 'activeStatus') return badgeFor(row.isActive === false ? 'Inactive' : 'Active');
-  if (key === 'needsReview') return row.needsReview ? badgeFor('Needs Review', true) : badgeFor('OK');
-  if (key.toLowerCase().includes('status') || key === 'priority') return badgeFor(row[key], row.needsReview);
+  if (key === 'activeStatus') return row.isArchived === true
+    ? `<span class="badge">${row.isActive === false ? 'Inactive' : 'Active'}</span>`
+    : badgeFor(row.isActive === false ? 'Inactive' : 'Active');
+  if (key === 'needsReview') return row.isArchived === true
+    ? `<span class="badge">${row.needsReview ? 'Needs Review' : 'OK'}</span>`
+    : row.needsReview ? badgeFor('Needs Review', true) : badgeFor('OK');
+  if (key.toLowerCase().includes('status') || key === 'priority') return row.isArchived === true
+    ? `<span class="badge">${escapeHtml(row[key] ?? '')}</span>`
+    : badgeFor(row[key], row.needsReview);
   if (key === 'estimatedCost') {
     const cost = (Number(row.grams || 0) * Number(row.materialCostPerGram || 0))
                + (Number(row.printHours || 0) * Number(row.machineRatePerHour || 0))
                + Number(row.packagingCost || 0);
     const price = Number(row.targetPrice || 0);
     const label = formatMoney(cost);
-    if (cost > 0 && price > 0 && price < cost) return `<span style="color:#dc2626;font-weight:700" title="Target price is below estimated cost">${label} ⚠</span>`;
+    if (row.isArchived !== true && cost > 0 && price > 0 && price < cost) return `<span style="color:#dc2626;font-weight:700" title="Target price is below estimated cost">${label} ⚠</span>`;
     return escapeHtml(label);
   }
   if (key === 'netBeforeCogs') {
@@ -2668,7 +2983,7 @@ function cell(row, key) {
   if (key === 'estNetAfterCogs') {
     const net = Number(row.customerPaid || 0) - Number(row.platformFees || 0) - Number(row.shippingLabelCost || 0) - Number(row.refunds || 0) - Number(row.estimatedCogs || 0);
     const label = formatMoney(net);
-    if (net < 0) return `<span style="color:#dc2626;font-weight:700" title="Est. net is negative after COGS">${escapeHtml(label)} ⚠</span>`;
+    if (row.isArchived !== true && net < 0) return `<span style="color:#dc2626;font-weight:700" title="Est. net is negative after COGS">${escapeHtml(label)} ⚠</span>`;
     return escapeHtml(label);
   }
   return escapeHtml(formatValue(row[key], key));
@@ -3521,11 +3836,26 @@ async function archiveRow(config, id, button = null) {
     try {
       await api(`/api/${config.route}/${id}`, { method: 'DELETE' });
       toast('Archived.', 'success');
-      if (isPageRenderContextCurrent(origin)) await showPage(origin.page, { replace: true });
+      if (appState.currentPage === origin.page) await showPage(origin.page, { replace: true });
     } catch (err) {
       toast(`Archive failed: ${friendlyApiError(err.message)}`, 'error');
     }
   }, { button, busyText: 'Archiving...' });
+}
+
+async function restoreRow(config, id, button = null) {
+  const origin = createPageRenderContext(appState.currentPage);
+  return runExclusiveAction(`restore:${config.route}:${id}`, 'Restore already in progress.', async () => {
+    try {
+      await api(`/api/${config.route}/${id}/restore`, { method: 'POST', body: '{}' });
+      toast('Restored.', 'success');
+      if (appState.currentPage === origin.page) await showPage(origin.page, { replace: true });
+      return true;
+    } catch (err) {
+      toast(`Restore failed: ${friendlyApiError(err.message)}`, 'error');
+      return false;
+    }
+  }, { button, busyText: 'Restoring...' });
 }
 async function markReviewed(config, row, button = null) {
   if (!row) return;
@@ -3541,7 +3871,7 @@ async function markReviewed(config, row, button = null) {
         body: JSON.stringify({ ...latest, needsReview: false })
       });
       toast('Marked reviewed.', 'success');
-      if (isPageRenderContextCurrent(origin)) await showPage(origin.page, { replace: true });
+      if (appState.currentPage === origin.page) await showPage(origin.page, { replace: true });
     } catch (err) {
       toast(`Review update failed: ${friendlyApiError(err.message)}`, 'error');
     }
@@ -3737,7 +4067,7 @@ function renderDocumentIntake(el) {
             </div>
             <div class="form-field full">
               <label for="relatedNumber">Order / Invoice / Record #</label>
-              <input id="relatedNumber" type="text" value="${escapeHtml(appState.documentIntakeRelatedNumber)}" placeholder="Example: INV-2026-0002 or Etsy order #">
+              <input id="relatedNumber" type="text" value="${escapeHtml(appState.documentIntakeRelatedNumber)}" placeholder="Example: INV-2099-0001 or marketplace order #">
             </div>
           </div>
           <button class="primary-button" id="uploadDocsBtn">Upload, Read &amp; File</button>
@@ -5102,7 +5432,7 @@ async function renderMergedInvoiceTool(el, initialView = 'dashboard', newType = 
     [...mergedRoot.querySelectorAll('[onclick*="window.location.href"]')].forEach(button => button.remove());
 
     const prefill = appState.invoiceToolPrefill;
-    const module = await import('/invoice-builder/js/app.js?v=41');
+    const module = await import('/invoice-builder/js/app.js?v=43');
     assertRenderTargetCurrent(el);
     appState.invoiceToolPrefill = null;
     await module.init({ initialView, restoreSnapshot, newType, prefill });
@@ -7190,5 +7520,12 @@ const initialPage = window.EpataNavigationHistory?.pageFromStateOrHash?.(null, l
   ?? (decodeURIComponent(location.hash.replace(/^#/, '')) || 'dashboard');
 const initialHash = window.EpataNavigationHistory?.pageHash?.(initialPage)
   ?? (initialPage === 'dashboard' ? '' : `#${encodeURIComponent(initialPage)}`);
+const initialParams = new URLSearchParams(location.search);
+const pendingLedgerPage = String(initialParams.get('openLedger') || '');
+const pendingLedgerId = Number(initialParams.get('recordId') || 0);
+const pendingLedgerFilter = String(initialParams.get('filter') || '');
 history.replaceState?.({ page: initialPage }, '', initialPage === 'dashboard' ? location.pathname : initialHash);
-showPage(initialPage, { replace: true, skipHistory: true });
+void showPage(initialPage, { replace: true, skipHistory: true }).then(async () => {
+  if (pendingLedgerPage !== 'receivables' || !Number.isSafeInteger(pendingLedgerId) || pendingLedgerId <= 0) return;
+  await openLedgerSourceRecord(pendingLedgerPage, pendingLedgerId, pendingLedgerFilter);
+});

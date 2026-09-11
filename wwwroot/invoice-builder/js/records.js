@@ -3,7 +3,7 @@
 // ═══════════════════════════════════════════════════════
 
 import { el, money, escapeHtml, fmtDate, fmtDateTime, statusBadge, typeBadge, toast, todayStr } from './utils.js?v=5';
-import { api } from './api.js?v=6';
+import { api } from './api.js?v=7';
 
 export const RECORD_PAGE_SIZES = [10, 25, 50, 100];
 export const RECORD_SORT_KEYS = ['updated', 'created', 'number', 'type', 'status', 'total', 'paid', 'customer', 'project'];
@@ -16,6 +16,12 @@ let _sortBy   = 'updated';
 let _sortDir  = 'desc';
 let _page     = 0;
 let _pageSize = 25;
+let _query = '';
+let _typeFilter = '';
+let _statusFilter = '';
+let _includeArchived = false;
+let _loadedIncludeArchived = null;
+let _latestRefreshTask = null;
 const _recordActionsInFlight = new Set();
 const _initializedRecordRoots = new WeakSet();
 let _refreshSequence = 0;
@@ -28,10 +34,36 @@ export function initRecords({ onLoad, onNew }) {
   if (root && _initializedRecordRoots.has(root)) return;
   if (root) _initializedRecordRoots.add(root);
 
-  el('recSearch')?.addEventListener('input', () => { _page = 0; render(); });
-  el('recType')?.addEventListener('change', () => { _page = 0; render(); });
-  el('recStatus')?.addEventListener('change', () => { _page = 0; render(); });
-  el('recIncludeArchived')?.addEventListener('change', refreshRecords);
+  const search = el('recSearch');
+  const type = el('recType');
+  const status = el('recStatus');
+  const archive = el('recIncludeArchived');
+  if (search) search.value = _query;
+  if (type) type.value = _typeFilter;
+  if (status) status.value = _statusFilter;
+  if (archive) archive.checked = _includeArchived;
+  search?.addEventListener('input', event => { _query = event.target.value; _page = 0; render(); });
+  type?.addEventListener('change', event => { _typeFilter = event.target.value; _page = 0; render(); });
+  status?.addEventListener('change', event => { _statusFilter = event.target.value; _page = 0; render(); });
+  archive?.addEventListener('change', async event => {
+    const requested = event.target.checked;
+    _includeArchived = requested;
+    _page = 0;
+    try {
+      await refreshRecords();
+    } catch (error) {
+      if (_includeArchived === requested) {
+        // Roll back to the last dataset that actually reached the screen. The
+        // previous checkbox value may itself belong to a superseded request.
+        _includeArchived = _loadedIncludeArchived ?? false;
+        const currentArchiveToggle = el('recIncludeArchived');
+        if (currentArchiveToggle) currentArchiveToggle.checked = _includeArchived;
+        render();
+        updateFooterStats();
+      }
+      toast(`Archive visibility could not change: ${error.message}`, 'error');
+    }
+  });
   el('recordsBody')?.addEventListener('click', onRecordsBodyClick);
   el('recSortBy')?.addEventListener('change', e => {
     _sortBy = e.target.value || 'updated';
@@ -54,27 +86,38 @@ export function initRecords({ onLoad, onNew }) {
 
 export async function refreshRecords() {
   const refreshSequence = ++_refreshSequence;
-  const includeArchived = !!el('recIncludeArchived')?.checked;
-  let records;
-  try {
-    records = await api.list(includeArchived ? { includeArchived: 'true' } : {});
-  } catch (error) {
-    // A superseded request must not make a newer successful refresh look failed.
-    if (refreshSequence !== _refreshSequence) return false;
-    throw error;
-  }
-  if (refreshSequence !== _refreshSequence) return false;
-  _records = records;
-  render();
-  updateFooterStats();
-  return true;
+  const requestedIncludeArchived = _includeArchived;
+  const task = {
+    sequence: refreshSequence,
+    includeArchived: requestedIncludeArchived,
+    promise: null,
+  };
+  task.promise = (async () => {
+    try {
+      const records = await api.list(requestedIncludeArchived ? { includeArchived: 'true' } : {});
+      if (_latestRefreshTask !== task || refreshSequence !== _refreshSequence) return false;
+      _records = records;
+      _loadedIncludeArchived = requestedIncludeArchived;
+      render();
+      updateFooterStats();
+      return true;
+    } catch (error) {
+      // A superseded request must not make a newer successful refresh look failed.
+      if (_latestRefreshTask !== task || refreshSequence !== _refreshSequence) return false;
+      throw error;
+    } finally {
+      if (_latestRefreshTask === task) _latestRefreshTask = null;
+    }
+  })();
+  _latestRefreshTask = task;
+  return task.promise;
 }
 
 export function getRecords() { return _records; }
 
-export function isRecordActionInFlight(id = null) {
+export function isRecordActionInFlight(id = null, kind = 'document') {
   if (id == null) return _recordActionsInFlight.size > 0;
-  return _recordActionsInFlight.has(recordActionKey(id));
+  return _recordActionsInFlight.has(recordActionKey(id, kind));
 }
 
 function findDocumentRecord(id) {
@@ -196,7 +239,9 @@ function render() {
       <td>
         <div class="actions">
           ${r.sourceKind === 'receivable'
-            ? `<button class="btn-ghost btn-sm" onclick="window.openLedgerEntityRecord && window.openLedgerEntityRecord('receivables', ${r.sourceId || r.id})" title="Open the AR ledger row for payment/status tracking. This row does not have a builder PDF document.">Open AR Ledger</button>`
+            ? r.isArchived
+              ? `<button type="button" class="btn-ghost btn-sm" data-record-action="restore-ledger" data-record-id="${r.id}" data-ledger-id="${r.sourceId || r.id}" title="Restore this archived AR ledger row." ${recordBusyAttributes(r.sourceId || r.id, 'receivable')}>Restore AR</button>`
+              : `<button type="button" class="btn-ghost btn-sm" data-record-action="open-ledger" data-record-id="${r.id}" data-ledger-id="${r.sourceId || r.id}" data-ledger-number="${escapeHtml(r.docNumber || '')}" title="Open the exact AR ledger row for payment/status tracking. This row does not have a builder PDF document.">Open AR Ledger</button>`
             : r.isArchived
               ? `<button type="button" class="btn-ghost btn-sm" data-record-action="restore" data-record-id="${r.id}" ${recordBusyAttributes(r.id)}>Restore</button>`
               : `<button type="button" class="btn-ghost btn-sm" data-record-action="load" data-record-id="${r.id}" ${recordBusyAttributes(r.id)}>Open</button>
@@ -214,7 +259,7 @@ function onRecordsBodyClick(event) {
   const customerButton = event.target?.closest?.('[data-record-customer]');
   if (customerButton && el('recordsBody')?.contains(customerButton)) {
     event.preventDefault();
-    window.openCustomerDetail?.(customerButton.dataset.recordCustomer || '');
+    openCustomerRecord(customerButton.dataset.recordCustomer || '');
     return;
   }
 
@@ -231,10 +276,40 @@ function onRecordsBodyClick(event) {
   else if (action === 'duplicate') window._dupeRecord?.(id);
   else if (action === 'archive') window._delRecord?.(id);
   else if (action === 'restore') window._restoreRecord?.(id);
+  else if (action === 'restore-ledger') restoreReceivableRecord(Number(button.dataset.ledgerId || id));
+  else if (action === 'open-ledger') openReceivableRecord(Number(button.dataset.ledgerId || id), button.dataset.ledgerNumber || '');
 }
 
-function recordBusyAttributes(id) {
-  return isRecordActionInFlight(id)
+function openCustomerRecord(name) {
+  const clean = String(name || '').trim();
+  if (!clean) return;
+  if (typeof window.openCustomerDetail === 'function') {
+    window.openCustomerDetail(clean);
+    return;
+  }
+  const page = `customerDetail:${encodeURIComponent(clean)}`;
+  window.location.assign(`/#${encodeURIComponent(page)}`);
+}
+
+export function openReceivableRecord(id, filter = '') {
+  if (typeof window.openLedgerSourceRecord === 'function') {
+    window.openLedgerSourceRecord('receivables', id, filter);
+    return;
+  }
+  if (typeof window.openLedgerEntityRecord === 'function') {
+    window.openLedgerEntityRecord('receivables', id);
+    return;
+  }
+  const target = new URL('/', window.location.origin);
+  target.searchParams.set('openLedger', 'receivables');
+  target.searchParams.set('recordId', String(Number(id)));
+  if (filter) target.searchParams.set('filter', String(filter));
+  target.hash = 'receivables';
+  window.location.assign(`${target.pathname}${target.search}${target.hash}`);
+}
+
+function recordBusyAttributes(id, kind = 'document') {
+  return isRecordActionInFlight(id, kind)
     ? 'disabled aria-disabled="true" aria-description="Another action for this record is already in progress."'
     : '';
 }
@@ -357,8 +432,22 @@ export async function restoreRecord(id) {
   });
 }
 
-async function runRecordAction(id, busyMessage, action) {
-  const actionKey = recordActionKey(id);
+async function restoreReceivableRecord(id) {
+  const label = `AR record #${id}`;
+  try {
+    return await runRecordAction(id, `Another action for ${label} is already in progress.`, async () => {
+      await api.restoreReceivable(id);
+      await refreshAfterCommittedMutation(`${label} restored`);
+      return true;
+    }, 'receivable');
+  } catch (error) {
+    toast(`Restore failed: ${error.message}`, 'error');
+    return null;
+  }
+}
+
+async function runRecordAction(id, busyMessage, action, kind = 'document') {
+  const actionKey = recordActionKey(id, kind);
   if (_recordActionsInFlight.has(actionKey)) {
     toast(busyMessage || 'Action already in progress.', 'info');
     return null;
@@ -374,8 +463,8 @@ async function runRecordAction(id, busyMessage, action) {
   }
 }
 
-function recordActionKey(id) {
-  return `document:${Number(id || 0)}`;
+function recordActionKey(id, kind = 'document') {
+  return `${kind}:${Number(id || 0)}`;
 }
 
 async function refreshAfterCommittedMutation(successMessage, successType = 'success') {
@@ -391,7 +480,26 @@ async function refreshAfterCommittedMutation(successMessage, successType = 'succ
 }
 
 // ── Export CSV ────────────────────────────────────────
-export function exportCsv() {
+async function waitForStableRecordDataset() {
+  while (true) {
+    const pending = _latestRefreshTask;
+    if (pending) {
+      await pending.promise;
+      if (_latestRefreshTask && _latestRefreshTask !== pending) continue;
+    }
+    if (_latestRefreshTask) continue;
+    if (_loadedIncludeArchived === _includeArchived) return;
+    await refreshRecords();
+  }
+}
+
+export async function exportCsv() {
+  try {
+    await waitForStableRecordDataset();
+  } catch (error) {
+    toast(`Records could not load for export: ${error.message}`, 'error');
+    return;
+  }
   const model = buildRecordViewModel(_records, currentRecordViewState());
   if (!model.filteredRows.length) { toast('No records to export', 'error'); return; }
   const csv = recordsToCsv(_records, currentRecordViewState());
@@ -401,8 +509,11 @@ export function exportCsv() {
   const a    = document.createElement('a');
   a.href     = url;
   a.download = `EPATA_Records_${todayStr()}.csv`;
+  a.hidden   = true;
+  document.body.append(a);
   a.click();
-  URL.revokeObjectURL(url);
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
   toast('CSV exported', 'success');
 }
 
@@ -425,9 +536,9 @@ function normalizeRecordViewState(state = {}) {
 
 function currentRecordViewState() {
   return {
-    q: el('recSearch')?.value ?? '',
-    type: el('recType')?.value ?? '',
-    status: el('recStatus')?.value ?? '',
+    q: _query,
+    type: _typeFilter,
+    status: _statusFilter,
     sortBy: _sortBy || el('recSortBy')?.value || 'updated',
     sortDir: _sortDir,
     page: _page,

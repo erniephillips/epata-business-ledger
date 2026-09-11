@@ -268,6 +268,3 @@ function pageMetrics(pageSize){ const normalized=normalizePageSize(pageSize); if
 
 function normalizePageSize(pageSize){ const normalized=String(pageSize||'A4').trim().toUpperCase(); return ['A4','LETTER','LEGAL'].includes(normalized)?normalized:'A4' }
 
-// export minimal API if needed
-export { renderInvoiceHtml };
-

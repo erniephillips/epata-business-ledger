@@ -110,6 +110,9 @@ assert.equal(matchesStatus({ status: 'Refunded', needsReview: false }, 'paid'), 
 assert.equal(matchesStatus({ status: 'Refunded', needsReview: false }, 'open'), false);
 assert.equal(matchesStatus({ status: 'Open', customerPaid: 25 }, 'paid'), false, 'Field names such as customerPaid must not make an open row match Paid.');
 assert.equal(matchesStatus({ deductibleStatus: 'Review', needsReview: false }, 'needs-review'), true, 'Secondary status fields should participate in review filtering.');
+assert.equal(matchesStatus({ status: 'Open', isArchived: true }, 'archived'), true, 'Archived-only filtering should expose recoverable rows.');
+assert.equal(matchesStatus({ status: 'Open', isArchived: true }, 'open'), false, 'Archived rows must not leak into active status filters.');
+assert.equal(matchesStatus({ status: 'Done', isArchived: true }, 'paid'), false, 'Archived rows must not inflate closed/paid filters.');
 const saleStatusRows = filterRows([
   { id: 1, status: 'Refunded', needsReview: false },
   { id: 2, status: 'Needs Review', needsReview: false },
@@ -156,14 +159,18 @@ assert.ok(elapsedMs < 1500, `Medium-data filtering/paging took too long: ${elaps
 const appSource = await readFile(new URL('../wwwroot/js/app.js', import.meta.url), 'utf8');
 const indexSource = await readFile(new URL('../wwwroot/index.html', import.meta.url), 'utf8');
 
-assert.ok(indexSource.includes('/js/entity-table-state.js?v=1'), 'Main shell should load the entity table helper before app.js.');
+assert.ok(indexSource.includes('/js/entity-table-state.js?v=2'), 'Main shell should load the current entity table helper before app.js.');
 assert.ok(appSource.includes('EpataEntityTableState?.buildEntityTableModel'), 'Generic ledger tables should use the entity table helper.');
 assert.ok(appSource.includes('appState.globalSearchTimer = setTimeout(() => {'), 'Global search should debounce page rendering.');
 assert.ok(appSource.includes("showPage('globalSearch', { replace: true });"), 'Global search debounce should replace its current history entry.');
 assert.ok(appSource.includes('}, 220);'), 'Global search debounce should have a stable delay.');
 assert.ok(appSource.includes('pageRows.map(row =>'), 'Generic table render should render actions from the paged row set.');
-assert.ok(appSource.includes('data-edit="${row.id}"'), 'Filtered/paged rows should preserve Edit row actions.');
-assert.ok(appSource.includes('data-delete="${row.id}"'), 'Filtered/paged rows should preserve Archive row actions.');
+assert.ok(appSource.includes('data-edit="${Number(row.id)}"'), 'Filtered/paged active rows should preserve Edit row actions.');
+assert.ok(appSource.includes('data-delete="${Number(row.id)}"'), 'Filtered/paged active rows should preserve Archive row actions.');
+assert.ok(appSource.includes('data-restore="${Number(row.id)}"'), 'Archived generic rows should expose Restore instead of Edit/Archive.');
+assert.ok(appSource.includes('generatedLedgerRecordSource(config, row)'), 'Generated ledger rows should route users to the owning source record.');
+assert.ok(appSource.includes("openInvoiceRecordSource(target.docNumber, target.includeArchived)"), 'Generated children should open and filter to their exact active or archived source document.');
+assert.ok(appSource.includes('appState.currentPage === origin.page'), 'Committed mutations should refresh the latest render of the same page after async races.');
 assert.ok(appSource.includes('sorted.find(r => r.id == btn.dataset.edit)'), 'Edit actions should resolve against the filtered/sorted row set.');
 assert.ok(appSource.includes("columns: ['name','sku','material','color','grams'"), 'Product catalog should show color next to SKU and material.');
 assert.ok(appSource.includes("'Refunded','Needs Review'"), 'Sales status options should expose Refunded and Needs Review.');

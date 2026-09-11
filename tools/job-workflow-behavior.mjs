@@ -70,6 +70,10 @@ assert.ok(appSource.includes('data-timeline-route="${escapeAttr(event.routePage 
 assert.ok(appSource.includes('openTimelineEvent'), 'Timeline event clicks should call the exact-row opener.');
 assert.ok(appSource.includes('EpataJobWorkflowState?.printerQueuePrefillFromJob(job)'), 'Queue selected job should use shared queue prefill planning.');
 assert.ok(appSource.includes("quickOpen('printerQueue', 'queue', prefill)"), 'Queue selected job should open an unsaved Queue modal.');
+assert.ok(appSource.includes("api('/api/printer-queue-items?includeArchived=true')"), 'Printer Queue should count archived rows and reveal them only when requested.');
+assert.ok(appSource.includes("restoreLedgerEntityRecord('printerQueue'"), 'Archived queue items should expose Restore.');
+assert.ok(appSource.includes("archiveLedgerEntityRecord('printerQueue'"), 'Active queue items should expose Archive.');
+assert.ok(appSource.includes("row.status === 'Needs Attention' && !row.isArchived"), 'Archived queue items should not retain active attention styling.');
 assert.ok(relationshipSource.includes("relationshipLinkedRowTarget(configKey, row = {})"), 'Customer detail linked rows should use relationship row targets.');
 
 console.log(JSON.stringify({

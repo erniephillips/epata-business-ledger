@@ -140,7 +140,15 @@ test.describe('high-risk rendered control gaps', () => {
       await page.evaluate(() => window.showPage('jobTimeline'));
       await waitForApp(page);
 
+      const filteredTimelineResponse = page.waitForResponse(response => {
+        const url = new URL(response.url());
+        return response.request().method() === 'GET'
+          && url.pathname === '/api/job-timeline'
+          && url.searchParams.get('q') === jobName
+          && response.ok();
+      });
       await page.locator('#timelineSearch').fill(jobName);
+      await filteredTimelineResponse;
       await expect(page.locator('.timeline-card')).toHaveCount(1);
       await expect(page.locator('.timeline-card')).toContainText(customerName);
 
@@ -853,11 +861,30 @@ test.describe('high-risk rendered control gaps', () => {
     const mainBackupDownload = await mainBackup;
     expect(mainBackupDownload.suggestedFilename()).toMatch(/\.db$/i);
 
+    const exportSeedResponse = await page.request.post('/api/documents', {
+      data: {
+        docType: 'INVOICE',
+        status: 'Sent',
+        docDate: '2026-09-11',
+        dueDate: '2026-09-25',
+        customerName: 'Export Contract Customer',
+        projectName: 'Export Contract Fixture',
+        pageSize: 'LETTER',
+        total: 25,
+        amountPaid: 0,
+        paymentMethod: 'Cash',
+        lineItems: [{ sortOrder: 1, description: 'Export contract line', quantity: 1, rate: 25 }],
+      },
+    });
+    const exportSeedText = await exportSeedResponse.text();
+    expect(exportSeedResponse.ok(), exportSeedText).toBe(true);
+    const exportSeed = JSON.parse(exportSeedText);
+
     await page.goto('/invoice-builder/index.html');
     await expect(page.locator('#db-status-text')).toContainText('Ready');
     await page.locator('button.nav-item[data-view="records"]').click();
     await expect(page.locator('#view-records')).toBeVisible();
-    await expect(page.locator('#recordsBody tr')).not.toHaveCount(0);
+    await expect(page.locator('#recordsBody')).toContainText(exportSeed.docNumber);
     const csvDownloadEvent = page.waitForEvent('download');
     await page.locator('#btnExportCsv').click();
     const csvDownload = await csvDownloadEvent;

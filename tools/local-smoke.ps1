@@ -642,11 +642,11 @@ try {
     foreach ($path in @(
         '/',
         '/index.html',
-        '/js/relationship-directory.js?v=1',
+        '/js/relationship-directory.js?v=3',
         '/js/toast-stack.js?v=1',
         '/js/modal-lifecycle.js?v=1',
         '/js/modal-save-state.js?v=1',
-        '/js/entity-table-state.js?v=1',
+        '/js/entity-table-state.js?v=2',
         '/js/sidebar-state.js?v=1',
         '/js/navigation-history.js?v=1',
         '/js/global-search.js?v=1',
@@ -706,7 +706,7 @@ try {
     Assert-Smoke ($invoiceBuilderCss -match '(?s)\.record-link\s*\{[^}]*white-space:\s*normal;[^}]*overflow-wrap:\s*anywhere;[^}]*word-break:\s*break-word;') 'Invoice records links are not hardened for long document/customer text.'
     Assert-Smoke ($mainJs -like '*EpataRelationshipDirectory*') 'Main shell JS is not using the relationship directory helper.'
     Assert-Smoke ($mainJs -like '*customerDetailSectionPlan*' -and $mainJs -like '*vendorDetailSectionPlan*' -and $mainJs -like '*personContactTarget*' -and $mainJs -like '*relationshipSectionPage*') 'Main shell JS is not using Relationship detail/contact/pagination helpers.'
-    $relationshipDirectoryJs = Get-Text '/js/relationship-directory.js?v=1'
+    $relationshipDirectoryJs = Get-Text '/js/relationship-directory.js?v=3'
     Assert-Smoke ($mainJs -like '*nameStatus*' -and $mainJs -like '*duplicateNameWarning*' -and $relationshipDirectoryJs -like '*Duplicate contacts*' -and $relationshipDirectoryJs -like '*trimmed, case-insensitive name*') 'Main shell JS is not exposing duplicate relationship-name status.'
     Assert-Smoke ($mainJs -like '*Edit Audit Doc*' -and $mainJs -like '*openModal(configs.auditDocs*') 'Document Intake is not wiring uploaded Audit Docs back to the Audit Doc edit modal.'
     foreach ($needle in @('Dashboard', 'Quick Add', 'Estimates', 'Invoices', 'Invoice Records', 'Document Intake', 'Tax Prep', 'Admin / Data')) {
@@ -716,11 +716,11 @@ try {
         Assert-Smoke ($mainJs -like "*$needle*") "Main shell JS is missing payment-method UI/default wiring for $needle."
     }
     $mainHtml = Get-Text '/index.html'
-    Assert-Smoke ($mainHtml -like '*/js/relationship-directory.js?v=1*') 'Main shell is not loading the relationship directory helper before app JS.'
+    Assert-Smoke ($mainHtml -like '*/js/relationship-directory.js?v=3*') 'Main shell is not loading the relationship directory helper before app JS.'
     Assert-Smoke ($mainHtml -like '*/js/toast-stack.js?v=1*') 'Main shell is not loading the stacked toast helper before app JS.'
     Assert-Smoke ($mainHtml -like '*/js/modal-lifecycle.js?v=1*') 'Main shell is not loading the modal lifecycle helper before app JS.'
     Assert-Smoke ($mainHtml -like '*/js/modal-save-state.js?v=1*') 'Main shell is not loading the modal save-state helper before app JS.'
-    Assert-Smoke ($mainHtml -like '*/js/entity-table-state.js?v=1*') 'Main shell is not loading the entity table state helper before app JS.'
+    Assert-Smoke ($mainHtml -like '*/js/entity-table-state.js?v=2*') 'Main shell is not loading the entity table state helper before app JS.'
     Assert-Smoke ($mainHtml -like '*/js/sidebar-state.js?v=1*') 'Main shell is not loading the sidebar state helper before app JS.'
     Assert-Smoke ($mainHtml -like '*/js/navigation-history.js?v=1*') 'Main shell is not loading the navigation history helper before app JS.'
     Assert-Smoke ($mainHtml -like '*/js/global-search.js?v=1*') 'Main shell is not loading the global search helper before app JS.'
@@ -731,7 +731,7 @@ try {
     Assert-Smoke ($mainHtml -like '*/js/job-workflow-state.js?v=1*') 'Main shell is not loading the Job Workflow state helper before app JS.'
     Assert-Smoke ($mainHtml -like '*/js/dashboard-state.js?v=1*') 'Main shell is not loading the Dashboard state helper before app JS.'
     Assert-Smoke ($mainHtml -like '*id="toast-container"*') 'Main shell does not expose a stacked toast container.'
-    Assert-Smoke ($mainHtml -like '*/js/app.js?v=20260619-ar-prefill*') 'Main shell is not loading the current app JS version.'
+    Assert-Smoke ($mainHtml -like '*/js/app.js?v=20260911-archive-recovery-2*') 'Main shell is not loading the current app JS version.'
     Assert-Smoke ($mainJs -like '*EpataToastStack*') 'Main shell JS is not using stacked toasts.'
     Assert-Smoke ($mainJs -like '*EpataModalLifecycle*') 'Main shell JS is not using modal lifecycle focus management.'
     Assert-Smoke ($mainJs -like '*EpataModalSaveState*') 'Main shell JS is not using modal save-state failure handling.'

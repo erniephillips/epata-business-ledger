@@ -8,7 +8,6 @@ namespace EPATA.BusinessLedger.Services;
 
 public sealed class TaxPlanningService(AppDbContext db, TurboTaxReportService turboTaxReport)
 {
-    private static readonly SemaphoreSlim GenerateObligationsGate = new(1, 1);
     private const string FederalEstimatedUrl = "https://www.irs.gov/businesses/small-businesses-self-employed/estimated-taxes";
     private const string FederalSelfEmployedUrl = "https://www.irs.gov/businesses/small-businesses-self-employed/self-employed-individuals-tax-center";
     private const string NjEstimatedUrl = "https://www.nj.gov/treasury/taxation/njit20.shtml";
@@ -144,7 +143,7 @@ public sealed class TaxPlanningService(AppDbContext db, TurboTaxReportService tu
 
     public async Task<List<TaxObligation>> GenerateObligationsAsync(int year, CancellationToken cancellationToken = default)
     {
-        await GenerateObligationsGate.WaitAsync(cancellationToken);
+        await TaxObligationMutationLocks.Gate.WaitAsync(cancellationToken);
         try
         {
             var profile = await GetProfileAsync();
@@ -154,7 +153,17 @@ public sealed class TaxPlanningService(AppDbContext db, TurboTaxReportService tu
                 .ToListAsync(cancellationToken);
             foreach (var template in templates)
             {
-                if (existing.Any(x => x.Title == template.Title && x.Period == template.Period)) continue;
+                var templateIdentity = TaxObligationMutationLocks.IdentityKey(
+                    template.TaxYear,
+                    template.Title,
+                    template.Period);
+                if (existing.Any(candidate => TaxObligationMutationLocks.IdentityKey(
+                        candidate.TaxYear,
+                        candidate.Title,
+                        candidate.Period) == templateIdentity))
+                {
+                    continue;
+                }
                 db.TaxObligations.Add(template);
             }
 
@@ -168,7 +177,7 @@ public sealed class TaxPlanningService(AppDbContext db, TurboTaxReportService tu
         }
         finally
         {
-            GenerateObligationsGate.Release();
+            TaxObligationMutationLocks.Gate.Release();
         }
     }
 
@@ -257,6 +266,7 @@ public sealed class TaxPlanningService(AppDbContext db, TurboTaxReportService tu
         else
         {
             row.Value = value;
+            row.IsArchived = false;
         }
     }
 
@@ -350,4 +360,17 @@ public sealed class TaxPlanningService(AppDbContext db, TurboTaxReportService tu
         Static guidance file in the app folder: TAX_GUIDE.md
         Generated: {DateTimeOffset.Now:O}
         """;
+}
+
+public static class TaxObligationMutationLocks
+{
+    public static SemaphoreSlim Gate { get; } = new(1, 1);
+
+    public static string IdentityKey(int taxYear, string? title, string? period) =>
+        $"{taxYear}|{NormalizePart(title)}|{NormalizePart(period)}";
+
+    private static string NormalizePart(string? value) =>
+        string.Join(' ', (value ?? string.Empty)
+            .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+            .ToUpperInvariant();
 }

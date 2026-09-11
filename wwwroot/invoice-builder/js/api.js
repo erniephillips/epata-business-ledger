@@ -33,6 +33,7 @@ export const api = {
   }),
   delete:      (id)            => request(`/api/documents/${id}`, { method: 'DELETE' }),
   restore:     (id)            => request(`/api/documents/${id}/restore`, { method: 'POST' }),
+  restoreReceivable: (id)      => request(`/api/receivable-invoices/${id}/restore`, { method: 'POST' }),
   duplicate:   (id)            => request(`/api/documents/${id}/duplicate`, { method: 'POST' }),
   convertToInvoice: (id)       => request(`/api/documents/${id}/convert-to-invoice`, { method: 'POST' }),
   importPdfDraft: (file)       => {

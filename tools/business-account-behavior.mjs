@@ -12,8 +12,8 @@ assert.ok(
   'Business Accounts active status should sort predictably.',
 );
 assert.ok(
-  appSource.includes("if (key === 'activeStatus') return badgeFor(row.isActive === false ? 'Inactive' : 'Active');"),
-  'Business Accounts active status should render as Active/Inactive.',
+  appSource.includes("if (key === 'activeStatus') return row.isArchived === true"),
+  'Business Accounts active status should render as Active/Inactive while keeping archived rows visually neutral.',
 );
 assert.ok(
   appSource.includes("f('isActive','Active','checkbox','Turn off for closed accounts.')"),

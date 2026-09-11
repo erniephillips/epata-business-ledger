@@ -13,11 +13,15 @@
         invoiceTotal: 0,
         openAr: 0,
         lastActivity: '',
-        partyCount: 0
+        partyCount: 0,
+        partyRecords: []
       };
       item.sources.add(source);
       item.linkedRows += 1;
-      if (source === 'People') item.partyCount += 1;
+      if (source === 'People') {
+        item.partyCount += 1;
+        item.partyRecords.push({ id: Number(row.id || 0), partyType: row.partyType || '', isArchived: row.isArchived === true });
+      }
       if (source === 'Sales') item.salesTotal += Number(amount || 0);
       if (source === 'AR' || source === 'PDF Docs') item.invoiceTotal += Number(amount || 0);
       item.openAr += Number(open || 0);
@@ -51,11 +55,15 @@
         openAp: 0,
         assetTotal: 0,
         lastActivity: '',
-        partyCount: 0
+        partyCount: 0,
+        partyRecords: []
       };
       item.sources.add(source);
       item.linkedRows += 1;
-      if (source === 'People') item.partyCount += 1;
+      if (source === 'People') {
+        item.partyCount += 1;
+        item.partyRecords.push({ id: Number(row.id || 0), partyType: row.partyType || '', isArchived: row.isArchived === true });
+      }
       item.expenseTotal += Number(amount || 0);
       item.openAp += Number(open || 0);
       item.assetTotal += Number(asset || 0);
@@ -81,6 +89,8 @@
       return {
         ...row,
         sources: Array.from(row.sources).join(', '),
+        activePartyCount: row.partyRecords.filter(party => !party.isArchived).length,
+        archivedPartyCount: row.partyRecords.filter(party => party.isArchived).length,
         nameStatus: duplicateNameWarning ? 'Duplicate contacts' : 'OK',
         duplicateNameWarning
       };
@@ -166,6 +176,9 @@
     }
     if (row?.sourceKind === 'receivable') {
       return { kind: 'ledger', configKey: 'receivables', rowId: Number(row.sourceId || row.id || 0), label: 'Open AR' };
+    }
+    if (row?.docNumber) {
+      return { kind: 'invoice-record', docNumber: String(row.docNumber), includeArchived: row.isArchived === true, label: 'Open Record' };
     }
     if (rowId > 0) {
       return { kind: 'page', page: 'invoiceRecords', rowId, label: 'Open Records' };

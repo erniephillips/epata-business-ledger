@@ -9,20 +9,33 @@ param(
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
-function Get-NewestStagedExePath {
-    $stageRoot = Join-Path $PSScriptRoot "obj\publish-win-x64-stage"
-    $legacyStageExePath = Join-Path $stageRoot "EPATA.BusinessLedger.exe"
-    $candidates = @()
-    if (Test-Path -LiteralPath $legacyStageExePath) {
-        $candidates += Get-Item -LiteralPath $legacyStageExePath
+function Get-LatestStagedDirectory {
+    $stageRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "obj\publish-win-x64-stage"))
+    $markerPath = Join-Path $stageRoot "latest-stage.txt"
+    if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) {
+        return $null
     }
-    if (Test-Path -LiteralPath $stageRoot) {
-        $candidates += Get-ChildItem -LiteralPath $stageRoot -Recurse -Filter "EPATA.BusinessLedger.exe" -File -ErrorAction SilentlyContinue
+
+    try {
+        $markedDirectory = (Get-Content -LiteralPath $markerPath -Raw -ErrorAction Stop).Trim()
+    } catch {
+        throw "The latest publish-stage marker could not be read: $markerPath. $($_.Exception.Message)"
     }
-    $candidates |
-        Sort-Object LastWriteTimeUtc -Descending |
-        Select-Object -First 1 |
-        ForEach-Object { $_.FullName }
+
+    if ([string]::IsNullOrWhiteSpace($markedDirectory) -or -not [System.IO.Path]::IsPathRooted($markedDirectory)) {
+        throw "The latest publish-stage marker must contain one absolute staging directory: $markerPath"
+    }
+
+    $stageDirectory = [System.IO.Path]::GetFullPath($markedDirectory)
+    $stageParent = [System.IO.Path]::GetFullPath([System.IO.Path]::GetDirectoryName($stageDirectory))
+    if (-not $stageParent.Equals($stageRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "The latest publish-stage marker points outside its staging root: $stageDirectory"
+    }
+    if (-not (Test-Path -LiteralPath $stageDirectory -PathType Container)) {
+        throw "The latest publish-stage marker points to a missing directory: $stageDirectory"
+    }
+
+    $stageDirectory
 }
 
 function Test-ExeFilesMatch {
@@ -34,7 +47,8 @@ function Test-ExeFilesMatch {
         [string]$SecondPath
     )
 
-    if (-not (Test-Path -LiteralPath $FirstPath) -or -not (Test-Path -LiteralPath $SecondPath)) {
+    if (-not (Test-Path -LiteralPath $FirstPath -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $SecondPath -PathType Leaf)) {
         return $false
     }
 
@@ -43,9 +57,83 @@ function Test-ExeFilesMatch {
     return $firstHash.Equals($secondHash, [System.StringComparison]::OrdinalIgnoreCase)
 }
 
+function Get-ExpectedDatabasePath {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ConnectionString,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ContentRootPath
+    )
+
+    $builder = [System.Data.Common.DbConnectionStringBuilder]::new()
+    try {
+        $builder.set_ConnectionString($ConnectionString)
+    } catch {
+        throw "The SQLite connection string is invalid. $($_.Exception.Message)"
+    }
+
+    $dataSource = $null
+    foreach ($key in @('Data Source', 'DataSource', 'Filename')) {
+        if ($builder.ContainsKey($key)) {
+            $dataSource = [string]$builder[$key]
+            break
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($dataSource) -or $dataSource.Equals(':memory:', [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "The SQLite connection string must identify a file-backed Data Source."
+    }
+
+    if ([System.IO.Path]::IsPathRooted($dataSource)) {
+        return [System.IO.Path]::GetFullPath($dataSource)
+    }
+    return [System.IO.Path]::GetFullPath((Join-Path $ContentRootPath $dataSource))
+}
+
+function Test-ExpectedHealth {
+    param(
+        $Health,
+
+        [Parameter(Mandatory = $true)]
+        [string]$ExpectedDatabasePath
+    )
+
+    if ($null -eq $Health -or
+        -not ([string]$Health.status).Equals('ok', [System.StringComparison]::OrdinalIgnoreCase) -or
+        -not ([string]$Health.mode).Equals('unified-ledger', [System.StringComparison]::Ordinal)) {
+        return $false
+    }
+
+    try {
+        $reportedDatabasePath = [System.IO.Path]::GetFullPath([string]$Health.database)
+        $normalizedExpectedPath = [System.IO.Path]::GetFullPath($ExpectedDatabasePath)
+        return $reportedDatabasePath.Equals($normalizedExpectedPath, [System.StringComparison]::OrdinalIgnoreCase)
+    } catch {
+        return $false
+    }
+}
+
+function Format-HealthIdentity {
+    param($Health)
+
+    if ($null -eq $Health) {
+        return 'no health response'
+    }
+    return "status='$([string]$Health.status)', mode='$([string]$Health.mode)', database='$([string]$Health.database)'"
+}
+
 $publishedExePath = Join-Path $PSScriptRoot "publish-win-x64\EPATA.BusinessLedger.exe"
-$stagedExePath = Get-NewestStagedExePath
 $usesDefaultExecutable = [string]::IsNullOrWhiteSpace($ExecutablePath)
+$latestStageDirectory = if ($usesDefaultExecutable) { Get-LatestStagedDirectory } else { $null }
+$stagedExePath = if ([string]::IsNullOrWhiteSpace($latestStageDirectory)) {
+    $null
+} else {
+    $candidate = Join-Path $latestStageDirectory "EPATA.BusinessLedger.exe"
+    if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+        throw "The latest publish stage is missing EPATA.BusinessLedger.exe: $latestStageDirectory"
+    }
+    $candidate
+}
 $exePath = if ($usesDefaultExecutable) {
     if (Test-Path -LiteralPath $publishedExePath) {
         $publishedExePath
@@ -79,16 +167,13 @@ if (Test-Path -LiteralPath $webRoot) {
 }
 
 $needsPublish = -not (Test-Path -LiteralPath $exePath)
-$newerStageDoesNotMatchPublished = $false
+$publishedDoesNotMatchLatestStage = $false
 $publishedExeExists = Test-Path -LiteralPath $publishedExePath
 $stagedExeExists = -not [string]::IsNullOrWhiteSpace($stagedExePath) -and (Test-Path -LiteralPath $stagedExePath)
 if ($usesDefaultExecutable -and $publishedExeExists -and $stagedExeExists) {
-    $stageIsNewer = (Get-Item -LiteralPath $stagedExePath).LastWriteTimeUtc -gt (Get-Item -LiteralPath $publishedExePath).LastWriteTimeUtc
-    if ($stageIsNewer) {
-        $newerStageDoesNotMatchPublished = -not (Test-ExeFilesMatch -FirstPath $publishedExePath -SecondPath $stagedExePath)
-        if ($newerStageDoesNotMatchPublished) {
-            $needsPublish = $true
-        }
+    $publishedDoesNotMatchLatestStage = -not (Test-ExeFilesMatch -FirstPath $publishedExePath -SecondPath $stagedExePath)
+    if ($publishedDoesNotMatchLatestStage) {
+        $needsPublish = $true
     }
 }
 if (-not $needsPublish -and -not $NoBuild) {
@@ -102,8 +187,8 @@ if (-not $needsPublish -and -not $NoBuild) {
 
 if ($needsPublish) {
     if ($NoBuild) {
-        if ($newerStageDoesNotMatchPublished) {
-            throw "The canonical EPATA executable is older than and does not match the newest staged build. Publish again before launching with -NoBuild."
+        if ($publishedDoesNotMatchLatestStage) {
+            throw "The canonical EPATA publish tree does not match the latest validated stage. Publish again before launching with -NoBuild."
         }
         throw "The published EPATA executable is missing: $exePath"
     }
@@ -114,12 +199,13 @@ if ($needsPublish) {
         throw "The app executable could not be built (exit code $LASTEXITCODE). Run publish-win-x64.ps1 after dotnet restore access is available."
     }
 
-    $stagedExePath = Get-NewestStagedExePath
+    $latestStageDirectory = Get-LatestStagedDirectory
+    $stagedExePath = Join-Path $latestStageDirectory "EPATA.BusinessLedger.exe"
     $publishedExeExists = Test-Path -LiteralPath $publishedExePath
     $stagedExeExists = -not [string]::IsNullOrWhiteSpace($stagedExePath) -and (Test-Path -LiteralPath $stagedExePath)
     $publishedMatchesStage = $publishedExeExists -and $stagedExeExists -and (Test-ExeFilesMatch -FirstPath $publishedExePath -SecondPath $stagedExePath)
     if (-not $publishedMatchesStage) {
-        throw "The build completed, but the canonical EPATA executable does not match the newest staged build. Stop the running app and publish again."
+        throw "The build completed, but the canonical EPATA publish tree does not match the latest validated stage. Stop the running app and publish again."
     }
     $exePath = $publishedExePath
 }
@@ -130,6 +216,8 @@ $effectiveConnectionString = if ([string]::IsNullOrWhiteSpace($ConnectionString)
 } else {
     $ConnectionString
 }
+$workingDirectory = $PSScriptRoot
+$expectedDatabasePath = Get-ExpectedDatabasePath -ConnectionString $effectiveConnectionString -ContentRootPath $workingDirectory
 
 $openBrowserValue = if ($OpenBrowserOnStart -is [bool]) {
     $OpenBrowserOnStart
@@ -152,21 +240,25 @@ if ([string]::IsNullOrWhiteSpace($effectiveUrl)) {
     $effectiveUrl = "http://127.0.0.1:5062"
 }
 
+$healthUrl = $effectiveUrl.TrimEnd('/') + "/api/health"
+$health = $null
 try {
-    $healthUrl = $effectiveUrl.TrimEnd('/') + "/api/health"
     $health = Invoke-RestMethod $healthUrl -TimeoutSec 2
-    if ($health.status -eq "ok") {
-        if ($openBrowserValue) {
-            Start-Process -FilePath $effectiveUrl
-        }
-        Write-Output "EPATA is already running at $effectiveUrl."
-        exit 0
-    }
 } catch {
-    # No healthy app is listening at the target URL; launch below.
+    # No service is listening at the target URL; launch below.
+}
+if ($null -ne $health) {
+    if (-not (Test-ExpectedHealth -Health $health -ExpectedDatabasePath $expectedDatabasePath)) {
+        $identity = Format-HealthIdentity -Health $health
+        throw "A service is already responding at $effectiveUrl, but it is not the expected EPATA production ledger ($identity). Expected mode='unified-ledger' and database='$expectedDatabasePath'. Refusing to start or open it."
+    }
+    if ($openBrowserValue) {
+        Start-Process -FilePath $effectiveUrl
+    }
+    Write-Output "EPATA is already running at $effectiveUrl with database $expectedDatabasePath."
+    exit 0
 }
 
-$workingDirectory = $PSScriptRoot
 $launcherLogDirectory = Join-Path $PSScriptRoot "obj\launcher"
 [System.IO.Directory]::CreateDirectory($launcherLogDirectory) | Out-Null
 $stdoutLogPath = Join-Path $launcherLogDirectory "epata-stdout.log"
@@ -214,19 +306,29 @@ do {
         throw "EPATA exited before its local site became ready (exit code $($process.ExitCode)).$detailText Logs: $stdoutLogPath and $stderrLogPath"
     }
 
+    $candidateHealth = $null
     try {
-        $health = Invoke-RestMethod $healthUrl -TimeoutSec 2
-        if ($health.status -eq "ok") {
+        $candidateHealth = Invoke-RestMethod $healthUrl -TimeoutSec 2
+    } catch {
+        # The child has not opened the health endpoint yet.
+    }
+    if ($null -ne $candidateHealth) {
+        if (Test-ExpectedHealth -Health $candidateHealth -ExpectedDatabasePath $expectedDatabasePath) {
+            $health = $candidateHealth
             break
         }
-    } catch {
-        $health = $null
+
+        if (-not $process.HasExited) {
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        }
+        $identity = Format-HealthIdentity -Health $candidateHealth
+        throw "A different service answered the post-start health check at $effectiveUrl ($identity). Expected mode='unified-ledger' and database='$expectedDatabasePath'. The newly started process was stopped without opening a browser."
     }
 
     Start-Sleep -Milliseconds 300
 } while ([DateTime]::UtcNow -lt $startupDeadline)
 
-if ($null -eq $health -or $health.status -ne "ok") {
+if (-not (Test-ExpectedHealth -Health $health -ExpectedDatabasePath $expectedDatabasePath)) {
     if (-not $process.HasExited) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
     }

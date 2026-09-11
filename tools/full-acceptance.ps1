@@ -13,6 +13,7 @@ $manualCopyPath = Join-Path $root 'Data\full-acceptance-manual-copy-rehearsal.db
 $base = "http://127.0.0.1:$Port"
 $project = Join-Path $root 'EPATA.BusinessLedger.csproj'
 $builtDll = @(
+    Join-Path $root 'bin\Release\net10.0-windows\EPATA.BusinessLedger.dll'
     Join-Path $root 'bin\Release\net10.0\EPATA.BusinessLedger.dll'
     Join-Path $root 'obj\verify-build\EPATA.BusinessLedger.dll'
 ) | Where-Object { Test-Path -LiteralPath $_ } | Sort-Object { (Get-Item -LiteralPath $_).LastWriteTimeUtc } -Descending | Select-Object -First 1
@@ -366,9 +367,9 @@ try {
         param($root, $project, $builtDll, $port, $dbPath)
         Set-Location $root
         if (Test-Path -LiteralPath $builtDll) {
-            dotnet $builtDll "App:Url=http://127.0.0.1:$port" "ConnectionStrings:DefaultConnection=Data Source=$dbPath" "App:OpenBrowserOnStart=false"
+            dotnet $builtDll "App:Url=http://127.0.0.1:$port" "ConnectionStrings:DefaultConnection=Data Source=$dbPath" "App:OpenBrowserOnStart=false" "Ai:AllowHostedFallback=false"
         } else {
-            dotnet run --no-build -c Release --no-launch-profile --project $project -- "App:Url=http://127.0.0.1:$port" "ConnectionStrings:DefaultConnection=Data Source=$dbPath" "App:OpenBrowserOnStart=false"
+            dotnet run --no-build -c Release --no-launch-profile --project $project -- "App:Url=http://127.0.0.1:$port" "ConnectionStrings:DefaultConnection=Data Source=$dbPath" "App:OpenBrowserOnStart=false" "Ai:AllowHostedFallback=false"
         }
     } -ArgumentList $root, $project, $builtDll, $Port, $dbPath
 
@@ -393,15 +394,15 @@ try {
     $backupCopyPreflightCompleted = $true
 
     Write-Step 'Checking static shells and core endpoints'
-    foreach ($path in @('/', '/index.html', '/css/site.css', '/js/app.js', '/js/relationship-directory.js?v=1', '/js/toast-stack.js?v=1', '/js/modal-lifecycle.js?v=1', '/js/modal-save-state.js?v=1', '/js/entity-table-state.js?v=1', '/js/sidebar-state.js?v=1', '/js/navigation-history.js?v=1', '/js/global-search.js?v=1', '/js/quick-add.js?v=1', '/js/invoice-prefill.js?v=1', '/js/tax-prep-state.js?v=1', '/js/communication-state.js?v=1', '/js/job-workflow-state.js?v=1', '/invoice-builder/', '/invoice-builder/index.html', '/invoice-builder/css/app.css', '/invoice-builder/js/app.js', '/invoice-builder/js/builder.js', '/invoice-builder/js/records.js', '/invoice-builder/js/pdf.js')) {
+    foreach ($path in @('/', '/index.html', '/css/site.css', '/js/app.js', '/js/relationship-directory.js?v=3', '/js/toast-stack.js?v=1', '/js/modal-lifecycle.js?v=1', '/js/modal-save-state.js?v=1', '/js/entity-table-state.js?v=2', '/js/sidebar-state.js?v=1', '/js/navigation-history.js?v=1', '/js/global-search.js?v=1', '/js/quick-add.js?v=1', '/js/invoice-prefill.js?v=1', '/js/tax-prep-state.js?v=1', '/js/communication-state.js?v=1', '/js/job-workflow-state.js?v=1', '/invoice-builder/', '/invoice-builder/index.html', '/invoice-builder/css/app.css', '/invoice-builder/js/app.js', '/invoice-builder/js/builder.js', '/invoice-builder/js/records.js', '/invoice-builder/js/pdf.js')) {
         $response = Invoke-Raw GET $path
         Assert-True ($response.StatusCode -eq 200) "Static asset $path failed."
     }
     $appJs = (Invoke-Raw GET '/js/app.js').Content
-    $relationshipDirectoryJs = (Invoke-Raw GET '/js/relationship-directory.js?v=1').Content
+    $relationshipDirectoryJs = (Invoke-Raw GET '/js/relationship-directory.js?v=3').Content
     $modalLifecycleJs = (Invoke-Raw GET '/js/modal-lifecycle.js?v=1').Content
     $modalSaveStateJs = (Invoke-Raw GET '/js/modal-save-state.js?v=1').Content
-    $entityTableStateJs = (Invoke-Raw GET '/js/entity-table-state.js?v=1').Content
+    $entityTableStateJs = (Invoke-Raw GET '/js/entity-table-state.js?v=2').Content
     $sidebarStateJs = (Invoke-Raw GET '/js/sidebar-state.js?v=1').Content
     $navigationHistoryJs = (Invoke-Raw GET '/js/navigation-history.js?v=1').Content
     $globalSearchJs = (Invoke-Raw GET '/js/global-search.js?v=1').Content
@@ -436,8 +437,8 @@ Assert-True ($appJs -match 'nameStatus' -and $appJs -match 'duplicateNameWarning
     $invoiceAppJs = (Invoke-Raw GET '/invoice-builder/js/app.js').Content
     $invoiceRecordsJs = (Invoke-Raw GET '/invoice-builder/js/records.js').Content
     Assert-True ($appJs -match 'modalSaveOutcome\(\{ ok: true \}\)' -and $modalSaveStateJs -like "*'Saved.'*" -and $modalSaveStateJs -like '*Save failed:*' -and $invoiceAppJs -like '*Save failed:*') 'Save action toast feedback is missing from a browser module.'
-    Assert-True ($appJs -like "*toast('Archived.')*" -and $invoiceRecordsJs -match '\$\{label\} archived' -and $invoiceAppJs -like '*Archive failed:*') 'Archive/delete action toast feedback is missing from a browser module.'
-    Assert-True ($invoiceRecordsJs -match '\$\{label\} restored' -and $invoiceAppJs -like '*Restore failed:*') 'Restore action toast feedback is missing from the invoice records browser module.'
+    Assert-True ($appJs -match "toast\('Archived\.',\s*'success'\)" -and $invoiceRecordsJs -match '\$\{label\} archived' -and $invoiceAppJs -like '*Archive failed:*') 'Archive/delete action toast feedback is missing from a browser module.'
+    Assert-True ($appJs -match "toast\('Restored\.',\s*'success'\)" -and $invoiceRecordsJs -match '\$\{label\} restored' -and $invoiceAppJs -like '*Restore failed:*') 'Restore action toast feedback is missing from a browser module.'
     Assert-True ($appJs -like '*Proof file attached and indexed.*' -and $appJs -like '*Upload failed:*' -and $invoiceAppJs -like '*PDF import failed:*') 'Upload action toast feedback is missing from a browser module.'
     Assert-True ($appJs -like '*Listing text copied.*' -and $appJs -like '*Calculator line copied.*' -and $invoiceAppJs -like '*Copied to clipboard!*') 'Copy action toast feedback is missing from a browser module.'
     $mainHtml = (Invoke-Raw GET '/index.html').Content
@@ -527,6 +528,7 @@ Assert-True ($appJs -match 'nameStatus' -and $appJs -match 'duplicateNameWarning
     Assert-True (@($aiStatus.builderFields) -contains 'grams') 'AI estimate status did not ingest calculator fields from the HTML builder.'
     Assert-True (@($aiStatus.builderFields) -contains 'termsNotes') 'AI estimate status did not ingest terms fields from the HTML builder.'
     Assert-True ($aiStatus.productCatalogCount -ge 1) 'AI estimate status did not report the saved product/cost catalog.'
+    Assert-True ($aiStatus.cloudAi.enabled -eq $false) 'Full acceptance must keep hosted AI disabled so extraction assertions remain deterministic.'
     $aiDraft = Invoke-Json POST '/api/ai/estimate-draft' @{
         sourceName = 'acceptance-email.txt'
         sourceText = "From: Jane Customer`nSubject: Replacement bracket`nPlease make 3 black PETG replacement parts, 40mm x 20mm x 10mm. My phone is 973-555-0123."
@@ -756,8 +758,11 @@ Order total: $61.87
     Assert-True (@($aiMixedDraft.prefill.lineItems).Count -ge 3) 'Mixed-source AI estimate intake did not create separate pasted-text and picture items.'
     Assert-True (@($aiMixedDraft.prefill.lineItems | Where-Object { $_.description -like 'Item from picture:*' }).Count -eq 1) 'Picture upload did not create a review line item in local fallback mode.'
     $aiDocumentDraft = Invoke-AiEstimateDocumentUpload
-    Assert-True ($aiDocumentDraft.prefill.projectDescription -like '*Acceptance DOCX Customer*') 'DOCX source text was not extracted into the AI estimate draft.'
+    Assert-True ($aiDocumentDraft.usedAi -eq $false -and $aiDocumentDraft.executionReceipt.engine -eq 'LOCAL RULES') 'Document extraction acceptance unexpectedly used an AI provider.'
+    Assert-True ($aiDocumentDraft.prefill.customerName -eq 'Acceptance DOCX Customer') 'DOCX customer identity was not mapped into the AI estimate draft.'
+    Assert-True (@($aiDocumentDraft.prefill.lineItems | Where-Object { $_.description -eq 'DOCX bracket' -and $_.quantity -eq 2 -and $_.rate -eq 31 }).Count -eq 1) 'DOCX quantity, item, and rate were not mapped into one line item.'
     Assert-True ($aiDocumentDraft.prefill.projectDescription -like '*PDF custom sign request*') 'PDF source text was not extracted into the AI estimate draft.'
+    Assert-True ($aiDocumentDraft.prefill.projectName -notlike '*SOURCE FILE*' -and $aiDocumentDraft.prefill.projectDescription -notlike '*SOURCE FILE*') 'Upload envelope metadata leaked into customer-facing project fields.'
     $aiInvoiceDocumentDraft = Invoke-AiInvoiceDocumentDraftUpload
     Assert-True ($aiInvoiceDocumentDraft.prefill.docType -eq 'INVOICE') 'Invoice PDF import did not detect invoice type.'
     Assert-True ($aiInvoiceDocumentDraft.prefill.docNumber -eq 'INV-2026-0099') 'Invoice PDF import did not recover invoice number.'
@@ -826,7 +831,15 @@ Order total: $61.87
     $taxObligation = Assert-CrudRoundTrip 'tax-obligations' @{ taxYear=2026; title='Acceptance tax obligation'; jurisdiction='Federal'; obligationType='Estimated Income Tax'; formName='1040-ES'; period='Q2'; dueDate='2026-06-15'; status='Review Applicability'; estimatedAmount=-20; amountPaid=-10; paymentMethod='Check'; appliesIf='Acceptance'; needsReview=$true; notes='acceptance' } 'status' 'Filed / Paid'
     Assert-True ($taxObligation.paymentMethod -eq 'Check') 'Tax Obligation CRUD payment method was not preserved.'
     Assert-CrudRoundTrip 'mileage-logs' @{ tripDate='2026-05-30'; vehicle='Acceptance Vehicle'; startLocation='Home'; endLocation='Post Office'; businessPurpose='Ship customer order'; businessMiles=-12; parkingAndTolls=-2; proofReference='calendar'; notes='acceptance' } 'notes' 'updated mileage' | Out-Null
-    Assert-CrudRoundTrip 'settings' @{ key='AcceptanceSetting'; value='One'; notes='acceptance' } 'value' 'Two' | Out-Null
+    $setting = Invoke-Json POST '/api/settings' @{ key='AcceptanceSetting'; value='One'; notes='acceptance' }
+    $setting.value = 'Two'
+    $setting.isArchived = $true
+    $updatedSetting = Invoke-Json PUT "/api/settings/$($setting.id)" $setting
+    Assert-True ($updatedSetting.value -eq 'Two' -and $updatedSetting.isArchived -eq $false) 'Setting update did not persist or allowed archive-state injection.'
+    $settingArchive = Invoke-Raw DELETE "/api/settings/$($setting.id)"
+    Assert-True ($settingArchive.StatusCode -eq 409 -and $settingArchive.Content -like '*cannot be archived*') 'Settings archive safety contract was not enforced.'
+    $settingRestore = Invoke-Raw POST "/api/settings/$($setting.id)/restore"
+    Assert-True ($settingRestore.StatusCode -eq 409 -and $settingRestore.Content -like '*do not support archive or restore*') 'Settings restore safety contract was not enforced.'
 
     Write-Step 'Checking customer communication timeline and printer queue'
     $communication = Assert-CrudRoundTrip 'customer-communications' @{

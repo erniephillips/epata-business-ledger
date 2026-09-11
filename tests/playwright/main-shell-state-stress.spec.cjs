@@ -23,6 +23,12 @@ async function openQuickModal(page, configKey, preset, overrides = {}) {
   await expect(page.locator('#modal')).toBeVisible();
 }
 
+function recordRow(page, docNumber) {
+  return page.locator('#recordsBody tr')
+    .filter({ has: page.locator('td.doc-number', { hasText: docNumber }) })
+    .first();
+}
+
 test.describe('main shell async state stress', () => {
   test.beforeEach(async ({}, testInfo) => {
     test.skip(testInfo.project.name !== 'chromium-desktop', 'Race and history behavior is covered once on desktop.');
@@ -37,7 +43,7 @@ test.describe('main shell async state stress', () => {
 
     await page.goto('/');
     await expect(page.locator('#app')).toContainText('Dashboard');
-    await page.route('**/api/sales', async route => {
+    await page.route('**/api/sales*', async route => {
       if (new URL(route.request().url()).pathname !== '/api/sales') return route.continue();
       salesStartedResolve();
       await salesRelease;
@@ -51,7 +57,7 @@ test.describe('main shell async state stress', () => {
         status: 'Paid',
       }]));
     });
-    await page.route('**/api/expenses', async route => {
+    await page.route('**/api/expenses*', async route => {
       if (new URL(route.request().url()).pathname !== '/api/expenses') return route.continue();
       await route.fulfill(jsonResponse([{
         id: 72001,
@@ -86,7 +92,7 @@ test.describe('main shell async state stress', () => {
     const saleRelease = new Promise(resolve => { releaseSale = resolve; });
 
     await page.goto('/');
-    await page.route('**/api/sales', async route => {
+    await page.route('**/api/sales*', async route => {
       if (route.request().method() !== 'POST' || new URL(route.request().url()).pathname !== '/api/sales') return route.continue();
       saleStartedResolve();
       await saleRelease;
@@ -136,7 +142,7 @@ test.describe('main shell async state stress', () => {
       archivedProofIds.push(Number(new URL(route.request().url()).pathname.split('/').pop()));
       await route.fulfill(jsonResponse({ archived: true }));
     });
-    await page.route('**/api/sales', async route => {
+    await page.route('**/api/sales*', async route => {
       if (route.request().method() !== 'POST' || new URL(route.request().url()).pathname !== '/api/sales') return route.continue();
       salePostCount += 1;
       savedPayload = route.request().postDataJSON();
@@ -180,7 +186,7 @@ test.describe('main shell async state stress', () => {
       archivedProofIds.push(74101);
       await route.fulfill(jsonResponse({ archived: true }));
     });
-    await page.route('**/api/sales', async route => {
+    await page.route('**/api/sales*', async route => {
       if (route.request().method() !== 'POST' || new URL(route.request().url()).pathname !== '/api/sales') return route.continue();
       savedPayload = route.request().postDataJSON();
       await route.fulfill(jsonResponse({ id: 74102 }, 201));
@@ -218,7 +224,7 @@ test.describe('main shell async state stress', () => {
     let putVersionHeader = null;
 
     await page.goto('/');
-    await page.route('**/api/sales', async route => {
+    await page.route('**/api/sales*', async route => {
       const url = new URL(route.request().url());
       if (url.pathname !== '/api/sales') return route.continue();
       if (route.request().method() === 'GET') {
@@ -252,7 +258,7 @@ test.describe('main shell async state stress', () => {
 
   test('text columns containing “at” sort as text instead of invalid dates', async ({ page }) => {
     const failures = collectBrowserFailures(page);
-    await page.route('**/api/products', async route => {
+    await page.route('**/api/products*', async route => {
       if (route.request().method() !== 'GET') return route.continue();
       await route.fulfill(jsonResponse([
         { id: 76001, name: 'A default-first product', sku: 'A-1', material: 'Zulu', color: 'Blue', grams: 5, needsReview: false },
@@ -266,6 +272,236 @@ test.describe('main shell async state stress', () => {
     await page.locator('[data-sort-col="material"]').click();
     await expect(page.locator('#tableArea tbody tr').first()).toContainText('Z material-first product');
     await expect(page.locator('#tableArea tbody tr').first()).toContainText('Alpha');
+    expect(failures).toEqual([]);
+  });
+
+  test('standalone recent AR opens the exact main-ledger record', async ({ page }) => {
+    const suffix = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    const invoiceNumber = `PW-AR-BRIDGE-${suffix}`;
+    const createResponse = await page.request.post('/api/receivable-invoices', {
+      data: {
+        invoiceNumber,
+        invoiceDate: '2026-09-11',
+        dueDate: '2026-09-25',
+        customerName: 'Standalone Bridge Customer',
+        projectName: 'Exact AR Bridge',
+        status: 'Sent',
+        invoiceTotal: 38,
+        amountPaid: 0,
+        paymentMethod: 'Cash',
+        needsReview: false,
+      },
+    });
+    expect(createResponse.ok(), await createResponse.text()).toBe(true);
+
+    page.on('dialog', dialog => dialog.accept());
+    await page.goto('/invoice-builder/index.html');
+    await expect(page.locator('#db-status-text')).toContainText('Ready');
+    await expect(page.locator('#dashRecentBody')).toContainText(invoiceNumber);
+    await page.locator('#dashRecentBody .record-link', { hasText: invoiceNumber }).click();
+
+    await expect(page).toHaveURL(/#receivables$/);
+    await expect(page.locator('#modal')).toBeVisible();
+    await expect(page.locator('#field_invoiceNumber')).toHaveValue(invoiceNumber);
+  });
+
+  test('exact invoice-record filters and archive visibility survive app Back', async ({ page }) => {
+    const suffix = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    const createResponse = await page.request.post('/api/documents', {
+      data: {
+        docType: 'INVOICE',
+        status: 'Sent',
+        docDate: '2026-09-11',
+        dueDate: '2026-09-25',
+        customerName: 'Record State Customer',
+        projectName: `Record State ${suffix}`,
+        pageSize: 'LETTER',
+        total: 44,
+        amountPaid: 0,
+        paymentMethod: 'Cash',
+        lineItems: [{ sortOrder: 1, description: 'Record-state line', quantity: 1, rate: 44 }],
+      },
+    });
+    const createText = await createResponse.text();
+    expect(createResponse.ok(), createText).toBe(true);
+    const documentRecord = JSON.parse(createText);
+
+    const archiveResponse = await page.request.delete(`/api/documents/${documentRecord.id}`);
+    expect(archiveResponse.ok(), await archiveResponse.text()).toBe(true);
+    const archivedRecordsResponse = await page.request.get('/api/documents?includeArchived=true');
+    expect(archivedRecordsResponse.ok(), await archivedRecordsResponse.text()).toBe(true);
+    const archivedRecord = (await archivedRecordsResponse.json())
+      .find(row => Number(row.id) === Number(documentRecord.id) && row.sourceKind !== 'receivable');
+    expect(archivedRecord).toMatchObject({ docNumber: documentRecord.docNumber, isArchived: true });
+
+    await page.goto('/');
+    const includeArchivedResponse = page.waitForResponse(response => {
+      const url = new URL(response.url());
+      return response.request().method() === 'GET'
+        && url.pathname === '/api/documents'
+        && url.searchParams.get('includeArchived') === 'true'
+        && response.ok();
+    });
+    await page.evaluate(number => window.openInvoiceRecordSource(number, true), documentRecord.docNumber);
+    await includeArchivedResponse;
+    await expect(page.locator('#recSearch')).toHaveValue(documentRecord.docNumber);
+    await expect(page.locator('#recIncludeArchived')).toBeChecked();
+    const archivedRow = recordRow(page, documentRecord.docNumber);
+    await expect(archivedRow).toHaveClass(/archived-record/);
+    await expect(archivedRow.getByRole('button', { name: 'Restore', exact: true })).toBeVisible();
+
+    await page.locator('button.nav-button[data-page="sales"]').click();
+    await expect(page.locator('button.nav-button[data-page="sales"]')).toHaveClass(/active/);
+    await page.locator('#appBackBtn').click();
+    await expect(page).toHaveURL(/#invoiceRecords$/);
+    await expect(page.locator('#recSearch')).toHaveValue(documentRecord.docNumber);
+    await expect(page.locator('#recIncludeArchived')).toBeChecked();
+    await expect(recordRow(page, documentRecord.docNumber)).toHaveClass(/archived-record/);
+    await expect(recordRow(page, documentRecord.docNumber).getByRole('button', { name: 'Restore', exact: true })).toBeVisible();
+  });
+
+  test('rapid archive toggles roll back to committed rows and CSV waits for the newest refresh', async ({ page }) => {
+    const activeNumber = `INV-ACTIVE-${Date.now()}`;
+    const archivedNumber = `INV-ARCHIVED-${Date.now()}`;
+    const activeRows = [{
+      id: 98001, sourceKind: 'document', sourceId: 98001, docNumber: activeNumber,
+      docType: 'INVOICE', status: 'Sent', customerName: 'Active Export Customer',
+      projectName: 'Committed active dataset', total: 21, amountPaid: 0, balance: 21,
+      docDate: '2026-09-11', updatedAt: '2026-09-11T12:00:00Z', isArchived: false,
+    }];
+    const archivedRows = [...activeRows, {
+      id: 98002, sourceKind: 'document', sourceId: 98002, docNumber: archivedNumber,
+      docType: 'INVOICE', status: 'Void', customerName: 'Archived Export Customer',
+      projectName: 'Archived dataset', total: 13, amountPaid: 0, balance: 13,
+      docDate: '2026-09-10', updatedAt: '2026-09-10T12:00:00Z', isArchived: true,
+    }];
+    const deferred = () => {
+      let resolve;
+      const promise = new Promise(done => { resolve = done; });
+      return { promise, resolve };
+    };
+    const firstArchived = deferred();
+    const firstArchivedStarted = deferred();
+    const failedActiveStarted = deferred();
+    const exportArchived = deferred();
+    const exportArchivedStarted = deferred();
+    const exportActive = deferred();
+    const exportActiveStarted = deferred();
+    let listCall = 0;
+
+    await page.goto('/invoice-builder/index.html');
+    await expect(page.locator('#db-status-text')).toContainText('Ready');
+    await page.route('**/api/documents*', async route => {
+      const url = new URL(route.request().url());
+      if (route.request().method() !== 'GET' || url.pathname !== '/api/documents') return route.continue();
+      listCall += 1;
+      if (listCall === 1) return route.fulfill(jsonResponse(activeRows));
+      if (listCall === 2) {
+        firstArchivedStarted.resolve();
+        await firstArchived.promise;
+        return route.fulfill(jsonResponse(archivedRows));
+      }
+      if (listCall === 3) {
+        failedActiveStarted.resolve();
+        return route.fulfill(jsonResponse({ message: 'Simulated current refresh failure.' }, 409));
+      }
+      if (listCall === 4) {
+        exportArchivedStarted.resolve();
+        await exportArchived.promise;
+        return route.fulfill(jsonResponse(archivedRows));
+      }
+      if (listCall === 5) {
+        exportActiveStarted.resolve();
+        await exportActive.promise;
+        return route.fulfill(jsonResponse(activeRows));
+      }
+      return route.fulfill(jsonResponse(url.searchParams.get('includeArchived') === 'true' ? archivedRows : activeRows));
+    });
+
+    await page.locator('button.nav-item[data-view="records"]').click();
+    await expect(page.locator('#recordsBody')).toContainText(activeNumber);
+    const archiveToggle = page.locator('#recIncludeArchived');
+
+    await archiveToggle.check();
+    await firstArchivedStarted.promise;
+    await archiveToggle.uncheck();
+    await failedActiveStarted.promise;
+    await expect(page.locator('#toast-container')).toContainText('Archive visibility could not change');
+    await expect(archiveToggle).not.toBeChecked();
+    await expect(page.locator('#recordsBody')).toContainText(activeNumber);
+    await expect(page.locator('#recordsBody')).not.toContainText(archivedNumber);
+    const staleArchivedResponse = page.waitForResponse(response => {
+      const url = new URL(response.url());
+      return url.pathname === '/api/documents' && url.searchParams.get('includeArchived') === 'true';
+    });
+    firstArchived.resolve();
+    await staleArchivedResponse;
+    await expect(archiveToggle).not.toBeChecked();
+    await expect(page.locator('#recordsBody')).not.toContainText(archivedNumber);
+
+    await archiveToggle.check();
+    await exportArchivedStarted.promise;
+    let downloadStarted = false;
+    const downloadPromise = page.waitForEvent('download').then(download => {
+      downloadStarted = true;
+      return download;
+    });
+    await page.locator('#btnExportCsv').click();
+    await archiveToggle.uncheck();
+    await exportActiveStarted.promise;
+    exportArchived.resolve();
+    await page.waitForTimeout(100);
+    expect(downloadStarted).toBe(false);
+    exportActive.resolve();
+    const download = await downloadPromise;
+    const stream = await download.createReadStream();
+    const chunks = [];
+    for await (const chunk of stream) chunks.push(chunk);
+    const csv = Buffer.concat(chunks).toString('utf8');
+    expect(csv).toContain(activeNumber);
+    expect(csv).not.toContain(archivedNumber);
+    await expect(archiveToggle).not.toBeChecked();
+    expect(listCall).toBe(5);
+  });
+
+  test('completed printer lane caps cards without understating its total', async ({ page }) => {
+    const failures = collectBrowserFailures(page);
+    const completedRows = Array.from({ length: 13 }, (_, index) => ({
+      id: 99000 + index,
+      customerName: `Completed Customer ${index + 1}`,
+      jobName: `Completed Print ${index + 1}`,
+      printerName: 'Bambu P1S',
+      status: 'Completed',
+      priority: 'Normal',
+      progressPercent: 100,
+      quantity: 1,
+      plateCount: 1,
+      estimatedHours: 1,
+      actualHours: 1,
+      isArchived: false,
+    }));
+
+    await page.goto('/');
+    await expect(page.locator('#app')).toContainText('Dashboard');
+    await page.route('**/api/printer-queue-items*', route => {
+      const url = new URL(route.request().url());
+      if (route.request().method() !== 'GET' || url.pathname !== '/api/printer-queue-items') return route.continue();
+      return route.fulfill(jsonResponse(completedRows));
+    });
+    await page.route('**/api/customer-jobs*', route => {
+      const url = new URL(route.request().url());
+      if (route.request().method() !== 'GET' || url.pathname !== '/api/customer-jobs') return route.continue();
+      return route.fulfill(jsonResponse([]));
+    });
+
+    await page.evaluate(() => window.showPage('printerQueue'));
+    const completedColumn = page.locator('.printer-board-column').filter({
+      has: page.locator('h3', { hasText: /^Completed$/ }),
+    });
+    await expect(completedColumn).toHaveCount(1);
+    await expect(completedColumn.locator('.printer-board-column-head .badge')).toHaveText('13');
+    await expect(completedColumn.locator('.printer-queue-card')).toHaveCount(12);
+    await expect(completedColumn).toContainText('Showing the latest 12 of 13 completed prints.');
     expect(failures).toEqual([]);
   });
 

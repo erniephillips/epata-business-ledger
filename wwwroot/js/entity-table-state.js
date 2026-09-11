@@ -20,6 +20,8 @@
     if (!filter) return true;
 
     const statuses = statusBlob(row);
+    if (filter === 'archived') return row?.isArchived === true;
+    if (row?.isArchived === true) return false;
     if (filter === 'needs-review') return row?.needsReview === true || statuses.includes('review');
     if (filter === 'open') return /open|sent|unpaid|partial|waiting|lead|quoted|progress/.test(statuses);
     if (filter === 'paid') return /paid|done|completed|fulfilled|refunded/.test(statuses);

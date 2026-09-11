@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import {
   RECORD_PAGE_SIZES,
   buildRecordViewModel,
@@ -55,6 +56,15 @@ assert.ok(filteredCsvLines[2].startsWith('"INV-2026-0002"'));
 
 const guardedCsv = recordsToCsv(records, { q: 'csv guard' });
 assert.ok(guardedCsv.includes('"\'=CSV Guard"'));
+
+const recordsSource = await readFile(new URL('../wwwroot/invoice-builder/js/records.js', import.meta.url), 'utf8');
+const apiSource = await readFile(new URL('../wwwroot/invoice-builder/js/api.js', import.meta.url), 'utf8');
+assert.ok(recordsSource.includes('data-record-action="restore-ledger"'), 'Archived AR-only rows should expose their own restore action.');
+assert.ok(recordsSource.includes('api.restoreReceivable(id)'), 'AR-only Restore should call the owning ledger route in both embedded and standalone modes.');
+assert.ok(apiSource.includes('restoreReceivable:'), 'Standalone invoice records API should provide AR restore directly.');
+assert.ok(recordsSource.includes("target.searchParams.set('openLedger', 'receivables')"), 'Standalone Open AR should preserve the exact AR target in the main-shell navigation URL.');
+assert.ok(recordsSource.includes("target.hash = 'receivables'"), 'Standalone Open AR should navigate to the main AR ledger.');
+assert.ok(recordsSource.includes('window.location.assign(`/#${encodeURIComponent(page)}`)'), 'Standalone customer links should navigate to the matching main-app detail page.');
 
 console.log(JSON.stringify({
   RecordsViewBehavior: 'pass',

@@ -966,7 +966,7 @@ body.sidebar-collapsed .nav-button {
 .communication-reference { display: block; margin-top: .25rem; color: var(--muted); overflow-wrap: anywhere; word-break: break-word; }
 .printer-board {
   display: grid;
-  grid-template-columns: repeat(5, minmax(245px, 1fr));
+  grid-template-columns: repeat(var(--printer-board-columns, 5), minmax(245px, 1fr));
   gap: .7rem;
   padding-bottom: .5rem;
   overflow-x: auto;
@@ -997,6 +997,23 @@ body.sidebar-collapsed .nav-button {
   box-shadow: var(--shadow-soft);
 }
 .printer-queue-card.attention { border-color: #fdba74; background: #fffaf2; }
+.archived-record {
+  background: #f4f6f8;
+  color: var(--muted);
+}
+.printer-queue-card.archived-record,
+.communication-card.archived-record {
+  border-color: #cbd5e1;
+  box-shadow: none;
+}
+.archived-record td { background: #f4f6f8; }
+.archived-record .badge.warn,
+.archived-record .badge.bad,
+.archived-record .badge.good {
+  border-color: #cbd5e1;
+  background: #e2e8f0;
+  color: #475569;
+}
 .printer-queue-card h4 { margin: 0; overflow-wrap: anywhere; }
 .printer-queue-card p,
 .printer-queue-card small { margin: 0; color: var(--muted); overflow-wrap: anywhere; }

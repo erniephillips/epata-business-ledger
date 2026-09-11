@@ -5,6 +5,7 @@ node_modules/
 test-results/
 playwright-report/
 *.log
+*.pid
 
 # Private business data: never commit receipts, proof files, local DBs, or backups.
 Data/*.db
@@ -26,6 +27,12 @@ proof/
 *.heic
 *.tif
 *.tiff
+
+# Static site assets are source files; private uploads are already excluded by folder.
+!wwwroot/**/*.png
+!wwwroot/**/*.jpg
+!wwwroot/**/*.jpeg
+!wwwroot/**/*.webp
 *.zip
 *.7z
 *.rar

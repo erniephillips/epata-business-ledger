@@ -731,7 +731,7 @@ test.describe('invoice and estimate state stress', () => {
       const listener = event => observed.push({ ...event.detail });
       window.addEventListener('epata:invoice-view-changed', listener);
       try {
-        const module = await import('/invoice-builder/js/app.js?v=41');
+        const module = await import('/invoice-builder/js/app.js?v=43');
         await module.init({
           initialView: 'builder',
           newType: 'INVOICE',
@@ -1096,7 +1096,7 @@ test.describe('invoice and estimate state stress', () => {
     });
 
     await page.evaluate(async () => {
-      const module = await import('/invoice-builder/js/app.js?v=41');
+      const module = await import('/invoice-builder/js/app.js?v=43');
       const snapshot = window._invoiceToolSnapshot();
       window._invoiceToolDispose();
       document.dispatchEvent(new KeyboardEvent('keydown', {

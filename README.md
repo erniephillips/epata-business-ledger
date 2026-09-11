@@ -23,20 +23,9 @@ A local-first .NET 10 + SQLite web app for EPATA 3D Prints. It is meant to repla
 - One-time old invoice-app import helper for migrating existing estimate/invoice records
 - Info hover bubbles throughout the app
 
-## Seeded starting data
+## First-run data
 
-The app seeds your current known entries from the uploaded PDFs:
-
-- Charles Eke paid direct invoice: `INV-2026-0001`
-- Ryan Lavallee open invoice: tracked as `INV-2026-0002` because the uploaded PDF reused `INV-2026-0001`
-- Etsy orders:
-  - `4013795986` Crystal Koplar
-  - `4035148787` Diletta Mittone
-  - `4054847709` Jennifer Zappone
-  - `4057061093` Melissa McElfish
-  - `4057880893` saheed arije
-
-The Etsy rows are marked `Needs Review` because the Etsy order PDFs show customer totals and tax, but not actual Etsy fees, actual label costs, packaging cost, or COGS.
+A fresh installation starts with an empty ledger and three generic account categories. It never seeds customer names, addresses, order numbers, invoices, tracking numbers, or other business records from source code. Add records through the app or use an explicit import from your own local files.
 
 ## How to run normally
 
