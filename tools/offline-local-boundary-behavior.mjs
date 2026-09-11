@@ -58,7 +58,7 @@ const [
   readProjectFile('Services/AiEstimateService.cs'),
   readProjectFile('Services/AiOperationsService.cs'),
   readProjectFile('Services/InvoiceAppImportService.cs'),
-  readProjectFile('run.ps1'),
+  readProjectFile('launch-epata.ps1'),
   readProjectFile('run.bat'),
   readProjectFile('tools/local-smoke.ps1'),
   readProjectFile('tools/full-acceptance.ps1'),
@@ -107,8 +107,11 @@ mustInclude(aiEstimateService, 'return addresses.Length > 0 && addresses.All(IsP
 mustInclude(aiOperationsService, 'Private or local-network URLs are blocked.', 'AI Operations URL intake should block local/private hosts.');
 mustInclude(program, 'ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { AllowAutoRedirect = false });', 'External AI URL fetchers should not silently follow redirects before validation.');
 
-mustInclude(runPs1, '[object]$OpenBrowserOnStart = $true', 'Manual run script should keep browser auto-open explicit.');
-mustInclude(runPs1, '$appArgs += "App:OpenBrowserOnStart=$openBrowserValue"', 'run.ps1 should forward the browser auto-open setting.');
+mustInclude(runPs1, '[object]$OpenBrowserOnStart = $true', 'The canonical launcher should keep browser auto-open explicit.');
+mustInclude(runPs1, "@('Data', 'Models', 'Services', 'Properties')", 'Launcher freshness checks should include all backend source directories.');
+mustInclude(runPs1, 'Get-ChildItem -LiteralPath $webRoot -Recurse -File', 'Launcher freshness checks should include every packaged web asset.');
+mustInclude(runPs1, '$env:App__OpenBrowserOnStart = "false"', 'The launcher should prevent the child process from racing its own browser open.');
+mustInclude(runPs1, 'Start-Process -FilePath $effectiveUrl', 'The launcher should open the browser only after the health check succeeds.');
 mustInclude(runBat, 'powershell -ExecutionPolicy Bypass -File "%~dp0run.ps1" %*', 'run.bat should forward all launcher arguments to run.ps1.');
 
 for (const [name, source] of [

@@ -13,6 +13,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<ReceivableInvoice> ReceivableInvoices => Set<ReceivableInvoice>();
     public DbSet<Bill> Bills => Set<Bill>();
     public DbSet<Expense> Expenses => Set<Expense>();
+    public DbSet<OrderLossIncident> OrderLossIncidents => Set<OrderLossIncident>();
     public DbSet<Product> Products => Set<Product>();
     public DbSet<Asset> Assets => Set<Asset>();
     public DbSet<MakerWorldReward> MakerWorldRewards => Set<MakerWorldReward>();
@@ -22,6 +23,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<TaxObligation> TaxObligations => Set<TaxObligation>();
     public DbSet<MileageLog> MileageLogs => Set<MileageLog>();
     public DbSet<AppSetting> AppSettings => Set<AppSetting>();
+    public DbSet<TaxYearSetup> TaxYearSetups => Set<TaxYearSetup>();
     public DbSet<InvoiceDocument> InvoiceDocuments => Set<InvoiceDocument>();
     public DbSet<InvoiceLineItem> InvoiceLineItems => Set<InvoiceLineItem>();
     public DbSet<InvoiceDocumentEvent> InvoiceDocumentEvents => Set<InvoiceDocumentEvent>();
@@ -33,6 +35,15 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         modelBuilder.Entity<Party>().HasIndex(x => x.Name);
         modelBuilder.Entity<Sale>().HasIndex(x => x.SaleDate);
         modelBuilder.Entity<Sale>().HasIndex(x => x.OrderNumber);
+        modelBuilder.Entity<Sale>()
+            .HasIndex(x => x.SourceReceivableInvoiceId)
+            .IsUnique()
+            .HasFilter("\"SourceReceivableInvoiceId\" IS NOT NULL");
+        modelBuilder.Entity<Sale>()
+            .HasOne(x => x.SourceReceivableInvoice)
+            .WithMany()
+            .HasForeignKey(x => x.SourceReceivableInvoiceId)
+            .OnDelete(DeleteBehavior.Restrict);
         modelBuilder.Entity<CustomerJob>().HasIndex(x => x.CustomerName);
         modelBuilder.Entity<CustomerJob>().HasIndex(x => x.RelatedInvoiceNumber);
         modelBuilder.Entity<CustomerCommunication>().HasIndex(x => x.CustomerName);
@@ -43,13 +54,25 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         modelBuilder.Entity<ReceivableInvoice>().HasIndex(x => x.InvoiceNumber).IsUnique(false);
         modelBuilder.Entity<Bill>().HasIndex(x => x.DueDate);
         modelBuilder.Entity<Expense>().HasIndex(x => x.ExpenseDate);
+        modelBuilder.Entity<OrderLossIncident>().HasIndex(x => x.IncidentDate);
+        modelBuilder.Entity<OrderLossIncident>().HasIndex(x => x.OrderNumber);
+        modelBuilder.Entity<OrderLossIncident>().HasIndex(x => x.SaleId);
         modelBuilder.Entity<Product>().HasIndex(x => x.Sku).IsUnique(false);
         modelBuilder.Entity<AuditDocument>().HasIndex(x => x.RelatedRecordNumber);
+        modelBuilder.Entity<AuditDocument>()
+            .HasIndex(x => x.UploadFingerprint)
+            .IsUnique()
+            .HasFilter("\"UploadFingerprint\" IS NOT NULL AND \"IsArchived\" = 0");
         modelBuilder.Entity<TaxObligation>().HasIndex(x => x.DueDate);
         modelBuilder.Entity<TaxObligation>().HasIndex(x => new { x.TaxYear, x.Title, x.Period });
+        modelBuilder.Entity<TaxYearSetup>().HasIndex(x => x.TaxYear).IsUnique();
         modelBuilder.Entity<MileageLog>().HasIndex(x => x.TripDate);
         modelBuilder.Entity<AppSetting>().HasIndex(x => x.Key).IsUnique();
         modelBuilder.Entity<InvoiceDocument>().HasIndex(x => x.DocNumber).IsUnique(false);
+        modelBuilder.Entity<InvoiceDocument>()
+            .HasIndex(x => x.SourceEstimateId)
+            .IsUnique()
+            .HasFilter("\"SourceEstimateId\" IS NOT NULL");
         modelBuilder.Entity<InvoiceDocument>().HasIndex(x => x.UpdatedAt);
         modelBuilder.Entity<InvoiceDocumentEvent>().HasIndex(x => x.InvoiceDocumentId);
         modelBuilder.Entity<InvoiceDocumentEvent>().HasIndex(x => x.CreatedAt);
@@ -58,6 +81,17 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             .WithMany(x => x.LineItems)
             .HasForeignKey(x => x.InvoiceDocumentId)
             .OnDelete(DeleteBehavior.Cascade);
+
+        foreach (var entityType in modelBuilder.Model.GetEntityTypes()
+                     .Where(entityType => typeof(AuditableEntity).IsAssignableFrom(entityType.ClrType)))
+        {
+            modelBuilder.Entity(entityType.ClrType)
+                .Property(nameof(AuditableEntity.UpdatedAtUtc))
+                .IsConcurrencyToken();
+        }
+        modelBuilder.Entity<InvoiceDocument>()
+            .Property(document => document.UpdatedAt)
+            .IsConcurrencyToken();
     }
 
     public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)

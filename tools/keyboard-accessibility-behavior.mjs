@@ -211,7 +211,7 @@ for (const id of ['btnNewEstimate', 'btnNewInvoice', 'btnPreviewPdf', 'btnSaveNe
 mustInclude(builderRows, 'aria-label="Remove line item"', 'Standalone invoice line remove control should be keyboard-reachable and labelled.');
 mustInclude(builderApp, '<button class="record-link" type="button"', 'Standalone recent-record document numbers should be real buttons.');
 mustInclude(builderApp, 'escapeHtml(r.docNumber ||', 'Standalone recent-record document numbers should be escaped.');
-mustInclude(builderRecords, '<button class="record-link"', 'Standalone records customer links should be real buttons.');
+mustMatch(builderRecords, /<button\s+type="button"\s+class="record-link"/, 'Standalone records customer links should be real buttons.');
 mustInclude(builderRecords, 'id="recPageFirst" aria-label="First records page"', 'Standalone records first pager control should be labelled.');
 mustInclude(builderRecords, 'id="recPageLast" aria-label="Last records page"', 'Standalone records last pager control should be labelled.');
 mustInclude(builderApp, "document.addEventListener('keydown'", 'Standalone invoice builder should register keyboard shortcuts.');

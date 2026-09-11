@@ -44,7 +44,7 @@ import {
   validateDocumentState,
 } from '../wwwroot/invoice-builder/js/validation.js';
 import { generatePdf, renderInvoiceHtml } from '../wwwroot/invoice-builder/js/pdf.js';
-import { escapeHtml, money, plainMoney, statusBadge, toast, typeBadge } from '../wwwroot/invoice-builder/js/utils.js';
+import { escapeHtml, money, plainMoney, statusBadge, toast, todayStr, typeBadge } from '../wwwroot/invoice-builder/js/utils.js';
 
 const assertIncludes = (html, needle, message) => {
   assert.ok(html.includes(needle), message || `Expected PDF HTML to include ${needle}`);
@@ -60,15 +60,24 @@ const stripAutoPrintScript = html => html.replace(`\n${PRINT_TRIGGER_SCRIPT}`, '
 
 assert.equal(money(65.505), '$65.51', 'Currency display should round half-cent values to the nearest cent.');
 assert.equal(plainMoney(65.505), '65.51', 'Plain currency values should round half-cent values to the nearest cent.');
+const previousTimeZone = process.env.TZ;
+process.env.TZ = 'America/New_York';
+assert.equal(
+  todayStr(0, new Date('2026-09-11T01:30:00.000Z')),
+  '2026-09-10',
+  'Evening document dates must use the local calendar day instead of UTC.',
+);
+if (previousTimeZone === undefined) delete process.env.TZ;
+else process.env.TZ = previousTimeZone;
 
 assert.deepEqual(statusOptionsForDocType('ESTIMATE').map(([value]) => value), ESTIMATE_STATUSES);
 assert.deepEqual(statusOptionsForDocType('INVOICE').map(([value]) => value), INVOICE_STATUSES);
 assert.deepEqual(ESTIMATE_STATUSES, ['Draft', 'Sent', 'Accepted', 'Void']);
 assert.deepEqual(INVOICE_STATUSES, ['Draft', 'Sent', 'Partial', 'Paid', 'Void']);
 
-assert.equal(remapStatusForDocType('INVOICE', 'Accepted'), 'Paid');
-assert.equal(remapStatusForDocType('ESTIMATE', 'Paid'), 'Accepted');
-assert.equal(remapStatusForDocType('ESTIMATE', 'Partial'), 'Accepted');
+assert.equal(remapStatusForDocType('INVOICE', 'Accepted'), 'Draft');
+assert.equal(remapStatusForDocType('ESTIMATE', 'Paid'), 'Draft');
+assert.equal(remapStatusForDocType('ESTIMATE', 'Partial'), 'Draft');
 assert.equal(remapStatusForDocType('INVOICE', 'Partial'), 'Partial');
 assert.equal(remapStatusForDocType('INVOICE', 'Not Real'), 'Draft');
 
@@ -168,21 +177,21 @@ const round66TypeSwitchPlan = planDocTypeChange('INVOICE', {
 });
 assert.equal(round66TypeSwitchPlan.docType, 'INVOICE');
 assert.equal(round66TypeSwitchPlan.docNumber, '', 'Round 66 type switch should clear the EST number before saving as invoice.');
-assert.equal(round66TypeSwitchPlan.status, 'Paid', 'Round 66 accepted estimate should become a paid invoice when switched to invoice.');
+assert.equal(round66TypeSwitchPlan.status, 'Draft', 'Changing document type must not invent a payment event.');
 assert.equal(round66TypeSwitchPlan.dueDateLabel, 'Due Date');
 assert.equal(round66TypeSwitchPlan.termsNotes, defaultTermsForDocType('INVOICE'));
 assert.deepEqual(round66TypeSwitchPlan.statusOptions.map(([value]) => value), INVOICE_STATUSES);
 
-const round66PaidInvoiceTotals = calculateDocumentTotals({
+const round66DraftInvoiceTotals = calculateDocumentTotals({
   docType: 'INVOICE',
-  status: 'Paid',
+  status: 'Draft',
   amountPaid: 0,
   taxRate: 10,
   lineItems: [{ description: 'Round 66 paid workflow item', quantity: 1, rate: 100, amount: 100 }],
 });
-assert.equal(round66PaidInvoiceTotals.total, 110);
-assert.equal(round66PaidInvoiceTotals.amountPaid, 110, 'Round 66 paid invoice should auto-pay the full total.');
-assert.equal(round66PaidInvoiceTotals.balance, 0, 'Round 66 paid invoice should have zero balance.');
+assert.equal(round66DraftInvoiceTotals.total, 110);
+assert.equal(round66DraftInvoiceTotals.amountPaid, 0, 'A type-switched draft invoice must not be auto-paid.');
+assert.equal(round66DraftInvoiceTotals.balance, 110, 'A type-switched draft invoice must keep the full balance due.');
 
 const round66SavePlan = buildSaveRequestPlan(false, {
   activeRecordId: 14,
@@ -194,10 +203,10 @@ const round66SavePlan = buildSaveRequestPlan(false, {
     docType: 'INVOICE',
     docNumber: round66TypeSwitchPlan.docNumber,
     status: round66TypeSwitchPlan.status,
-    projectName: 'Round 66 convert estimate to paid invoice',
+    projectName: 'Round 66 convert estimate to draft invoice',
     projectNotes: 'Existing private note',
     paymentMethod: 'Cash',
-    ...round66PaidInvoiceTotals,
+    ...round66DraftInvoiceTotals,
   },
 });
 assert.equal(round66SavePlan.action, 'create');
@@ -206,9 +215,9 @@ assert.equal(round66SavePlan.originalUnchanged, true);
 assert.equal(round66SavePlan.updateId, null);
 assert.equal(round66SavePlan.body.docNumber, 'INV-2026-0014');
 assert.equal(round66SavePlan.body.docType, 'INVOICE');
-assert.equal(round66SavePlan.body.status, 'Paid');
-assert.equal(round66SavePlan.body.amountPaid, 110);
-assert.equal(round66SavePlan.body.balance, 0);
+assert.equal(round66SavePlan.body.status, 'Draft');
+assert.equal(round66SavePlan.body.amountPaid, 0);
+assert.equal(round66SavePlan.body.balance, 110);
 assert.match(round66SavePlan.body.projectNotes, /Created as a new INVOICE from ESTIMATE EST-2026-0014/);
 assert.match(round66SavePlan.body.projectNotes, /original saved record was not overwritten/);
 
@@ -237,8 +246,10 @@ const round67LineItemHtml = buildLineItemRowHtml({
 });
 assertIncludes(round67LineItemHtml, 'textarea class="item-desc"', 'Round 67 add-line row should include editable description.');
 assertIncludes(round67LineItemHtml, 'textarea class="item-details"', 'Round 67 add-line row should include editable details.');
-assertIncludes(round67LineItemHtml, 'class="item-qty" type="number"', 'Round 67 add-line row should include editable quantity.');
-assertIncludes(round67LineItemHtml, 'class="item-rate" type="number"', 'Round 67 add-line row should include editable rate.');
+assertIncludes(round67LineItemHtml, 'class="item-qty"', 'Round 67 add-line row should include editable quantity.');
+assertIncludes(round67LineItemHtml, 'aria-label="Line item quantity"', 'Round 67 quantity needs an accessible name.');
+assertIncludes(round67LineItemHtml, 'class="item-rate"', 'Round 67 add-line row should include editable rate.');
+assertIncludes(round67LineItemHtml, 'aria-label="Line item rate"', 'Round 67 rate needs an accessible name.');
 assertIncludes(round67LineItemHtml, 'onclick="window._removeLineItem(this)"', 'Round 67 add-line row should wire the remove button.');
 assertIncludes(round67LineItemHtml, '&lt;script&gt;alert(1)&lt;/script&gt;', 'Round 67 add-line row should escape user text.');
 assertExcludes(round67LineItemHtml, '<script>alert(1)</script>', 'Round 67 add-line row should not emit raw script text.');
@@ -266,11 +277,13 @@ const activeEstimateIdentity = identityFromDocument({
   id: 14,
   docType: 'ESTIMATE',
   docNumber: 'EST-2026-0014',
+  updatedAt: '2026-09-10T12:30:00.0000000+00:00',
 });
 assert.deepEqual(activeEstimateIdentity, {
   activeRecordId: 14,
   activeRecordType: 'ESTIMATE',
   activeRecordNumber: 'EST-2026-0014',
+  activeRecordUpdatedAt: '2026-09-10T12:30:00.0000000+00:00',
 });
 assert.equal(
   activeRecordBarText(activeEstimateIdentity, 'EST-2026-0014'),
@@ -820,22 +833,26 @@ for (const escapedNeedle of [
 const invoiceAppSource = await readFile(new URL('../wwwroot/invoice-builder/js/app.js', import.meta.url), 'utf8');
 const invoicePdfSource = await readFile(new URL('../wwwroot/invoice-builder/js/pdf.js', import.meta.url), 'utf8');
 const invoiceBuilderHtml = await readFile(new URL('../wwwroot/invoice-builder/index.html', import.meta.url), 'utf8');
+assertIncludes(invoiceAppSource, 'let activeRecordUpdatedAt = null;', 'Active invoice records should retain their loaded revision token.');
+assertIncludes(invoiceAppSource, 'activeRecordUpdatedAt: snapshot.activeRecordUpdatedAt || doc.updatedAt || null,', 'Invoice snapshots should preserve optimistic-concurrency identity across shell navigation.');
+assertIncludes(invoiceAppSource, 'result = await api.update(savePlan.updateId, saveBody, identity.activeRecordUpdatedAt);', 'Invoice updates should send the expected loaded revision.');
 assertIncludes(invoiceAppSource, 'window.addLineItem     = addLineItemAndRefresh;', 'Round 67 Add Line Item button should refresh preview through the app wrapper.');
 assertIncludes(invoiceAppSource, 'window._removeLineItem = removeLineItemAndRefresh;', 'Round 67 Remove Line Item button should refresh preview through the app wrapper.');
 assertIncludes(invoiceAppSource, 'function addLineItemAndRefresh', 'Round 67 add-line preview wrapper is missing.');
 assertIncludes(invoiceAppSource, 'function removeLineItemAndRefresh', 'Round 67 remove-line preview wrapper is missing.');
 assertIncludes(invoiceAppSource, 'refreshInvoicePreview();', 'Round 67 line-item wrappers should refresh the preview.');
 assertIncludes(invoiceAppSource, 'window._builderUpdate  = () => { updateTotals(); refreshInvoicePreview(); scheduleAutoSave(); };', 'Round 68 field-change handler should refresh totals, preview, and autosave.');
-assertIncludes(invoiceAppSource, "builderView?.addEventListener('input', debounce(refreshInvoicePreview, 150));", 'Round 68 builder input events should refresh the live preview.');
-assertIncludes(invoiceAppSource, "builderView?.addEventListener('change', debounce(refreshInvoicePreview, 150));", 'Round 68 builder change events should refresh the live preview.');
+assertIncludes(invoiceAppSource, "builderView?.addEventListener('input', debounce(refreshInvoicePreview, 150), { signal });", 'Round 68 builder input events should refresh the live preview.');
+assertIncludes(invoiceAppSource, "builderView?.addEventListener('change', debounce(refreshInvoicePreview, 150), { signal });", 'Round 68 builder change events should refresh the live preview.');
 assertIncludes(invoiceAppSource, "const frame = el('invoicePreviewFrame');", 'Round 68 preview refresh should target the preview iframe.');
 assertIncludes(invoiceAppSource, "const data = { ...getFormData(), ...appConfig, brandColor: appConfig.brandColor || '#17468f' };", 'Round 68 preview refresh should render current form data with app config.');
 assertIncludes(invoiceAppSource, 'frame.srcdoc = renderInvoiceHtml(data);', 'Round 68 preview refresh should replace the iframe srcdoc with current rendered HTML.');
 assertIncludes(invoiceAppSource, "on('btnPreviewPdf',   () => onGeneratePdf(true));", 'Round 69 Preview button should request preview mode.');
 assertIncludes(invoiceAppSource, 'async function onGeneratePdf(preview = false)', 'Round 69 PDF generator handler is missing.');
-assertIncludes(invoiceAppSource, 'if (!preview && apiReady && !await saveRecord(false)) return;', 'Round 69 preview mode should remain read-only while downloads save first.');
+assertIncludes(invoiceAppSource, 'const saved = await saveRecord(false).catch(() => null);', 'Round 69 preview mode should remain read-only while downloads always save first.');
 assertIncludes(invoiceAppSource, 'const formData = getFormData();', 'Round 69 PDF generation should read current form data.');
-assertIncludes(invoiceAppSource, 'await generatePdf(data, preview);', 'Round 69 PDF generation should pass the preview flag to the renderer.');
+assertIncludes(invoiceAppSource, 'pdfWindow = openPdfWindow(preview);', 'Round 69 PDF generation should reserve its popup during the user click.');
+assertIncludes(invoiceAppSource, 'await generatePdf(data, preview, pdfWindow);', 'Round 69 PDF generation should reuse the reserved preview/print window.');
 assertIncludes(invoiceAppSource, "on('btnDownloadPdf',  () => onGeneratePdf(false));", 'Round 70 Download PDF button should request printable output mode.');
 assertIncludes(invoiceBuilderHtml, 'id="btnImportPdfDraftBuilder"', 'Round 71 Builder header should expose AI Import PDF.');
 assertIncludes(invoiceBuilderHtml, "document.getElementById('invoicePdfImportFile').click()", 'Round 71 Builder header AI Import PDF should open the PDF file picker.');
@@ -843,7 +860,7 @@ assertIncludes(invoiceBuilderHtml, 'id="btnImportPdfDraft">AI Import PDF</button
 assertMatches(invoiceBuilderHtml, /id="invoicePdfImportFile"[^>]*accept="\.pdf,application\/pdf"[^>]*style="display:none"/, 'Round 71 AI Import PDF file picker should accept only PDFs.');
 assertIncludes(invoiceAppSource, "on('btnImportPdfDraft', () => el('invoicePdfImportFile')?.click());", 'Round 71 Records AI Import PDF button should open the file picker.');
 assertIncludes(invoiceAppSource, "on('invoicePdfImportFile', (e) => onImportPdfDraft(e));", 'Round 71 AI Import PDF file picker should map selected files into drafts.');
-assertIncludes(invoiceAppSource, "from './pdf.js?v=5';", 'Round 75 app should bust the PDF renderer cache after page-flow changes.');
+assertIncludes(invoiceAppSource, "from './pdf.js?v=6';", 'Round 75 app should bust the PDF renderer cache after page-flow changes.');
 assertIncludes(invoiceAppSource, "from './product-lookups.js?v=1';", 'Round 74 app should load the tested product lookup helper.');
 assertIncludes(invoiceAppSource, 'list.innerHTML = buildProductOptionsHtml(productLookups);', 'Round 74 product datalist should render from Product lookup rows.');
 assertIncludes(invoiceAppSource, "const selected = findProductByName(productLookups, textVal('projectName'));", 'Round 74 selected product should match the project-name datalist value.');

@@ -27,7 +27,10 @@ export const api = {
   get:         (id)            => request(`/api/documents/${id}`),
   nextNumber:  (type)          => request(`/api/documents/next-number?type=${type}`),
   create:      (body)          => request('/api/documents',      { method: 'POST', ...json(body) }),
-  update:      (id, body)      => request(`/api/documents/${id}`, { method: 'PUT',  ...json(body) }),
+  update:      (id, body, expectedUpdatedAt = '') => request(`/api/documents/${id}`, {
+    method: 'PUT',
+    ...json(body, expectedUpdatedAt ? { 'X-EPATA-Updated-At': expectedUpdatedAt } : {}),
+  }),
   delete:      (id)            => request(`/api/documents/${id}`, { method: 'DELETE' }),
   restore:     (id)            => request(`/api/documents/${id}/restore`, { method: 'POST' }),
   duplicate:   (id)            => request(`/api/documents/${id}/duplicate`, { method: 'POST' }),
@@ -58,9 +61,9 @@ export const api = {
   },
 };
 
-function json(body) {
+function json(body, headers = {}) {
   return {
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...headers },
     body: JSON.stringify(body),
   };
 }

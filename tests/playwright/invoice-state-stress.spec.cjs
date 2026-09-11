@@ -592,6 +592,39 @@ test.describe('invoice and estimate state stress', () => {
     expect(failures).toEqual([]);
   });
 
+  test('record updates carry the loaded revision and refresh it after each save', async ({ page }) => {
+    await openInvoiceBuilder(page);
+    const doc = await createDocumentByApi(page, {
+      ...estimateProfile,
+      customerName: 'Revision Header Customer',
+      projectName: 'Revision Header Original',
+    });
+    expect(doc.updatedAt).toBeTruthy();
+
+    const expectedRevisionHeaders = [];
+    await page.route('**/api/documents/**', async route => {
+      const request = route.request();
+      if (request.method() === 'PUT' && new URL(request.url()).pathname === `/api/documents/${doc.id}`) {
+        expectedRevisionHeaders.push(request.headers()['x-epata-updated-at'] || '');
+        const response = await route.fetch();
+        await route.fulfill({ response });
+        return;
+      }
+      await route.continue();
+    });
+
+    await openRecord(page, doc.docNumber, doc.id);
+    await setField(page, '#projectName', 'Revision Header First Save');
+    const firstSave = await clickSaveAndWait(page, 'PUT');
+    expect(firstSave.updatedAt).toBeTruthy();
+    expect(expectedRevisionHeaders).toEqual([doc.updatedAt]);
+
+    await setField(page, '#projectName', 'Revision Header Second Save');
+    const secondSave = await clickSaveAndWait(page, 'PUT');
+    expect(secondSave.updatedAt).toBeTruthy();
+    expect(expectedRevisionHeaders).toEqual([doc.updatedAt, firstSave.updatedAt]);
+  });
+
   test('backend save failure keeps active record and unsaved field values visible', async ({ page }) => {
     const failures = collectBrowserFailures(page);
     await openInvoiceBuilder(page);
@@ -626,5 +659,500 @@ test.describe('invoice and estimate state stress', () => {
       !message.includes('Injected invoice save failure') &&
       !message.includes('500 (Internal Server Error)') &&
       !message.includes('/api/documents/'))).toEqual([]);
+  });
+
+  test('latest Open or New intent wins when an earlier record load finishes late', async ({ page }) => {
+    await openInvoiceBuilder(page);
+    const first = await createDocumentByApi(page, {
+      ...estimateProfile,
+      customerName: 'Intent Race First Customer',
+      projectName: 'Intent Race First Project',
+    });
+    const second = await createDocumentByApi(page, {
+      ...invoiceProfile,
+      customerName: 'Intent Race Second Customer',
+      projectName: 'Intent Race Second Project',
+    });
+
+    let activeGate = null;
+    await page.route('**/api/documents/*', async route => {
+      const request = route.request();
+      const path = new URL(request.url()).pathname;
+      if (request.method() === 'GET' && path === `/api/documents/${first.id}` && activeGate) {
+        const gate = activeGate;
+        activeGate = null;
+        gate.started();
+        await gate.release;
+      }
+      await route.continue();
+    });
+    const armFirstLoad = () => {
+      let started;
+      let release;
+      const startedPromise = new Promise(resolve => { started = resolve; });
+      const releasePromise = new Promise(resolve => { release = resolve; });
+      activeGate = { started, release: releasePromise };
+      return { started: startedPromise, release };
+    };
+
+    await page.locator('button.nav-item[data-view="records"]').click();
+    await page.locator('#recSearch').fill('Intent Race');
+    const firstGate = armFirstLoad();
+    await recordRow(page, first.docNumber).getByRole('button', { name: 'Open' }).click();
+    await firstGate.started;
+    await recordRow(page, second.docNumber).getByRole('button', { name: 'Open' }).click();
+    await expect(page.locator('#activeRecordText')).toContainText(second.docNumber);
+    firstGate.release();
+    await expect(page.locator('#projectName')).toHaveValue('Intent Race Second Project');
+    await page.waitForTimeout(150);
+    await expect(page.locator('#activeRecordText')).toContainText(second.docNumber);
+
+    await page.locator('button.nav-item[data-view="records"]').click();
+    await page.locator('#recSearch').fill(first.docNumber);
+    const newGate = armFirstLoad();
+    await recordRow(page, first.docNumber).getByRole('button', { name: 'Open' }).click();
+    await newGate.started;
+    await page.locator('#view-records .view-actions button', { hasText: '+ New Invoice' }).click();
+    await expect(page.locator('#view-builder')).toBeVisible();
+    await expect(page.locator('#docType')).toHaveValue('INVOICE');
+    await expect(page.locator('#activeRecordText')).toContainText('New document');
+    newGate.release();
+    await page.waitForTimeout(150);
+    await expect(page.locator('#docType')).toHaveValue('INVOICE');
+    await expect(page.locator('#customerName')).toHaveValue('');
+    await expect(page.locator('#activeRecordText')).toContainText('New document');
+  });
+
+  test('initial builder route announces the requested invoice type only after it is applied', async ({ page }) => {
+    await openInvoiceBuilder(page);
+
+    const events = await page.evaluate(async () => {
+      const observed = [];
+      const listener = event => observed.push({ ...event.detail });
+      window.addEventListener('epata:invoice-view-changed', listener);
+      try {
+        const module = await import('/invoice-builder/js/app.js?v=41');
+        await module.init({
+          initialView: 'builder',
+          newType: 'INVOICE',
+          prefill: { docType: 'INVOICE', customerName: 'Route Timing Customer' },
+        });
+      } finally {
+        window.removeEventListener('epata:invoice-view-changed', listener);
+      }
+      return observed;
+    });
+
+    expect(events).toEqual([{ view: 'builder', docType: 'INVOICE' }]);
+    await expect(page.locator('#docType')).toHaveValue('INVOICE');
+    await expect(page.locator('#customerName')).toHaveValue('Route Timing Customer');
+  });
+
+  test('immediate Ctrl+S during delayed startup saves the visible draft without late overwrite', async ({ page }) => {
+    const failures = collectBrowserFailures(page);
+    let releaseStartupHealth;
+    const startupHealthGate = new Promise(resolve => { releaseStartupHealth = resolve; });
+    let healthRequests = 0;
+    const documentPosts = [];
+
+    await page.route('**/api/health', async route => {
+      healthRequests += 1;
+      if (healthRequests === 1) await startupHealthGate;
+      await route.continue();
+    });
+    page.on('request', request => {
+      const url = new URL(request.url());
+      if (request.method() === 'POST' && url.pathname === '/api/documents') {
+        documentPosts.push(request.postDataJSON());
+      }
+    });
+
+    try {
+      await page.goto('/invoice-builder/index.html');
+      await page.locator('button.nav-item[data-view="builder"]').click();
+      await expect(page.locator('#view-builder')).toBeVisible();
+      await expect.poll(() => healthRequests).toBe(1);
+
+      const initialDate = await page.locator('#docDate').inputValue();
+      const initialDueDate = await page.locator('#dueDate').inputValue();
+      expect(initialDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(initialDueDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+
+      await page.locator('#customerName').fill('Immediate Startup Save Customer');
+      const firstLine = page.locator('#lineItemsBody tr').first();
+      await firstLine.locator('.item-desc').fill('Immediate startup print');
+      await firstLine.locator('.item-qty').fill('2');
+      await firstLine.locator('.item-rate').fill('12.50');
+
+      const savedResponse = waitForDocumentSave(page, 'POST');
+      await page.keyboard.press('Control+s');
+      const saved = await savedResponse;
+      await waitForVisibleSavedState(page, saved);
+
+      expect(documentPosts).toHaveLength(1);
+      expect(documentPosts[0].customerName).toBe('Immediate Startup Save Customer');
+      expect(documentPosts[0].docDate).toBe(initialDate);
+      expect(documentPosts[0].dueDate).toBe(initialDueDate);
+      expect(documentPosts[0].lineItems[0]).toMatchObject({
+        description: 'Immediate startup print',
+        quantity: 2,
+        rate: 12.5,
+      });
+
+      const startupFinished = page.waitForResponse(response =>
+        new URL(response.url()).pathname === '/api/documents/stats' &&
+        response.request().method() === 'GET' &&
+        response.status() < 400,
+      );
+      releaseStartupHealth();
+      await startupFinished;
+
+      await expect(page.locator('#customerName')).toHaveValue('Immediate Startup Save Customer');
+      await expect(firstLine.locator('.item-desc')).toHaveValue('Immediate startup print');
+      await expect(firstLine.locator('.item-qty')).toHaveValue('2');
+      await expect(firstLine.locator('.item-rate')).toHaveValue('12.5');
+      await expect(page.locator('#docDate')).toHaveValue(initialDate);
+      await expect(page.locator('#dueDate')).toHaveValue(initialDueDate);
+      await expect(page.locator('#docNumber')).toHaveValue(saved.docNumber);
+      await expect.poll(() => documentPosts.length).toBe(1);
+
+      const persisted = await page.request.get(`/api/documents/${saved.id}`).then(response => response.json());
+      expect(persisted.customerName).toBe('Immediate Startup Save Customer');
+      expect(persisted.docDate).toBe(initialDate);
+      expect(persisted.dueDate).toBe(initialDueDate);
+      expect(persisted.lineItems[0]).toMatchObject({
+        description: 'Immediate startup print',
+        quantity: 2,
+        rate: 12.5,
+      });
+      expect(failures).toEqual([]);
+    } finally {
+      releaseStartupHealth();
+    }
+  });
+
+  test('both calculator Push to Builder controls transfer the live calculation without duplicate placeholder rows', async ({ page }) => {
+    const failures = collectBrowserFailures(page);
+    await openInvoiceBuilder(page);
+    await page.locator('button.nav-item[data-view="calculator"]').click();
+    await expect(page.locator('#view-calculator')).toBeVisible();
+
+    for (const [selector, value] of [
+      ['#grams', '100'], ['#gramRate', '0.05'],
+      ['#hours', '2'], ['#hourRate', '3'],
+      ['#designHours', '1'], ['#designRate', '25'],
+      ['#setupFee', '10'], ['#postFee', '4'],
+      ['#rush', '25'], ['#discount', '5'],
+      ['#taxRate', '7'], ['#minimum', '0'],
+    ]) {
+      await page.locator(selector).fill(value);
+    }
+    await page.locator('#difficultyGrid .diff-card[data-val="1.2"]').click();
+    await expect(page.locator('#totalOut')).toHaveText('$74.90');
+
+    await page.locator('#btnPushToBuilder').click();
+    await expect(page.locator('#view-builder')).toBeVisible();
+    await expect(page.locator('#toast-container')).toContainText('Calculator values pushed to builder');
+    await expect(page.locator('#docDiscount')).toHaveValue('5.00');
+    await expect(page.locator('#docRushPercent')).toHaveValue('25');
+    await expect(page.locator('#docTaxRate')).toHaveValue('7');
+    await expect(page.locator('#bTotal')).toHaveText('$74.90');
+
+    const firstPush = await page.locator('#lineItemsBody tr').evaluateAll(rows => rows.map(row => ({
+      description: row.querySelector('.item-desc')?.value,
+      quantity: Number(row.querySelector('.item-qty')?.value),
+      rate: Number(row.querySelector('.item-rate')?.value),
+      source: row.dataset.source,
+    })));
+    expect(firstPush).toHaveLength(6);
+    expect(firstPush.map(line => line.description)).toEqual([
+      'Print setup / file preparation',
+      'Material usage',
+      'Machine print time',
+      'Design / modeling time',
+      'Post-processing / handling',
+      'Material / difficulty surcharge',
+    ]);
+    expect(firstPush.find(line => line.description === 'Material usage')).toMatchObject({ quantity: 100, rate: 0.05, source: 'calculator' });
+
+    await page.locator('button.nav-item[data-view="calculator"]').click();
+    await page.locator('#grams').fill('120');
+    await page.locator('#btnPushToBuilderCard').click();
+    await expect(page.locator('#view-builder')).toBeVisible();
+    const pushedRows = page.locator('#lineItemsBody tr');
+    await expect(pushedRows).toHaveCount(6);
+    const materialIndex = await pushedRows.evaluateAll(rows => rows.findIndex(row => row.querySelector('.item-desc')?.value === 'Material usage'));
+    expect(materialIndex).toBeGreaterThanOrEqual(0);
+    const materialRow = pushedRows.nth(materialIndex);
+    await expect(materialRow.locator('.item-qty')).toHaveValue('120');
+    expect(await page.evaluate(() => window._invoiceToolIsDirty())).toBe(true);
+
+    await page.locator('#customerName').fill('Calculator Push Customer');
+    const saved = await clickSaveAndWait(page, 'POST');
+    const persisted = await page.request.get(`/api/documents/${saved.id}`).then(response => response.json());
+    expect(persisted.lineItems).toHaveLength(6);
+    expect(persisted.lineItems.map(line => line.sortOrder)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(failures).toEqual([]);
+  });
+
+  test('an edit made during save is persisted by one trailing save', async ({ page }) => {
+    await openInvoiceBuilder(page);
+    const doc = await createDocumentByApi(page, {
+      ...invoiceProfile,
+      customerName: 'Trailing Save Customer',
+      projectName: 'Trailing Save Original',
+    });
+    await openRecord(page, doc.docNumber, doc.id);
+
+    let releaseFirst;
+    let releaseThird;
+    let firstStartedResolve;
+    let secondStartedResolve;
+    let thirdStartedResolve;
+    const firstStarted = new Promise(resolve => { firstStartedResolve = resolve; });
+    const secondStarted = new Promise(resolve => { secondStartedResolve = resolve; });
+    const thirdStarted = new Promise(resolve => { thirdStartedResolve = resolve; });
+    const release = new Promise(resolve => { releaseFirst = resolve; });
+    const thirdRelease = new Promise(resolve => { releaseThird = resolve; });
+    const putBodies = [];
+    await page.route('**/api/documents/*', async route => {
+      const request = route.request();
+      if (request.method() === 'PUT' && new URL(request.url()).pathname === `/api/documents/${doc.id}`) {
+        putBodies.push(request.postDataJSON());
+        if (putBodies.length === 1) {
+          firstStartedResolve();
+          await release;
+        } else if (putBodies.length === 2) {
+          secondStartedResolve();
+        } else if (putBodies.length === 3) {
+          thirdStartedResolve();
+          await thirdRelease;
+        }
+      }
+      await route.continue();
+    });
+
+    await setField(page, '#projectName', 'Trailing Save First Revision');
+    await page.locator('#btnSaveDraft').click();
+    await firstStarted;
+    await setField(page, '#projectName', 'Trailing Save Final Revision');
+    await page.locator('#btnSaveDraft').click();
+    releaseFirst();
+    await secondStarted;
+    await waitForNoSaveInFlight(page);
+
+    expect(putBodies).toHaveLength(2);
+    expect(putBodies[0].projectName).toBe('Trailing Save First Revision');
+    expect(putBodies[1].projectName).toBe('Trailing Save Final Revision');
+    const persisted = await page.request.get(`/api/documents/${doc.id}`).then(response => response.json());
+    expect(persisted.projectName).toBe('Trailing Save Final Revision');
+    await expect(page.locator('#activeRecordText')).not.toContainText('Unsaved changes');
+
+    await setField(page, '#projectName', 'Explicit Save Snapshot');
+    await page.locator('#btnSaveDraft').click();
+    await thirdStarted;
+    await setField(page, '#projectName', 'Edited After Last Save Click');
+    releaseThird();
+    await waitForNoSaveInFlight(page);
+    await page.waitForTimeout(250);
+
+    expect(putBodies).toHaveLength(3);
+    const snapshotPersisted = await page.request.get(`/api/documents/${doc.id}`).then(response => response.json());
+    expect(snapshotPersisted.projectName).toBe('Explicit Save Snapshot');
+    await expect(page.locator('#projectName')).toHaveValue('Edited After Last Save Click');
+    await expect(page.locator('#activeRecordText')).toContainText('Unsaved changes');
+  });
+
+  test('Download PDF reserves its print window before awaiting a delayed save', async ({ page }) => {
+    await openInvoiceBuilder(page);
+    const doc = await createDocumentByApi(page, {
+      ...invoiceProfile,
+      customerName: 'PDF Window Customer',
+      projectName: 'PDF Window Original',
+    });
+    await openRecord(page, doc.docNumber, doc.id);
+
+    let releaseSave;
+    let saveStartedResolve;
+    const saveStarted = new Promise(resolve => { saveStartedResolve = resolve; });
+    const saveRelease = new Promise(resolve => { releaseSave = resolve; });
+    await page.route('**/api/documents/*', async route => {
+      const request = route.request();
+      if (request.method() === 'PUT' && new URL(request.url()).pathname === `/api/documents/${doc.id}`) {
+        saveStartedResolve();
+        await saveRelease;
+      }
+      await route.continue();
+    });
+
+    await setField(page, '#projectName', 'PDF Window Saved');
+    const popupPromise = page.waitForEvent('popup');
+    await page.locator('#btnDownloadPdf').click();
+    const popup = await popupPromise;
+    await saveStarted;
+    expect(popup.isClosed()).toBe(false);
+
+    releaseSave();
+    await waitForNoSaveInFlight(page);
+    await expect.poll(() => popup.title()).toContain(doc.docNumber);
+    await popup.close();
+  });
+
+  test('archiving the active record clears its identity and stale form before another save', async ({ page }) => {
+    await openInvoiceBuilder(page);
+    const doc = await createDocumentByApi(page, {
+      ...estimateProfile,
+      customerName: 'Archive Active Customer',
+      projectName: 'Archive Active Original',
+    });
+    await openRecord(page, doc.docNumber, doc.id);
+    await setField(page, '#projectName', 'Archive Active Unsaved Edit');
+    await page.locator('button.nav-item[data-view="records"]').click();
+    await page.locator('#recSearch').fill(doc.docNumber);
+
+    page.once('dialog', async dialog => {
+      expect(dialog.message()).toContain('unsaved edits');
+      await dialog.accept();
+    });
+    const archivedResponse = page.waitForResponse(response =>
+      response.request().method() === 'DELETE' &&
+      new URL(response.url()).pathname === `/api/documents/${doc.id}` &&
+      response.status() < 400,
+    );
+    await recordRow(page, doc.docNumber).locator(`button[data-record-action="archive"]`).click();
+    await archivedResponse;
+
+    await expect(page.locator('#activeRecordText')).toContainText('New document');
+    await expect(page.locator('#activeRecordText')).not.toContainText(doc.docNumber);
+    await expect(page.locator('#customerName')).toHaveValue('');
+    await expect(page.locator('#projectName')).toHaveValue('');
+    await expect.poll(() => page.evaluate(() => window._invoiceToolIsDirty?.())).toBe(false);
+    await expect(page.locator('#docNumber')).toHaveValue(/^EST-\d{4}-\d{4}$/);
+  });
+
+  test('committed duplicate and conversion remain successful when records refresh fails', async ({ page }) => {
+    await openInvoiceBuilder(page);
+    const source = await createDocumentByApi(page, {
+      ...estimateProfile,
+      customerName: 'Post Commit Refresh Customer',
+      projectName: 'Post Commit Refresh Estimate',
+    });
+    let failNextList = false;
+    await page.route('**/api/documents**', async route => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (failNextList && request.method() === 'GET' && url.pathname === '/api/documents') {
+        failNextList = false;
+        await route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ message: 'Injected refresh failure' }) });
+        return;
+      }
+      await route.continue();
+    });
+
+    await page.locator('button.nav-item[data-view="records"]').click();
+    await page.locator('#recSearch').fill(source.docNumber);
+    failNextList = true;
+    const duplicateResponsePromise = page.waitForResponse(response =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === `/api/documents/${source.id}/duplicate` &&
+      response.status() < 400,
+    );
+    await recordRow(page, source.docNumber).locator('button[data-record-action="duplicate"]').click();
+    const duplicate = await (await duplicateResponsePromise).json();
+    await expect(page.locator('#toast-container')).toContainText('The change was saved, but the records list could not refresh');
+    const persistedDuplicate = await page.request.get(`/api/documents/${duplicate.id}`);
+    expect(persistedDuplicate.ok()).toBe(true);
+
+    await page.locator('#recSearch').fill(source.docNumber);
+    failNextList = true;
+    const conversionResponsePromise = page.waitForResponse(response =>
+      response.request().method() === 'POST' &&
+      new URL(response.url()).pathname === `/api/documents/${source.id}/convert-to-invoice` &&
+      response.status() < 400,
+    );
+    await recordRow(page, source.docNumber).getByRole('button', { name: 'Create Invoice' }).click();
+    const invoice = await (await conversionResponsePromise).json();
+    await expect(page.locator('#view-builder')).toBeVisible();
+    await expect(page.locator('#activeRecordText')).toContainText(invoice.docNumber);
+    await expect(page.locator('#toast-container')).toContainText('The change was saved, but the records list could not refresh');
+    const persistedInvoice = await page.request.get(`/api/documents/${invoice.id}`);
+    expect(persistedInvoice.ok()).toBe(true);
+  });
+
+  test('repeated init replaces global shortcuts instead of multiplying save handlers', async ({ page }) => {
+    await openInvoiceBuilder(page);
+    const doc = await createDocumentByApi(page, {
+      ...invoiceProfile,
+      customerName: 'Init Idempotence Customer',
+      projectName: 'Init Idempotence Original',
+    });
+    await openRecord(page, doc.docNumber, doc.id);
+
+    let putCount = 0;
+    await page.route('**/api/documents/*', async route => {
+      const request = route.request();
+      if (request.method() === 'PUT' && new URL(request.url()).pathname === `/api/documents/${doc.id}`) putCount += 1;
+      await route.continue();
+    });
+
+    await page.evaluate(async () => {
+      const module = await import('/invoice-builder/js/app.js?v=41');
+      const snapshot = window._invoiceToolSnapshot();
+      window._invoiceToolDispose();
+      document.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 's', ctrlKey: true, bubbles: true, cancelable: true,
+      }));
+      await module.init({ initialView: 'builder', restoreSnapshot: snapshot });
+      await module.init({ initialView: 'builder', restoreSnapshot: window._invoiceToolSnapshot() });
+    });
+    await expect(page.locator('#db-status-text')).toContainText('Ready');
+    expect(putCount).toBe(0);
+    await setField(page, '#projectName', 'Init Idempotence Edited');
+    await page.keyboard.press('Control+s');
+    await waitForNoSaveInFlight(page);
+    await page.waitForTimeout(250);
+    expect(putCount).toBe(1);
+  });
+
+  test('zero tax and zero calculator defaults remain explicit, and type changes stay Draft', async ({ page }) => {
+    await openInvoiceBuilder(page);
+
+    await setField(page, '#docStatus', 'Accepted');
+    await setField(page, '#docType', 'INVOICE');
+    await expect(page.locator('#docStatus')).toHaveValue('Draft');
+    await expect(page.locator('#amountPaid')).toHaveValue('0');
+    const nextInvoiceNumber = await page.request.get('/api/documents/next-number?type=INVOICE').then(response => response.json());
+    await setField(page, '#docNumber', nextInvoiceNumber.number);
+
+    await page.locator('button.nav-item[data-view="calculator"]').click();
+    await setField(page, '#taxRate', '8.25');
+    await page.locator('button.nav-item[data-view="builder"]').click();
+    await setField(page, '#docTaxRate', '0');
+    await setField(page, '#customerName', 'Explicit Zero Customer');
+    await setField(page, '#projectName', 'Explicit Zero Project');
+    await page.locator('#lineItemsBody tr').first().locator('.item-desc').fill('Explicit zero line');
+    await page.locator('#lineItemsBody tr').first().locator('.item-rate').fill('100');
+    const saved = await clickSaveAndWait(page, 'POST');
+    expect(Number(saved.calcTaxRate)).toBe(0);
+    expect(Number(saved.taxAmount)).toBe(0);
+
+    const originalConfig = await page.request.get('/api/config').then(response => response.json());
+    try {
+      await page.locator('button.nav-item[data-view="settings"]').click();
+      for (const selector of ['#sCalcGramRate', '#sCalcHourRate', '#sCalcDesignRate', '#sCalcMinimum']) {
+        await setField(page, selector, '0');
+      }
+      const configResponsePromise = page.waitForResponse(response =>
+        response.request().method() === 'PUT' && new URL(response.url()).pathname === '/api/config' && response.status() < 400,
+      );
+      await page.locator('#btnSaveSettings').click();
+      const savedConfig = await (await configResponsePromise).json();
+      expect(Number(savedConfig.calcGramRate)).toBe(0);
+      expect(Number(savedConfig.calcHourRate)).toBe(0);
+      expect(Number(savedConfig.calcDesignRate)).toBe(0);
+      expect(Number(savedConfig.calcMinimum)).toBe(0);
+    } finally {
+      await page.request.put('/api/config', { data: originalConfig });
+    }
   });
 });

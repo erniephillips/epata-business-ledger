@@ -1,5 +1,8 @@
+using System.Collections.Concurrent;
+using System.ComponentModel.DataAnnotations;
 using System.Diagnostics;
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -44,6 +47,7 @@ builder.Services.AddScoped<DashboardService>();
 builder.Services.AddScoped<AiBusinessReviewService>();
 builder.Services.AddScoped<ActionItemAutomationService>();
 builder.Services.AddScoped<TaxPlanningService>();
+builder.Services.AddScoped<TurboTaxReportService>();
 builder.Services.AddScoped<AiSourceDocumentTextExtractor>();
 builder.Services.AddScoped<InvoiceDocumentPdfDraftService>();
 builder.Services.AddHttpClient<InvoiceAppImportService>();
@@ -115,6 +119,16 @@ if (int.TryParse(app.Configuration["App:ArtificialLatencyMs"], out var artificia
 
 app.Use(async (context, next) =>
 {
+    if (IsCrossSiteApiMutation(context.Request))
+    {
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        await context.Response.WriteAsJsonAsync(new
+        {
+            message = "This local ledger rejected a cross-site change. Use the EPATA app window that is connected to this local server."
+        });
+        return;
+    }
+
     try
     {
         await next();
@@ -127,6 +141,22 @@ app.Use(async (context, next) =>
             message = "The local SQLite database is busy or locked. Close other EPATA windows, wait for OneDrive sync to finish, then try again."
         });
     }
+    catch (DbUpdateConcurrencyException) when (!context.Response.HasStarted)
+    {
+        context.Response.StatusCode = StatusCodes.Status409Conflict;
+        await context.Response.WriteAsJsonAsync(new
+        {
+            message = "This record changed while your save was in progress. Reload it, review the newer values, and try again. No fields were overwritten."
+        });
+    }
+    catch (Exception ex) when (IsSqliteConstraintViolation(ex) && !context.Response.HasStarted)
+    {
+        context.Response.StatusCode = StatusCodes.Status409Conflict;
+        await context.Response.WriteAsJsonAsync(new
+        {
+            message = "That change conflicts with an existing ledger record. Refresh the page and review the existing record before trying again."
+        });
+    }
 });
 
 MapCrud<Party>(app, "parties");
@@ -137,6 +167,7 @@ MapCrud<PrinterQueueItem>(app, "printer-queue-items");
 MapCrud<ReceivableInvoice>(app, "receivable-invoices");
 MapCrud<Bill>(app, "bills");
 MapCrud<Expense>(app, "expenses");
+MapCrud<OrderLossIncident>(app, "order-loss-incidents");
 MapCrud<Product>(app, "products");
 MapCrud<Asset>(app, "assets");
 MapCrud<MakerWorldReward>(app, "makerworld-rewards");
@@ -158,6 +189,15 @@ app.MapPut("/api/tax-profile", async (TaxPlanningService tax, TaxProfile profile
 app.MapGet("/api/tax-summary", async (TaxPlanningService tax, int? year) =>
     Results.Ok(await tax.BuildSummaryAsync(year ?? DateTime.Today.Year)));
 
+app.MapGet("/api/turbotax-setup", async (TurboTaxReportService report, int? year, CancellationToken cancellationToken) =>
+    Results.Ok(await report.GetSetupAsync(year ?? DateTime.Today.Year, cancellationToken)));
+
+app.MapPut("/api/turbotax-setup", async (TurboTaxReportService report, TaxYearSetup setup, CancellationToken cancellationToken) =>
+    Results.Ok(await report.SaveSetupAsync(setup, cancellationToken)));
+
+app.MapGet("/api/turbotax-report", async (TurboTaxReportService report, int? year, CancellationToken cancellationToken) =>
+    Results.Ok(await report.BuildReportAsync(year ?? DateTime.Today.Year, cancellationToken)));
+
 app.MapGet("/api/tax-calendar", async (AppDbContext db, int? year) =>
     Results.Ok(await db.TaxObligations.AsNoTracking()
         .Where(x => !x.IsArchived && x.TaxYear == (year ?? DateTime.Today.Year))
@@ -166,8 +206,8 @@ app.MapGet("/api/tax-calendar", async (AppDbContext db, int? year) =>
         .ThenBy(x => x.Title)
         .ToListAsync()));
 
-app.MapPost("/api/tax-calendar/generate", async (TaxPlanningService tax, int? year) =>
-    Results.Ok(await tax.GenerateObligationsAsync(year ?? DateTime.Today.Year)));
+app.MapPost("/api/tax-calendar/generate", async (TaxPlanningService tax, int? year, CancellationToken cancellationToken) =>
+    Results.Ok(await tax.GenerateObligationsAsync(year ?? DateTime.Today.Year, cancellationToken)));
 
 app.MapGet("/api/ai/review/status", (AiBusinessReviewService review) => Results.Ok(review.Status()));
 
@@ -229,6 +269,7 @@ app.MapPost("/api/ai/operations/marketplace-order-import", async Task<IResult> (
 app.MapPost("/api/ai/operations/marketplace-order-import/save", async Task<IResult> (
     HttpRequest request,
     AiOperationsService operations,
+    AppDbContext db,
     IWebHostEnvironment env,
     CancellationToken cancellationToken) =>
 {
@@ -237,6 +278,7 @@ app.MapPost("/api/ai/operations/marketplace-order-import/save", async Task<IResu
         return Results.BadRequest(new { message = "Marketplace order save must be sent as multipart/form-data." });
     }
     var storedPaths = new List<string>();
+    var persisted = false;
     try
     {
         var form = await request.ReadFormAsync(cancellationToken);
@@ -274,22 +316,30 @@ app.MapPost("/api/ai/operations/marketplace-order-import/save", async Task<IResu
             storedPaths.Add(storedPath);
             proofs.Add(new AiMarketplaceProof(file.FileName, storedPath));
         }
-        return Results.Ok(await operations.SaveMarketplaceOrderAsync(new AiMarketplaceOrderSaveRequest(
+        var result = await operations.SaveMarketplaceOrderAsync(new AiMarketplaceOrderSaveRequest(
             sale,
             job,
             customer,
             createJob,
             saveCustomerContact,
             proofs,
-            detectedOrderNumbers), cancellationToken));
+            detectedOrderNumbers), cancellationToken);
+        persisted = true;
+        return Results.Ok(result);
     }
     catch (Exception ex) when (ex is InvalidOperationException or JsonException or IOException)
     {
-        foreach (var path in storedPaths)
-        {
-            try { System.IO.File.Delete(path); } catch { }
-        }
         return Results.BadRequest(new { message = ex.Message });
+    }
+    finally
+    {
+        if (!persisted)
+        {
+            foreach (var path in storedPaths)
+            {
+                await DeleteProofFileIfUnreferencedAsync(db, path);
+            }
+        }
     }
 });
 
@@ -449,10 +499,20 @@ app.MapGet("/api/lookups", async (AppDbContext db) =>
     return Results.Ok(new { customers, vendors, products });
 });
 
-app.MapPost("/api/import/invoice-app", async (InvoiceAppImportService importer, ImportInvoiceRequest request) =>
+app.MapPost("/api/import/invoice-app", async Task<IResult> (
+    InvoiceAppImportService importer,
+    ImportInvoiceRequest request,
+    CancellationToken cancellationToken) =>
 {
-    var result = await importer.TryReadInvoiceAppAsync(request.BaseUrl);
-    return Results.Ok(result);
+    try
+    {
+        var result = await importer.TryReadInvoiceAppAsync(request.BaseUrl, cancellationToken);
+        return Results.Ok(result);
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { message = ex.Message });
+    }
 });
 
 app.MapGet("/api/health", (IWebHostEnvironment env, IConfiguration config) => Results.Ok(new
@@ -547,9 +607,14 @@ app.MapPost("/api/documents", async (AppDbContext db, SaveInvoiceDocumentRequest
     return await CreateInvoiceDocumentResultAsync(db, request);
 });
 
-app.MapPut("/api/documents/{id:int}", async (AppDbContext db, int id, SaveInvoiceDocumentRequest request) =>
+app.MapPut("/api/documents/{id:int}", async (
+    AppDbContext db,
+    int id,
+    SaveInvoiceDocumentRequest request,
+    HttpRequest httpRequest,
+    CancellationToken cancellationToken) =>
 {
-    return await UpdateInvoiceDocumentResultAsync(db, id, request);
+    return await UpdateInvoiceDocumentResultAsync(db, id, request, httpRequest, cancellationToken);
 });
 
 app.MapDelete("/api/documents/{id:int}", async (AppDbContext db, int id) =>
@@ -570,13 +635,12 @@ app.MapPost("/api/documents/{id:int}/duplicate", async (AppDbContext db, int id)
 
 app.MapPost("/api/documents/{id:int}/convert-to-invoice", async (AppDbContext db, int id) =>
 {
-    var invoice = await DuplicateInvoiceDocumentAsync(db, id, "INVOICE");
-    return invoice is null ? Results.NotFound(new { message = $"Document {id} was not found." }) : Results.Ok(ToInvoiceDocumentDto(invoice));
+    return await ConvertInvoiceDocumentResultAsync(db, id);
 });
 
 app.MapGet("/api/database/backup", async (AppDbContext db, IWebHostEnvironment env, IConfiguration configuration) =>
 {
-    var backup = await CreateDatabaseBackupAsync(db, env, configuration);
+    var backup = await CreateDatabaseBackupAsync(db, env, configuration, retainServerCopy: false);
     return Results.File(backup.Bytes, "application/x-sqlite3", backup.FileName);
 });
 
@@ -624,9 +688,14 @@ app.MapPost("/api/invoice-documents", async (AppDbContext db, SaveInvoiceDocumen
     return await CreateInvoiceDocumentResultAsync(db, request);
 });
 
-app.MapPut("/api/invoice-documents/{id:int}", async (AppDbContext db, int id, SaveInvoiceDocumentRequest request) =>
+app.MapPut("/api/invoice-documents/{id:int}", async (
+    AppDbContext db,
+    int id,
+    SaveInvoiceDocumentRequest request,
+    HttpRequest httpRequest,
+    CancellationToken cancellationToken) =>
 {
-    return await UpdateInvoiceDocumentResultAsync(db, id, request);
+    return await UpdateInvoiceDocumentResultAsync(db, id, request, httpRequest, cancellationToken);
 });
 
 app.MapDelete("/api/invoice-documents/{id:int}", async (AppDbContext db, int id) =>
@@ -647,18 +716,20 @@ app.MapPost("/api/invoice-documents/{id:int}/duplicate", async (AppDbContext db,
 
 app.MapPost("/api/invoice-documents/{id:int}/convert-to-invoice", async (AppDbContext db, int id) =>
 {
-    var invoice = await DuplicateInvoiceDocumentAsync(db, id, "INVOICE");
-    return invoice is null ? Results.NotFound(new { message = $"Document {id} was not found." }) : Results.Ok(ToInvoiceDocumentDto(invoice));
+    return await ConvertInvoiceDocumentResultAsync(db, id);
 });
 
-app.MapPost("/api/invoice-documents/import-from-legacy", async (InvoiceAppImportService importer, AppDbContext db) =>
+app.MapPost("/api/invoice-documents/import-from-legacy", async Task<IResult> (
+    InvoiceAppImportService importer,
+    AppDbContext db,
+    CancellationToken cancellationToken) =>
 {
     List<InvoiceAppFullDocument> docs;
     try
     {
-        docs = await importer.ReadFullDocumentsAsync();
+        docs = await importer.ReadFullDocumentsAsync(cancellationToken: cancellationToken);
     }
-    catch (HttpRequestException ex)
+    catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException)
     {
         return Results.Ok(new
         {
@@ -672,98 +743,156 @@ app.MapPost("/api/invoice-documents/import-from-legacy", async (InvoiceAppImport
 
     var created = 0;
     var updated = 0;
+    var importCandidates = docs
+        .Where(document => !string.IsNullOrWhiteSpace(document.DocNumber))
+        .GroupBy(document => document.DocNumber!.Trim(), StringComparer.OrdinalIgnoreCase)
+        .Select(group => group
+            .OrderBy(document => ParseDateTime(document.UpdatedAt) ?? DateTime.MinValue)
+            .ThenBy(document => document.Id)
+            .Last())
+        .ToList();
+    var touchedDocuments = new List<InvoiceDocument>();
+    await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
 
-    foreach (var old in docs.Where(d => !string.IsNullOrWhiteSpace(d.DocNumber)))
+    try
     {
-        var doc = await db.InvoiceDocuments
-            .Include(d => d.LineItems)
-            .FirstOrDefaultAsync(d => d.DocNumber == old.DocNumber);
-        if (doc is null)
+        foreach (var old in importCandidates)
         {
-            doc = new InvoiceDocument { DocNumber = old.DocNumber, CreatedAt = old.CreatedAt ?? DateTimeOffset.UtcNow.ToString("O") };
-            db.InvoiceDocuments.Add(doc);
-            created++;
-        }
-        else
-        {
-            updated++;
+            cancellationToken.ThrowIfCancellationRequested();
+            var documentNumber = old.DocNumber!.Trim().ToUpperInvariant();
+            var doc = await db.InvoiceDocuments
+                .Include(d => d.LineItems)
+                .FirstOrDefaultAsync(
+                    d => d.DocNumber != null && d.DocNumber.ToUpper() == documentNumber,
+                    cancellationToken);
+            if (doc is null)
+            {
+                doc = new InvoiceDocument { DocNumber = documentNumber, CreatedAt = old.CreatedAt ?? DateTimeOffset.UtcNow.ToString("O") };
+                db.InvoiceDocuments.Add(doc);
+                created++;
+            }
+            else
+            {
+                updated++;
+            }
+
+            doc.DocType = (old.DocType ?? "ESTIMATE").ToUpperInvariant();
+            doc.Status = old.Status ?? "Draft";
+            doc.CustomerName = old.CustomerName;
+            doc.CustomerPhone = old.CustomerPhone;
+            doc.CustomerAddress = old.CustomerAddress;
+            doc.CustomerEmail = old.CustomerEmail;
+            doc.PreparedFor = old.PreparedFor;
+            doc.ProjectName = old.ProjectName;
+            doc.Material = old.Material;
+            doc.Color = old.Color;
+            doc.Infill = old.Infill;
+            doc.ProjectDescription = old.ProjectDescription;
+            doc.ProjectNotes = old.ProjectNotes;
+            doc.PageSize = old.PageSize;
+            doc.Total = old.Total;
+            doc.Subtotal = old.Subtotal != 0 ? old.Subtotal : old.Total;
+            doc.DiscountAmount = old.DiscountAmount;
+            doc.RushAmount = old.RushAmount;
+            doc.TaxAmount = old.TaxAmount;
+            doc.AmountPaid = old.AmountPaid;
+            doc.Balance = old.Balance;
+            doc.DocDate = old.DocDate;
+            doc.DueDate = old.DueDate;
+            doc.PricingGuide = old.PricingGuide;
+            doc.TermsNotes = old.TermsNotes;
+            doc.StandardTurnaround = old.StandardTurnaround;
+            doc.RushTurnaround = old.RushTurnaround;
+            doc.CalcGrams = old.CalcGrams;
+            doc.CalcHours = old.CalcHours;
+            doc.CalcDesignHours = old.CalcDesignHours;
+            doc.CalcSetupFee = old.CalcSetupFee;
+            doc.CalcPostFee = old.CalcPostFee;
+            doc.CalcGramRate = old.CalcGramRate == 0 ? 0.05m : old.CalcGramRate;
+            doc.CalcHourRate = old.CalcHourRate == 0 ? 3m : old.CalcHourRate;
+            doc.CalcDesignRate = old.CalcDesignRate == 0 ? 25m : old.CalcDesignRate;
+            doc.CalcMinimum = old.CalcMinimum == 0 ? 15m : old.CalcMinimum;
+            doc.CalcDifficulty = old.CalcDifficulty == 0 ? 1m : old.CalcDifficulty;
+            doc.CalcRush = old.CalcRush;
+            doc.CalcDiscount = old.CalcDiscount;
+            doc.CalcTaxRate = old.CalcTaxRate;
+            doc.Json = old.Json ?? "{}";
+            doc.LineItems.Clear();
+            doc.LineItems.AddRange((old.LineItems ?? []).Select((line, index) => new InvoiceLineItem
+            {
+                SortOrder = line.SortOrder > 0 ? line.SortOrder : index + 1,
+                Description = line.Description,
+                Details = line.Details,
+                Quantity = Math.Max(0, line.Quantity),
+                Rate = Math.Max(0, line.Rate),
+                Amount = Math.Max(0, line.Quantity) * Math.Max(0, line.Rate)
+            }));
+            NormalizeExistingInvoiceDocumentMoney(doc);
+            doc.UpdatedAt = old.UpdatedAt ?? DateTimeOffset.UtcNow.ToString("O");
+            touchedDocuments.Add(doc);
         }
 
-        doc.DocType = (old.DocType ?? "ESTIMATE").ToUpperInvariant();
-        doc.Status = old.Status ?? "Draft";
-        doc.CustomerName = old.CustomerName;
-        doc.CustomerPhone = old.CustomerPhone;
-        doc.CustomerAddress = old.CustomerAddress;
-        doc.CustomerEmail = old.CustomerEmail;
-        doc.PreparedFor = old.PreparedFor;
-        doc.ProjectName = old.ProjectName;
-        doc.Material = old.Material;
-        doc.Color = old.Color;
-        doc.Infill = old.Infill;
-        doc.ProjectDescription = old.ProjectDescription;
-        doc.ProjectNotes = old.ProjectNotes;
-        doc.PageSize = old.PageSize;
-        doc.Total = old.Total;
-        doc.Subtotal = old.Subtotal != 0 ? old.Subtotal : old.Total;
-        doc.DiscountAmount = old.DiscountAmount;
-        doc.RushAmount = old.RushAmount;
-        doc.TaxAmount = old.TaxAmount;
-        doc.AmountPaid = old.AmountPaid;
-        doc.Balance = old.Balance;
-        doc.DocDate = old.DocDate;
-        doc.DueDate = old.DueDate;
-        doc.PricingGuide = old.PricingGuide;
-        doc.TermsNotes = old.TermsNotes;
-        doc.StandardTurnaround = old.StandardTurnaround;
-        doc.RushTurnaround = old.RushTurnaround;
-        doc.CalcGrams = old.CalcGrams;
-        doc.CalcHours = old.CalcHours;
-        doc.CalcDesignHours = old.CalcDesignHours;
-        doc.CalcSetupFee = old.CalcSetupFee;
-        doc.CalcPostFee = old.CalcPostFee;
-        doc.CalcGramRate = old.CalcGramRate == 0 ? 0.05m : old.CalcGramRate;
-        doc.CalcHourRate = old.CalcHourRate == 0 ? 3m : old.CalcHourRate;
-        doc.CalcDesignRate = old.CalcDesignRate == 0 ? 25m : old.CalcDesignRate;
-        doc.CalcMinimum = old.CalcMinimum == 0 ? 15m : old.CalcMinimum;
-        doc.CalcDifficulty = old.CalcDifficulty == 0 ? 1m : old.CalcDifficulty;
-        doc.CalcRush = old.CalcRush;
-        doc.CalcDiscount = old.CalcDiscount;
-        doc.CalcTaxRate = old.CalcTaxRate;
-        doc.Json = old.Json ?? "{}";
-        doc.LineItems.Clear();
-        doc.LineItems.AddRange((old.LineItems ?? []).Select((line, index) => new InvoiceLineItem
+        await db.SaveChangesAsync(cancellationToken);
+        foreach (var doc in touchedDocuments.DistinctBy(document => document.Id))
         {
-            SortOrder = line.SortOrder > 0 ? line.SortOrder : index + 1,
-            Description = line.Description,
-            Details = line.Details,
-            Quantity = Math.Max(0, line.Quantity),
-            Rate = Math.Max(0, line.Rate),
-            Amount = Math.Max(0, line.Quantity) * Math.Max(0, line.Rate)
-        }));
-        NormalizeExistingInvoiceDocumentMoney(doc);
-        doc.UpdatedAt = old.UpdatedAt ?? DateTimeOffset.UtcNow.ToString("O");
+            await SyncUnifiedInvoiceDocumentToLedgerAsync(db, doc, cancellationToken);
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+        return Results.Ok(new
+        {
+            success = true,
+            imported = importCandidates.Count,
+            sourceDocuments = docs.Count,
+            skippedDuplicateSourceDocuments = docs.Count - importCandidates.Count,
+            created,
+            updated
+        });
     }
-
-    await db.SaveChangesAsync();
-    foreach (var doc in await db.InvoiceDocuments.Include(d => d.LineItems).ToListAsync())
+    catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
     {
-        await SyncUnifiedInvoiceDocumentToLedgerAsync(db, doc);
+        await transaction.RollbackAsync(CancellationToken.None);
+        db.ChangeTracker.Clear();
+        return Results.Conflict(new
+        {
+            success = false,
+            imported = 0,
+            created = 0,
+            updated = 0,
+            message = $"The legacy import was rolled back completely; no partial documents or accounting rows were saved. {ex.Message}"
+        });
     }
-
-    return Results.Ok(new { success = true, imported = docs.Count, created, updated });
 });
 
-app.MapPost("/api/documents/upload", async (HttpRequest request, AppDbContext db, IWebHostEnvironment env) =>
+app.MapPost("/api/documents/upload", async (
+    HttpRequest request,
+    AppDbContext db,
+    IWebHostEnvironment env,
+    AiSourceDocumentTextExtractor extractor,
+    InvoiceDocumentPdfDraftService invoiceDrafts,
+    AiOperationsService operations,
+    CancellationToken cancellationToken) =>
 {
     if (!request.HasFormContentType)
     {
         return Results.BadRequest(new { message = "Upload must be sent as multipart/form-data." });
     }
 
-    var form = await request.ReadFormAsync();
+    var form = await request.ReadFormAsync(cancellationToken);
     if (form.Files.Count == 0)
     {
         return Results.BadRequest(new { message = "Choose at least one file to upload." });
+    }
+
+    const int maxUploadFiles = 20;
+    const long maxTotalUploadBytes = 100L * 1024 * 1024;
+    if (form.Files.Count > maxUploadFiles)
+    {
+        return Results.BadRequest(new { message = $"Upload no more than {maxUploadFiles} proof files at a time." });
+    }
+    if (form.Files.Sum(file => file.Length) > maxTotalUploadBytes)
+    {
+        return Results.BadRequest(new { message = "The combined proof upload is larger than the 100 MB batch limit." });
     }
 
     foreach (var file in form.Files)
@@ -788,41 +917,373 @@ app.MapPost("/api/documents/upload", async (HttpRequest request, AppDbContext db
     Directory.CreateDirectory(uploadDir);
 
     var created = new List<AuditDocument>();
+    var documents = new List<AuditDocument>();
+    var duplicateUploads = new List<object>();
+    var marketplaceImports = new List<AiMarketplaceOrderAutoImportResult>();
+    var invoiceDocumentImports = new List<InvoiceDocumentIntakeResult>();
+    var requestedRelatedType = form["relatedType"].FirstOrDefault();
+    var requestedRelatedNumber = form["relatedNumber"].FirstOrDefault();
     foreach (var file in form.Files)
     {
         var safeName = MakeSafeFileName(file.FileName);
         var storedName = $"{DateTime.Now:yyyyMMdd-HHmmss}-{Guid.NewGuid().ToString("N")[..8]}-{safeName}";
         var storedPath = Path.Combine(uploadDir, storedName);
-        await using (var stream = System.IO.File.Create(storedPath))
+        var retainedFile = false;
+        SemaphoreSlim? uploadGate = null;
+        var uploadGateHeld = false;
+        try
         {
-            await file.CopyToAsync(stream);
+            await using (var stream = System.IO.File.Create(storedPath))
+            {
+                await file.CopyToAsync(stream, cancellationToken);
+            }
+
+            var contentHash = await ComputeFileSha256Async(storedPath, cancellationToken);
+            var uploadFingerprint = BuildUploadFingerprint(
+                contentHash,
+                file.FileName,
+                requestedRelatedType,
+                requestedRelatedNumber);
+            uploadGate = UploadMutationLocks.For(uploadFingerprint);
+            await uploadGate.WaitAsync(cancellationToken);
+            uploadGateHeld = true;
+
+            var duplicate = await db.AuditDocuments.AsNoTracking().FirstOrDefaultAsync(
+                document => !document.IsArchived && document.UploadFingerprint == uploadFingerprint,
+                cancellationToken);
+            if (duplicate is null)
+            {
+                duplicate = await FindAndClaimLegacyDuplicateUploadAsync(
+                    db,
+                    env,
+                    contentHash,
+                    uploadFingerprint,
+                    file.FileName,
+                    requestedRelatedType,
+                    requestedRelatedNumber,
+                    cancellationToken);
+            }
+            if (duplicate is not null)
+            {
+                if (!TryGetExistingAllowedProofFilePath(env.ContentRootPath, duplicate.FilePathOrUrl, out _))
+                {
+                    var trackedDuplicate = await db.AuditDocuments.FirstAsync(
+                        document => document.Id == duplicate.Id,
+                        cancellationToken);
+                    trackedDuplicate.FilePathOrUrl = storedPath;
+                    trackedDuplicate.UpdatedAtUtc = DateTime.UtcNow;
+                    await db.SaveChangesAsync(cancellationToken);
+                    retainedFile = true;
+                    duplicate = trackedDuplicate;
+                }
+                documents.Add(duplicate);
+                duplicateUploads.Add(new
+                {
+                    auditDocumentId = duplicate.Id,
+                    duplicate.FileName,
+                    duplicate.RelatedRecordType,
+                    duplicate.RelatedRecordNumber,
+                    message = "This exact file upload was already saved. The existing proof was returned and no duplicate record or file was created."
+                });
+                continue;
+            }
+
+            AiSourceDocumentExtraction extraction;
+            try
+            {
+                extraction = await extractor.ExtractAsync(storedPath, file.ContentType, cancellationToken);
+            }
+            catch (Exception ex) when (ex is InvalidDataException or IOException or System.Xml.XmlException)
+            {
+                extraction = new AiSourceDocumentExtraction(string.Empty, $"Readable text could not be extracted from {file.FileName}: {ex.Message}");
+            }
+            var preview = TrimPreview(extraction.Text);
+            var doc = new AuditDocument
+            {
+                DocumentDate = DateTime.Today,
+                DocumentType = GuessDocumentType(file.FileName, extraction.Text),
+                FileName = file.FileName,
+                FilePathOrUrl = storedPath,
+                UploadFingerprint = uploadFingerprint,
+                RelatedRecordType = requestedRelatedType,
+                RelatedRecordNumber = requestedRelatedNumber,
+                NeedsReview = true,
+                Notes = string.IsNullOrWhiteSpace(preview)
+                    ? AppendNote("Uploaded document. Review and connect it to the matching sale, invoice, bill, expense, or job.", extraction.Warning ?? string.Empty)
+                    : AppendNote($"Uploaded document. Extracted preview:\n{preview}", extraction.Warning ?? string.Empty)
+            };
+
+            db.AuditDocuments.Add(doc);
+            await db.SaveChangesAsync(cancellationToken);
+            retainedFile = true;
+            created.Add(doc);
+            documents.Add(doc);
+
+            var selectedArea = doc.RelatedRecordType?.Trim();
+            if (IsInvoiceDocumentRelatedArea(selectedArea))
+            {
+                try
+                {
+                    invoiceDocumentImports.Add(await ImportInvoiceDocumentFromAuditAsync(
+                        db,
+                        invoiceDrafts,
+                        doc,
+                        extraction,
+                        storedPath,
+                        selectedArea!,
+                        cancellationToken));
+                }
+                catch (Exception ex) when (ex is InvalidOperationException
+                    or IOException
+                    or UnauthorizedAccessException
+                    or ArgumentException
+                    or NotSupportedException)
+                {
+                    doc = await ReloadAuditDocumentAfterFailedMutationAsync(db, doc.Id, cancellationToken);
+                    ReplaceAuditDocument(created, doc);
+                    ReplaceAuditDocument(documents, doc);
+                    doc.NeedsReview = true;
+                    doc.Notes = AppendNote(doc.Notes, $"Automatic {selectedArea} import could not finish: {ex.Message}");
+                    doc.UpdatedAtUtc = DateTime.UtcNow;
+                    await db.SaveChangesAsync(cancellationToken);
+                    invoiceDocumentImports.Add(new InvoiceDocumentIntakeResult(
+                        "NeedsReview",
+                        null,
+                        doc,
+                        $"The proof is indexed, but the {selectedArea?.ToLowerInvariant()} record could not be created: {ex.Message}",
+                        [ex.Message],
+                        null));
+                }
+            }
+            else if (string.IsNullOrWhiteSpace(selectedArea)
+                || selectedArea.Equals("Sale", StringComparison.OrdinalIgnoreCase))
+            {
+                try
+                {
+                    marketplaceImports.Add(await operations.AutoImportMarketplaceOrderAsync(
+                        new AiOperationSourcePacket(
+                            extraction.Text,
+                            [],
+                            [],
+                            string.IsNullOrWhiteSpace(extraction.Warning) ? [] : [extraction.Warning],
+                            file.FileName),
+                        doc,
+                        cancellationToken));
+                }
+                catch (Exception ex) when (ex is InvalidOperationException or JsonException or HttpRequestException or IOException)
+                {
+                    doc = await ReloadAuditDocumentAfterFailedMutationAsync(db, doc.Id, cancellationToken);
+                    ReplaceAuditDocument(created, doc);
+                    ReplaceAuditDocument(documents, doc);
+                    doc.NeedsReview = true;
+                    doc.Notes = AppendNote(doc.Notes, $"Automatic Etsy import could not finish: {ex.Message}");
+                    await db.SaveChangesAsync(cancellationToken);
+                    marketplaceImports.Add(new AiMarketplaceOrderAutoImportResult
+                    {
+                        Recognized = doc.DocumentType.Equals("Etsy Order", StringComparison.OrdinalIgnoreCase),
+                        Action = "NeedsReview",
+                        AuditDocument = doc,
+                        Message = $"The file was safely indexed, but automatic Etsy import could not finish: {ex.Message}",
+                        Warnings = [ex.Message]
+                    });
+                }
+            }
         }
-
-        var preview = await TryExtractDocumentPreviewAsync(storedPath, file.ContentType);
-        var doc = new AuditDocument
+        finally
         {
-            DocumentDate = DateTime.Today,
-            DocumentType = GuessDocumentType(file.FileName),
-            FileName = file.FileName,
-            FilePathOrUrl = storedPath,
-            RelatedRecordType = form["relatedType"].FirstOrDefault(),
-            RelatedRecordNumber = form["relatedNumber"].FirstOrDefault(),
-            NeedsReview = true,
-            Notes = string.IsNullOrWhiteSpace(preview)
-                ? "Uploaded document. Review and connect it to the matching sale, invoice, bill, expense, or job."
-                : $"Uploaded document. Extracted preview:\n{preview}"
-        };
-
-        db.AuditDocuments.Add(doc);
-        created.Add(doc);
+            if (uploadGateHeld)
+            {
+                uploadGate!.Release();
+            }
+            if (!retainedFile)
+            {
+                await DeleteProofFileIfUnreferencedAsync(db, storedPath);
+            }
+        }
     }
 
-    await db.SaveChangesAsync();
+    await db.SaveChangesAsync(cancellationToken);
     return Results.Ok(new
     {
-        count = created.Count,
-        documents = created,
-        suggestions = created.Select(BuildInboxSuggestion).ToList()
+        count = documents.Count,
+        createdCount = created.Count,
+        duplicateUploadCount = duplicateUploads.Count,
+        documents,
+        duplicateUploads,
+        suggestions = documents.Select(BuildInboxSuggestion).ToList(),
+        marketplaceImports,
+        invoiceDocumentImports = invoiceDocumentImports.Select(ToInvoiceDocumentIntakeDto).ToList(),
+        marketplaceCreated = marketplaceImports.Count(x => x.Action == "Created"),
+        marketplaceLinked = marketplaceImports.Count(x => x.Action == "LinkedExisting"),
+        marketplaceNeedsReview = marketplaceImports.Count(x => x.Action == "NeedsReview"),
+        invoiceDocumentCreated = invoiceDocumentImports.Count(x => x.Action == "Created"),
+        invoiceDocumentLinked = invoiceDocumentImports.Count(x => x.Action == "LinkedExisting"),
+        invoiceDocumentNeedsReview = invoiceDocumentImports.Count(x => x.Action == "NeedsReview")
+    });
+});
+
+app.MapPost("/api/audit-documents/{id:int}/import-invoice-document", async Task<IResult> (
+    int id,
+    InvoiceDocumentImportRequest request,
+    AppDbContext db,
+    IWebHostEnvironment env,
+    AiSourceDocumentTextExtractor extractor,
+    InvoiceDocumentPdfDraftService invoiceDrafts,
+    CancellationToken cancellationToken) =>
+{
+    var auditDocument = await db.AuditDocuments.FirstOrDefaultAsync(
+        document => document.Id == id && !document.IsArchived,
+        cancellationToken);
+    if (auditDocument is null)
+    {
+        return Results.NotFound(new { message = $"Audit document {id} was not found." });
+    }
+
+    var targetType = string.IsNullOrWhiteSpace(request.TargetType)
+        ? auditDocument.RelatedRecordType
+        : request.TargetType;
+    if (!IsInvoiceDocumentRelatedArea(targetType))
+    {
+        return Results.BadRequest(new { message = "Choose Invoice or Estimate as the target document type." });
+    }
+
+    if (string.IsNullOrWhiteSpace(auditDocument.FilePathOrUrl))
+    {
+        return Results.BadRequest(new { message = "This Audit Doc does not have a saved proof file." });
+    }
+
+    var fullPath = Path.GetFullPath(auditDocument.FilePathOrUrl);
+    if (!IsAllowedProofFilePath(env.ContentRootPath, fullPath) || !System.IO.File.Exists(fullPath))
+    {
+        return Results.BadRequest(new { message = "The saved proof file is missing or outside an allowed EPATA business folder." });
+    }
+
+    try
+    {
+        var extraction = await extractor.ExtractAsync(fullPath, ContentTypeForFile(fullPath), cancellationToken);
+        var result = await ImportInvoiceDocumentFromAuditAsync(
+            db,
+            invoiceDrafts,
+            auditDocument,
+            extraction,
+            fullPath,
+            targetType!,
+            cancellationToken);
+        return Results.Ok(ToInvoiceDocumentIntakeDto(result));
+    }
+    catch (Exception ex) when (ex is InvalidOperationException
+        or IOException
+        or UnauthorizedAccessException
+        or ArgumentException
+        or NotSupportedException)
+    {
+        return Results.BadRequest(new { message = ex.Message });
+    }
+});
+
+app.MapPost("/api/documents/reprocess-marketplace-orders", async (
+    AppDbContext db,
+    IWebHostEnvironment env,
+    AiSourceDocumentTextExtractor extractor,
+    AiOperationsService operations,
+    CancellationToken cancellationToken) =>
+{
+    var candidates = await db.AuditDocuments
+        .Where(x => !x.IsArchived
+            && x.FilePathOrUrl != null
+            && (x.NeedsReview
+                || x.RelatedRecordType != "Sale"
+                || x.DocumentType != "Etsy Order"
+                || (x.RelatedRecordNumber != null
+                    && !db.Sales.Any(sale => !sale.IsArchived
+                        && sale.OrderNumber == x.RelatedRecordNumber))))
+        .OrderBy(x => x.Id)
+        .ToListAsync(cancellationToken);
+    var results = new List<AiMarketplaceOrderAutoImportResult>();
+    var errors = new List<object>();
+
+    foreach (var candidate in candidates)
+    {
+        var doc = await db.AuditDocuments.FirstOrDefaultAsync(
+            auditDocument => auditDocument.Id == candidate.Id && !auditDocument.IsArchived,
+            cancellationToken);
+        if (doc is null)
+        {
+            continue;
+        }
+        var wasEtsyCandidate = doc.DocumentType.Equals("Etsy Order", StringComparison.OrdinalIgnoreCase)
+            || (doc.Notes?.Contains("Etsy", StringComparison.OrdinalIgnoreCase) ?? false);
+        try
+        {
+            var fullPath = Path.GetFullPath(doc.FilePathOrUrl!);
+            if (!IsAllowedProofFilePath(env.ContentRootPath, fullPath) || !System.IO.File.Exists(fullPath))
+            {
+                errors.Add(new { auditDocumentId = doc.Id, doc.FileName, message = "The saved proof file is missing or outside an allowed EPATA business folder." });
+                continue;
+            }
+
+            var extraction = await extractor.ExtractAsync(fullPath, ContentTypeForFile(fullPath), cancellationToken);
+            var preview = TrimPreview(extraction.Text);
+            var replaceGeneratedPreview = doc.Notes?.StartsWith(
+                "Uploaded document. Extracted preview:",
+                StringComparison.OrdinalIgnoreCase) == true;
+            var result = await operations.AutoImportMarketplaceOrderAsync(
+                new AiOperationSourcePacket(
+                    extraction.Text,
+                    [],
+                    [],
+                    string.IsNullOrWhiteSpace(extraction.Warning) ? [] : [extraction.Warning],
+                    doc.FileName),
+                doc,
+                cancellationToken);
+            results.Add(result);
+            if (result.Recognized && !string.IsNullOrWhiteSpace(preview))
+            {
+                var cleanPreviewNote = $"Uploaded document. Extracted preview:\n{preview}";
+                doc.Notes = replaceGeneratedPreview
+                    ? AppendNote(cleanPreviewNote, result.Message)
+                    : AppendNote(doc.Notes, $"Reprocessed readable preview:\n{preview}");
+                doc.DocumentType = "Etsy Order";
+                doc.UpdatedAtUtc = DateTime.UtcNow;
+                await db.SaveChangesAsync(cancellationToken);
+            }
+        }
+        catch (Exception ex) when (ex is InvalidOperationException
+            or JsonException
+            or HttpRequestException
+            or IOException
+            or InvalidDataException
+            or UnauthorizedAccessException
+            or ArgumentException
+            or NotSupportedException
+            or System.Security.SecurityException)
+        {
+            var failedDocumentId = doc.Id;
+            db.ChangeTracker.Clear();
+            doc = await db.AuditDocuments.FirstAsync(
+                auditDocument => auditDocument.Id == failedDocumentId,
+                cancellationToken);
+            if (wasEtsyCandidate)
+            {
+                doc.NeedsReview = true;
+                doc.Notes = AppendNote(doc.Notes, $"Automatic Etsy reprocessing could not finish: {ex.Message}");
+                doc.UpdatedAtUtc = DateTime.UtcNow;
+                await db.SaveChangesAsync(cancellationToken);
+            }
+            errors.Add(new { auditDocumentId = doc.Id, doc.FileName, message = ex.Message });
+        }
+    }
+
+    return Results.Ok(new
+    {
+        scanned = candidates.Count,
+        recognized = results.Count(x => x.Recognized),
+        created = results.Count(x => x.Action == "Created"),
+        linkedExisting = results.Count(x => x.Action == "LinkedExisting"),
+        needsReview = results.Count(x => x.Action == "NeedsReview"),
+        indexedOnly = results.Count(x => x.Action == "IndexedOnly"),
+        results,
+        errors
     });
 });
 
@@ -866,6 +1327,7 @@ app.MapGet("/api/export/{entity}", async (string entity, AppDbContext db, bool i
         "receivable-invoices" or "invoices" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.ReceivableInvoices.AsNoTracking(), includeArchived).ToListAsync())),
         "bills" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.Bills.AsNoTracking(), includeArchived).ToListAsync())),
         "expenses" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.Expenses.AsNoTracking(), includeArchived).ToListAsync())),
+        "order-loss-incidents" or "order-losses" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.OrderLossIncidents.AsNoTracking(), includeArchived).ToListAsync())),
         "products" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.Products.AsNoTracking(), includeArchived).ToListAsync())),
         "assets" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.Assets.AsNoTracking(), includeArchived).ToListAsync())),
         "makerworld-rewards" => Csv(fileName, CsvExportService.ToCsv(await ActiveRows(db.MakerWorldRewards.AsNoTracking(), includeArchived).ToListAsync())),
@@ -919,6 +1381,20 @@ app.MapGet("/api/export/tax-summary", async (TaxPlanningService tax, int? year) 
 {
     var resolvedYear = year ?? DateTime.Today.Year;
     return Csv($"epata-tax-summary-{resolvedYear}-{DateTime.Now:yyyyMMdd-HHmmss}.csv", CsvExportService.ToCsv(new[] { await tax.BuildSummaryAsync(resolvedYear) }));
+});
+
+app.MapGet("/api/export/schedule-c-lines", async (TurboTaxReportService report, int? year, CancellationToken cancellationToken) =>
+{
+    var resolvedYear = year ?? DateTime.Today.Year;
+    var workbook = await report.BuildReportAsync(resolvedYear, cancellationToken);
+    return Csv($"epata-schedule-c-lines-{resolvedYear}-{DateTime.Now:yyyyMMdd-HHmmss}.csv", CsvExportService.ToCsv(workbook.ScheduleCLines));
+});
+
+app.MapGet("/api/export/turbotax-workbook", async (TurboTaxReportService report, int? year, CancellationToken cancellationToken) =>
+{
+    var resolvedYear = year ?? DateTime.Today.Year;
+    var html = await report.BuildPrintableHtmlAsync(resolvedYear, cancellationToken);
+    return Results.Content(html, "text/html; charset=utf-8", Encoding.UTF8);
 });
 
 app.MapGet("/api/export/nj-sales-tax", async (TaxPlanningService tax, int? year, int? quarter) =>
@@ -1173,7 +1649,7 @@ app.MapPost("/api/ai/invoice-document-draft/upload", async Task<IResult> (
 
 app.MapPost("/api/system/backup", async (AppDbContext db, IConfiguration configuration, IWebHostEnvironment env) =>
 {
-    var backup = await CreateDatabaseBackupAsync(db, env, configuration);
+    var backup = await CreateDatabaseBackupAsync(db, env, configuration, retainServerCopy: true);
     return Results.File(backup.Bytes, "application/octet-stream", backup.FileName);
 });
 
@@ -1197,18 +1673,49 @@ if (openBrowser)
 {
     app.Lifetime.ApplicationStarted.Register(() =>
     {
+        OpenBrowser(appUrl);
+    });
+}
+
+WindowsTrayApplication? trayApplication = null;
+var showTrayIcon = OperatingSystem.IsWindows()
+    && !app.Environment.IsEnvironment("Test")
+    && (!bool.TryParse(app.Configuration["App:ShowTrayIcon"], out var shouldShowTrayIcon) || shouldShowTrayIcon);
+if (showTrayIcon)
+{
+    app.Lifetime.ApplicationStarted.Register(() =>
+    {
         try
         {
-            Process.Start(new ProcessStartInfo(appUrl) { UseShellExecute = true });
+            trayApplication = WindowsTrayApplication.Start(appUrl, app.Lifetime.StopApplication);
         }
-        catch
+        catch (Exception ex)
         {
-            // Browser auto-open is a convenience only; app still runs without it.
+            app.Logger.LogWarning(ex, "The Windows notification area icon could not be started.");
         }
     });
 }
 
-await app.RunAsync();
+try
+{
+    await app.RunAsync();
+}
+finally
+{
+    trayApplication?.Dispose();
+}
+
+static void OpenBrowser(string appUrl)
+{
+    try
+    {
+        Process.Start(new ProcessStartInfo(appUrl) { UseShellExecute = true });
+    }
+    catch
+    {
+        // Browser auto-open is a convenience only; app still runs without it.
+    }
+}
 
 static async Task<object> BuildJobTimelineAsync(AppDbContext db, string? q, string? customer)
 {
@@ -1760,6 +2267,488 @@ static DateTime ToLocalClock(DateTime clock)
     return clock.Kind == DateTimeKind.Local
         ? clock
         : DateTime.SpecifyKind(clock, DateTimeKind.Utc).ToLocalTime();
+}
+
+static bool IsInvoiceDocumentRelatedArea(string? value)
+{
+    return value?.Equals("Invoice", StringComparison.OrdinalIgnoreCase) == true
+        || value?.Equals("Estimate", StringComparison.OrdinalIgnoreCase) == true;
+}
+
+static async Task<InvoiceDocumentIntakeResult> ImportInvoiceDocumentFromAuditAsync(
+    AppDbContext db,
+    InvoiceDocumentPdfDraftService draftService,
+    AuditDocument auditDocument,
+    AiSourceDocumentExtraction extraction,
+    string sourcePath,
+    string requestedType,
+    CancellationToken cancellationToken)
+{
+    if (string.IsNullOrWhiteSpace(extraction.Text))
+    {
+        throw new InvalidOperationException(extraction.Warning
+            ?? "No readable text was found. Scanned/image-only documents need OCR before their fields can be mapped.");
+    }
+
+    var sourceHash = await ComputeFileSha256Async(sourcePath, cancellationToken);
+    IReadOnlyCollection<string> sourceWarnings = string.IsNullOrWhiteSpace(extraction.Warning)
+        ? []
+        : [extraction.Warning];
+    var draft = await draftService.CreateDraftAsync(
+        extraction.Text,
+        auditDocument.FileName,
+        sourceWarnings,
+        cancellationToken,
+        requestedType);
+    var prefill = draft.Prefill;
+    var documentType = prefill.DocType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase) ? "INVOICE" : "ESTIMATE";
+    var sourceDocumentNumber = NormalizeImportedDocumentNumber(prefill.DocNumber);
+    var submittedDocumentNumber = NormalizeImportedDocumentNumber(auditDocument.RelatedRecordNumber);
+    // The proof is the source of truth. A typed related number may help only when
+    // the PDF does not carry its own unambiguous EST/INV identity.
+    var documentNumber = DocumentNumberMatchesType(sourceDocumentNumber, documentType)
+        ? sourceDocumentNumber
+        : DocumentNumberMatchesType(submittedDocumentNumber, documentType)
+            ? submittedDocumentNumber
+            : null;
+
+    InvoiceDocument? existing = null;
+    if (!string.IsNullOrWhiteSpace(documentNumber))
+    {
+        existing = await db.InvoiceDocuments
+            .Include(document => document.LineItems.OrderBy(line => line.SortOrder))
+            .FirstOrDefaultAsync(
+                document => !document.IsArchived && document.DocNumber == documentNumber,
+                cancellationToken);
+    }
+
+    if (existing is null)
+    {
+        var hashMarker = $"\"sourceSha256\":\"{sourceHash}\"";
+        existing = await db.InvoiceDocuments
+            .Include(document => document.LineItems.OrderBy(line => line.SortOrder))
+            .FirstOrDefaultAsync(
+                document => !document.IsArchived
+                    && document.DocType == documentType
+                    && document.Json.Contains(hashMarker),
+                cancellationToken);
+    }
+
+    if (existing is not null)
+    {
+        LinkAuditDocumentToInvoiceDocument(auditDocument, existing, draft.Warnings, "Linked existing populated record");
+        await db.SaveChangesAsync(cancellationToken);
+        return new InvoiceDocumentIntakeResult(
+            "LinkedExisting",
+            existing,
+            auditDocument,
+            $"Linked the proof to existing {FriendlyInvoiceDocumentType(existing.DocType)} {existing.DocNumber}; no duplicate record was created.",
+            draft.Warnings,
+            sourceDocumentNumber);
+    }
+
+    if (documentType == "INVOICE" && !string.IsNullOrWhiteSpace(documentNumber))
+    {
+        var matchingReceivable = await db.ReceivableInvoices.AsNoTracking().AnyAsync(
+            invoice => !invoice.IsArchived && invoice.InvoiceNumber == documentNumber,
+            cancellationToken);
+        var matchingSale = await db.Sales.AsNoTracking().AnyAsync(
+            sale => !sale.IsArchived
+                && sale.IncludeInDashboard
+                && sale.Platform == "Direct"
+                && sale.InvoiceNumber == documentNumber,
+            cancellationToken);
+        if (matchingReceivable || matchingSale)
+        {
+            var conflictSources = string.Join(" and ", new[]
+            {
+                matchingReceivable ? "an existing receivable" : null,
+                matchingSale ? "an existing direct sale" : null
+            }.Where(value => value is not null));
+            var warning = $"{documentNumber} already has {conflictSources} outside the estimate/invoice builder. Automatic import stopped so it cannot duplicate accounting. Reconcile that ledger row before importing this PDF as a builder invoice.";
+            var warnings = draft.Warnings.Append(warning).ToList();
+            auditDocument.DocumentDate = DateTime.TryParseExact(
+                prefill.DocDate,
+                "yyyy-MM-dd",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out var sourceDate)
+                ? sourceDate
+                : auditDocument.DocumentDate;
+            auditDocument.DocumentType = "Invoice";
+            auditDocument.RelatedRecordType = "Invoice";
+            auditDocument.RelatedRecordNumber = documentNumber;
+            auditDocument.NeedsReview = true;
+            auditDocument.Notes = AppendNote(auditDocument.Notes, warning);
+            auditDocument.UpdatedAtUtc = DateTime.UtcNow;
+            await db.SaveChangesAsync(cancellationToken);
+            return new InvoiceDocumentIntakeResult(
+                "NeedsReview",
+                null,
+                auditDocument,
+                warning,
+                warnings,
+                sourceDocumentNumber);
+        }
+    }
+
+    var projectNotes = (prefill.ProjectNotes ?? string.Empty).Replace(
+        "Fixed local text-mapping rules prepared this draft. No database record was created by the import.",
+        "Fixed local text-mapping rules created this record from Document Intake.",
+        StringComparison.Ordinal);
+    projectNotes = AppendNote(
+        projectNotes,
+        $"SOURCE PROOF: Audit Doc #{auditDocument.Id}, {auditDocument.FileName}.");
+    if (!string.IsNullOrWhiteSpace(sourceDocumentNumber)
+        && !string.Equals(sourceDocumentNumber, documentNumber, StringComparison.OrdinalIgnoreCase))
+    {
+        projectNotes = AppendNote(projectNotes, $"SOURCE PDF NUMBER: {sourceDocumentNumber}.");
+    }
+
+    var savedStatus = prefill.Status;
+    var savedAmountPaid = prefill.AmountPaid;
+    var importWarnings = draft.Warnings.ToList();
+    if (documentType == "INVOICE"
+        && (prefill.AmountPaid > 0
+            || prefill.Status.Equals("Paid", StringComparison.OrdinalIgnoreCase)
+            || prefill.Status.Equals("Partial", StringComparison.OrdinalIgnoreCase)))
+    {
+        savedStatus = "Sent";
+        savedAmountPaid = 0;
+        var paymentWarning = $"The source PDF reports status {prefill.Status} and amount paid {prefill.AmountPaid.ToString("C", CultureInfo.GetCultureInfo("en-US"))}. The imported invoice was saved as unpaid Sent so document intake cannot create duplicate cash income. Confirm payment from the ledger record before marking it paid.";
+        projectNotes = AppendNote(projectNotes, $"SOURCE PDF PAYMENT: Status {prefill.Status}; amount paid {prefill.AmountPaid.ToString("0.00", CultureInfo.InvariantCulture)}. {paymentWarning}");
+        importWarnings.Add(paymentWarning);
+    }
+
+    var json = JsonSerializer.Serialize(new
+    {
+        version = 3,
+        savedAt = DateTimeOffset.UtcNow,
+        documentIntake = new
+        {
+            auditDocumentId = auditDocument.Id,
+            sourceFileName = auditDocument.FileName,
+            sourceSha256 = sourceHash,
+            sourceDocumentNumber,
+            requestedType,
+            detectedType = documentType,
+            sourceStatus = prefill.Status,
+            sourceAmountPaid = prefill.AmountPaid,
+            savedStatus,
+            savedAmountPaid,
+            mapper = draft.Provider
+        }
+    });
+    var lineItems = prefill.LineItems.Select((line, index) => new InvoiceLineItemRequest(
+        null,
+        index + 1,
+        line.Description,
+        line.Details,
+        line.Quantity,
+        line.Rate,
+        line.Quantity * line.Rate)).ToList();
+    var request = new SaveInvoiceDocumentRequest(
+        DocNumber: documentNumber,
+        DocType: documentType,
+        Status: savedStatus,
+        CustomerName: prefill.CustomerName,
+        CustomerPhone: prefill.CustomerPhone,
+        CustomerAddress: prefill.CustomerAddress,
+        CustomerEmail: prefill.CustomerEmail,
+        PreparedFor: prefill.PreparedFor,
+        ProjectName: prefill.ProjectName,
+        Material: prefill.Material,
+        Color: prefill.Color,
+        Infill: prefill.Infill,
+        ProjectDescription: prefill.ProjectDescription,
+        ProjectNotes: projectNotes,
+        PageSize: prefill.PageSize,
+        DocDate: prefill.DocDate,
+        DueDate: prefill.DueDate,
+        Subtotal: draft.Pricing.LineSubtotal,
+        DiscountAmount: draft.Pricing.Discount,
+        RushAmount: draft.Pricing.RushAmount,
+        TaxAmount: draft.Pricing.TaxAmount,
+        Total: draft.Pricing.Total,
+        AmountPaid: savedAmountPaid,
+        Balance: Math.Max(0, draft.Pricing.Total - savedAmountPaid),
+        PaymentMethod: prefill.PaymentMethod,
+        PricingGuide: prefill.PricingGuide,
+        TermsNotes: prefill.TermsNotes,
+        StandardTurnaround: prefill.StandardTurnaround,
+        RushTurnaround: prefill.RushTurnaround,
+        CalcGrams: prefill.CalcGrams,
+        CalcHours: prefill.CalcHours,
+        CalcDesignHours: prefill.CalcDesignHours,
+        CalcSetupFee: prefill.CalcSetupFee,
+        CalcPostFee: prefill.CalcPostFee,
+        CalcGramRate: prefill.CalcGramRate,
+        CalcHourRate: prefill.CalcHourRate,
+        CalcDesignRate: prefill.CalcDesignRate,
+        CalcMinimum: prefill.CalcMinimum,
+        CalcDifficulty: prefill.CalcDifficulty,
+        CalcRush: prefill.DocRushPercent,
+        CalcDiscount: prefill.DocDiscount,
+        CalcTaxRate: prefill.DocTaxRate,
+        LineItems: lineItems,
+        Json: json);
+
+    var created = await CreateInvoiceDocumentAsync(db, request);
+    LinkAuditDocumentToInvoiceDocument(auditDocument, created, importWarnings, "Created and linked populated record");
+    await db.SaveChangesAsync(cancellationToken);
+    return new InvoiceDocumentIntakeResult(
+        "Created",
+        created,
+        auditDocument,
+        $"Created populated {FriendlyInvoiceDocumentType(created.DocType)} {created.DocNumber} and linked the proof.",
+        importWarnings,
+        sourceDocumentNumber);
+}
+
+static void LinkAuditDocumentToInvoiceDocument(
+    AuditDocument auditDocument,
+    InvoiceDocument invoiceDocument,
+    IReadOnlyCollection<string> warnings,
+    string action)
+{
+    var type = FriendlyInvoiceDocumentType(invoiceDocument.DocType);
+    auditDocument.DocumentDate = DateTime.TryParseExact(
+        invoiceDocument.DocDate,
+        "yyyy-MM-dd",
+        CultureInfo.InvariantCulture,
+        DateTimeStyles.None,
+        out var documentDate)
+        ? documentDate
+        : auditDocument.DocumentDate;
+    auditDocument.DocumentType = type;
+    auditDocument.RelatedRecordType = type;
+    auditDocument.RelatedRecordNumber = invoiceDocument.DocNumber;
+    auditDocument.NeedsReview = false;
+    auditDocument.Notes = AppendNote(
+        auditDocument.Notes,
+        $"{action}: {type} {invoiceDocument.DocNumber}. {warnings.Count} parser warning(s) retained on the upload result.");
+    auditDocument.UpdatedAtUtc = DateTime.UtcNow;
+}
+
+static object ToInvoiceDocumentIntakeDto(InvoiceDocumentIntakeResult result) => new
+{
+    result.Action,
+    invoiceDocument = result.InvoiceDocument is null ? null : ToInvoiceDocumentDto(result.InvoiceDocument),
+    result.AuditDocument,
+    result.Message,
+    result.Warnings,
+    result.SourceDocumentNumber
+};
+
+static string FriendlyInvoiceDocumentType(string? documentType)
+{
+    return documentType?.Equals("INVOICE", StringComparison.OrdinalIgnoreCase) == true ? "Invoice" : "Estimate";
+}
+
+static bool DocumentNumberMatchesType(string? documentNumber, string documentType)
+{
+    var prefix = documentType.Equals("INVOICE", StringComparison.OrdinalIgnoreCase) ? "INV-" : "EST-";
+    return documentNumber?.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) == true;
+}
+
+static string? NormalizeImportedDocumentNumber(string? value)
+{
+    if (string.IsNullOrWhiteSpace(value)) return null;
+    var normalized = Regex.Replace(value.Trim().ToUpperInvariant(), @"\s+", "-");
+    return Regex.IsMatch(normalized, @"^(?:INV|EST)-\d{4}-\d{4}$") ? normalized : null;
+}
+
+static async Task<string> ComputeFileSha256Async(string path, CancellationToken cancellationToken)
+{
+    await using var stream = System.IO.File.OpenRead(path);
+    return Convert.ToHexString(await SHA256.HashDataAsync(stream, cancellationToken));
+}
+
+static string BuildUploadFingerprint(
+    string contentHash,
+    string fileName,
+    string? relatedType,
+    string? relatedNumber)
+{
+    var identity = string.Join('\n',
+        contentHash.Trim().ToUpperInvariant(),
+        NormalizeUploadFileName(fileName),
+        NormalizeUploadIdentityPart(relatedType),
+        NormalizeUploadIdentityPart(relatedNumber));
+    return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity)));
+}
+
+static async Task<AuditDocument?> FindAndClaimLegacyDuplicateUploadAsync(
+    AppDbContext db,
+    IWebHostEnvironment env,
+    string contentHash,
+    string uploadFingerprint,
+    string fileName,
+    string? relatedType,
+    string? relatedNumber,
+    CancellationToken cancellationToken)
+{
+    var normalizedFileName = NormalizeUploadFileName(fileName);
+    var normalizedRelatedType = NormalizeUploadIdentityPart(relatedType);
+    var normalizedRelatedNumber = NormalizeUploadIdentityPart(relatedNumber);
+    var candidates = await db.AuditDocuments
+        .Where(document => !document.IsArchived
+            && (document.UploadFingerprint == null || document.UploadFingerprint == string.Empty)
+            && document.FilePathOrUrl != null
+            && document.FilePathOrUrl != string.Empty)
+        .OrderBy(document => document.Id)
+        .ToListAsync(cancellationToken);
+
+    foreach (var candidate in candidates)
+    {
+        if (!NormalizeUploadFileName(candidate.FileName).Equals(normalizedFileName, StringComparison.Ordinal)
+            || !NormalizeUploadIdentityPart(candidate.RelatedRecordType).Equals(normalizedRelatedType, StringComparison.Ordinal)
+            || !NormalizeUploadIdentityPart(candidate.RelatedRecordNumber).Equals(normalizedRelatedNumber, StringComparison.Ordinal))
+        {
+            continue;
+        }
+
+        try
+        {
+            if (!TryGetExistingAllowedProofFilePath(
+                    env.ContentRootPath,
+                    candidate.FilePathOrUrl,
+                    out var candidatePath))
+            {
+                continue;
+            }
+
+            var candidateHash = await ComputeFileSha256Async(candidatePath, cancellationToken);
+            if (!candidateHash.Equals(contentHash, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            candidate.UploadFingerprint = uploadFingerprint;
+            candidate.UpdatedAtUtc = DateTime.UtcNow;
+            try
+            {
+                await db.SaveChangesAsync(cancellationToken);
+                return candidate;
+            }
+            catch (DbUpdateException ex) when (IsSqliteConstraintViolation(ex))
+            {
+                db.ChangeTracker.Clear();
+                var concurrentlyClaimed = await db.AuditDocuments.AsNoTracking().FirstOrDefaultAsync(
+                    document => !document.IsArchived && document.UploadFingerprint == uploadFingerprint,
+                    cancellationToken);
+                if (concurrentlyClaimed is not null)
+                {
+                    return concurrentlyClaimed;
+                }
+
+                throw;
+            }
+        }
+        catch (Exception ex) when (ex is IOException
+            or UnauthorizedAccessException
+            or ArgumentException
+            or NotSupportedException)
+        {
+            // A stale or inaccessible legacy path cannot prove identity. Leave that
+            // row untouched and keep checking other matching legacy candidates.
+        }
+    }
+
+    return null;
+}
+
+static string NormalizeUploadFileName(string fileName) =>
+    MakeSafeFileName(fileName).Trim().ToUpperInvariant();
+
+static string NormalizeUploadIdentityPart(string? value) =>
+    (value ?? string.Empty).Trim().ToUpperInvariant();
+
+static bool TryGetExistingAllowedProofFilePath(
+    string contentRootPath,
+    string? savedPath,
+    out string fullPath)
+{
+    fullPath = string.Empty;
+    if (string.IsNullOrWhiteSpace(savedPath))
+    {
+        return false;
+    }
+
+    try
+    {
+        fullPath = Path.IsPathFullyQualified(savedPath)
+            ? Path.GetFullPath(savedPath)
+            : Path.GetFullPath(Path.Combine(contentRootPath, savedPath));
+        return IsAllowedProofFilePath(contentRootPath, fullPath)
+            && System.IO.File.Exists(fullPath);
+    }
+    catch (Exception ex) when (ex is IOException
+        or UnauthorizedAccessException
+        or ArgumentException
+        or NotSupportedException)
+    {
+        fullPath = string.Empty;
+        return false;
+    }
+}
+
+static async Task<AuditDocument> ReloadAuditDocumentAfterFailedMutationAsync(
+    AppDbContext db,
+    int auditDocumentId,
+    CancellationToken cancellationToken)
+{
+    db.ChangeTracker.Clear();
+    return await db.AuditDocuments.FirstAsync(
+        document => document.Id == auditDocumentId,
+        cancellationToken);
+}
+
+static void ReplaceAuditDocument(List<AuditDocument> documents, AuditDocument replacement)
+{
+    var index = documents.FindIndex(document => document.Id == replacement.Id);
+    if (index >= 0)
+    {
+        documents[index] = replacement;
+    }
+}
+
+static void TryDeleteFile(string path)
+{
+    try
+    {
+        if (System.IO.File.Exists(path))
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+    catch
+    {
+        // Best-effort cleanup. A retained database row is never pointed at a file
+        // that this method is asked to remove.
+    }
+}
+
+static async Task DeleteProofFileIfUnreferencedAsync(AppDbContext db, string path)
+{
+    try
+    {
+        // A cancelled SaveChangesAsync can race with the SQLite commit. Confirm the
+        // row is absent before removing its file so a committed proof never becomes
+        // a broken database link. If the check itself fails, preserving an orphaned
+        // file is safer than deleting evidence that may already be referenced.
+        var referenced = await db.AuditDocuments.AsNoTracking().AnyAsync(
+            document => document.FilePathOrUrl == path,
+            CancellationToken.None);
+        if (!referenced)
+        {
+            TryDeleteFile(path);
+        }
+    }
+    catch
+    {
+        // Keep the staged file when database state cannot be established safely.
+    }
 }
 
 static object BuildInboxSuggestion(AuditDocument doc)
@@ -2546,19 +3535,32 @@ static void MapCrud<TEntity>(WebApplication app, string route) where TEntity : A
         return entity is null ? Results.NotFound() : Results.Ok(entity);
     });
 
-    group.MapPost("", async (TEntity entity, AppDbContext db) =>
+    group.MapPost("", async Task<IResult> (TEntity entity, AppDbContext db) =>
     {
+        if (GeneratedRecordOwnershipMessage(entity) is { } ownershipMessage)
+        {
+            return Results.Conflict(new { message = ownershipMessage });
+        }
+
         entity.Id = 0;
+        if (entity is AuditDocument auditDocument)
+        {
+            auditDocument.UploadFingerprint = null;
+        }
         entity.CreatedAtUtc = DateTime.UtcNow;
         entity.UpdatedAtUtc = DateTime.UtcNow;
         NormalizeCrudEntity(entity);
+        if (ValidateCrudEntity(entity) is { } validationProblem)
+        {
+            return validationProblem;
+        }
         db.Set<TEntity>().Add(entity);
         await ApplyCrudSideEffectsAsync(db, entity);
         await db.SaveChangesAsync();
         return Results.Created($"/api/{route}/{entity.Id}", entity);
     });
 
-    group.MapPut("/{id:int}", async (int id, TEntity input, AppDbContext db) =>
+    group.MapPut("/{id:int}", async Task<IResult> (int id, TEntity input, AppDbContext db, HttpRequest request) =>
     {
         var existing = await db.Set<TEntity>().FindAsync(id);
         if (existing is null)
@@ -2566,19 +3568,60 @@ static void MapCrud<TEntity>(WebApplication app, string route) where TEntity : A
             return Results.NotFound();
         }
 
+        if (!TryReadExpectedUpdatedAt(request, out var expectedUpdatedAt))
+        {
+            return Results.BadRequest(new
+            {
+                message = "X-EPATA-Updated-At must be an ISO-8601 timestamp returned by this API. Refresh the record and try again."
+            });
+        }
+        if (expectedUpdatedAt.HasValue
+            && existing.UpdatedAtUtc != expectedUpdatedAt.Value)
+        {
+            return Results.Conflict(new
+            {
+                message = "This record changed after the page loaded it. Refresh the record, review the newer values, and try again. No fields were overwritten.",
+                currentUpdatedAtUtc = existing.UpdatedAtUtc
+            });
+        }
+
+        if (GeneratedRecordOwnershipMessage(existing) is { } existingOwnershipMessage)
+        {
+            return Results.Conflict(new { message = existingOwnershipMessage });
+        }
+        if (GeneratedRecordOwnershipMessage(input) is { } inputOwnershipMessage)
+        {
+            return Results.Conflict(new { message = inputOwnershipMessage });
+        }
+
+        var previousReceivableIdentity = ReceivableInvoiceSyncIdentity.Capture(existing);
+        var previousQueueJobId = existing is PrinterQueueItem previousQueue ? previousQueue.CustomerJobId : null;
+        var uploadFingerprint = existing is AuditDocument existingAuditDocument
+            ? existingAuditDocument.UploadFingerprint
+            : null;
         input.Id = id;
+        input.CreatedAtUtc = existing.CreatedAtUtc;
+        NormalizeCrudEntity(input);
+        if (ValidateCrudEntity(input) is { } validationProblem)
+        {
+            return validationProblem;
+        }
         var created = existing.CreatedAtUtc;
         db.Entry(existing).CurrentValues.SetValues(input);
         existing.Id = id;
         existing.CreatedAtUtc = created;
         existing.UpdatedAtUtc = DateTime.UtcNow;
+        if (existing is AuditDocument auditDocument)
+        {
+            auditDocument.UploadFingerprint = uploadFingerprint;
+        }
         NormalizeCrudEntity(existing);
-        await ApplyCrudSideEffectsAsync(db, existing);
+        await ApplyCrudSideEffectsAsync(db, existing, previousReceivableIdentity, previousQueueJobId);
         await db.SaveChangesAsync();
         return Results.Ok(existing);
     });
 
-    group.MapDelete("/{id:int}", async (int id, AppDbContext db) =>
+    group.MapDelete("/{id:int}", async Task<IResult> (int id, AppDbContext db) =>
     {
         var existing = await db.Set<TEntity>().FindAsync(id);
         if (existing is null)
@@ -2586,31 +3629,249 @@ static void MapCrud<TEntity>(WebApplication app, string route) where TEntity : A
             return Results.NotFound();
         }
 
+        if (GeneratedRecordOwnershipMessage(existing) is { } ownershipMessage)
+        {
+            return Results.Conflict(new { message = ownershipMessage });
+        }
+        if (existing.IsArchived)
+        {
+            return Results.NoContent();
+        }
+
+        var previousReceivableIdentity = ReceivableInvoiceSyncIdentity.Capture(existing);
+        var previousQueueJobId = existing is PrinterQueueItem previousQueue ? previousQueue.CustomerJobId : null;
         existing.IsArchived = true;
         existing.UpdatedAtUtc = DateTime.UtcNow;
+        await ApplyCrudSideEffectsAsync(db, existing, previousReceivableIdentity, previousQueueJobId);
         await db.SaveChangesAsync();
         return Results.NoContent();
     });
 
-    group.MapPost("/{id:int}/restore", async (int id, AppDbContext db) =>
+    group.MapPost("/{id:int}/restore", async Task<IResult> (
+        int id,
+        AppDbContext db,
+        CancellationToken cancellationToken) =>
     {
-        var existing = await db.Set<TEntity>().FindAsync(id);
+        var existing = await db.Set<TEntity>().FirstOrDefaultAsync(
+            entity => entity.Id == id,
+            cancellationToken);
         if (existing is null)
         {
             return Results.NotFound();
         }
 
-        existing.IsArchived = false;
-        existing.UpdatedAtUtc = DateTime.UtcNow;
-        await db.SaveChangesAsync();
-        return Results.Ok(existing);
+        if (GeneratedRecordOwnershipMessage(existing) is { } ownershipMessage)
+        {
+            return Results.Conflict(new { message = ownershipMessage });
+        }
+        if (!existing.IsArchived)
+        {
+            return Results.Ok(existing);
+        }
+
+        SemaphoreSlim? restoreGate = null;
+        var restoreGateHeld = false;
+        try
+        {
+            if (existing is AuditDocument { UploadFingerprint: { Length: > 0 } fingerprint })
+            {
+                restoreGate = UploadMutationLocks.For(fingerprint);
+                await restoreGate.WaitAsync(cancellationToken);
+                restoreGateHeld = true;
+                var activeDuplicate = await db.AuditDocuments.AsNoTracking().FirstOrDefaultAsync(
+                    document => document.Id != existing.Id
+                        && !document.IsArchived
+                        && document.UploadFingerprint == fingerprint,
+                    cancellationToken);
+                if (activeDuplicate is not null)
+                {
+                    return Results.Conflict(new
+                    {
+                        message = $"This archived proof is the same exact upload as active proof #{activeDuplicate.Id}. Archive the active proof first if you want to restore this older record.",
+                        existingAuditDocumentId = activeDuplicate.Id
+                    });
+                }
+            }
+            else if (MarketplaceRestoreIdentityKey(existing) is { } marketplaceIdentityKey)
+            {
+                restoreGate = MarketplaceMutationLocks.For(marketplaceIdentityKey);
+                await restoreGate.WaitAsync(cancellationToken);
+                restoreGateHeld = true;
+                var activeDuplicateId = await FindActiveMarketplaceRestoreCollisionIdAsync(
+                    db,
+                    existing,
+                    marketplaceIdentityKey,
+                    cancellationToken);
+                if (activeDuplicateId.HasValue && existing is Sale sale)
+                {
+                    return Results.Conflict(new
+                    {
+                        message = $"This archived Sale cannot be restored because active Sale #{activeDuplicateId.Value} already uses {sale.Platform} order {sale.OrderNumber}. Archive the active Sale first if you intend to restore this older record.",
+                        existingSaleId = activeDuplicateId.Value
+                    });
+                }
+            }
+
+            var previousReceivableIdentity = ReceivableInvoiceSyncIdentity.Capture(existing);
+            var previousQueueJobId = existing is PrinterQueueItem previousQueue ? previousQueue.CustomerJobId : null;
+            existing.IsArchived = false;
+            existing.UpdatedAtUtc = DateTime.UtcNow;
+            await ApplyCrudSideEffectsAsync(db, existing, previousReceivableIdentity, previousQueueJobId);
+            await db.SaveChangesAsync(cancellationToken);
+            return Results.Ok(existing);
+        }
+        finally
+        {
+            if (restoreGateHeld)
+            {
+                restoreGate!.Release();
+            }
+        }
     });
+}
+
+static string? MarketplaceRestoreIdentityKey(AuditableEntity entity)
+{
+    return entity switch
+    {
+        Sale sale => MarketplaceMutationLocks.IdentityKey(sale.Platform, sale.OrderNumber),
+        _ => null
+    };
+}
+
+static async Task<int?> FindActiveMarketplaceRestoreCollisionIdAsync(
+    AppDbContext db,
+    AuditableEntity entity,
+    string marketplaceIdentityKey,
+    CancellationToken cancellationToken)
+{
+    if (entity is Sale sale)
+    {
+        var candidates = await db.Sales.AsNoTracking()
+            .Where(candidate => candidate.Id != sale.Id && !candidate.IsArchived)
+            .Select(candidate => new { candidate.Id, candidate.Platform, candidate.OrderNumber })
+            .ToListAsync(cancellationToken);
+        return candidates.FirstOrDefault(candidate =>
+            MarketplaceMutationLocks.IdentityKey(candidate.Platform, candidate.OrderNumber) == marketplaceIdentityKey)?.Id;
+    }
+
+    return null;
+}
+
+static bool TryReadExpectedUpdatedAt(HttpRequest request, out DateTime? expectedUpdatedAt)
+{
+    expectedUpdatedAt = null;
+    var value = request.Headers["X-EPATA-Updated-At"].FirstOrDefault();
+    if (string.IsNullOrWhiteSpace(value))
+    {
+        return true;
+    }
+
+    if (!DateTime.TryParse(
+        value,
+        CultureInfo.InvariantCulture,
+        DateTimeStyles.RoundtripKind | DateTimeStyles.AllowWhiteSpaces,
+        out var parsed))
+    {
+        return false;
+    }
+
+    expectedUpdatedAt = parsed;
+    return true;
+}
+
+static bool TryReadExpectedInvoiceDocumentUpdatedAt(HttpRequest request, out string? expectedUpdatedAt)
+{
+    expectedUpdatedAt = request.Headers["X-EPATA-Updated-At"].FirstOrDefault()?.Trim();
+    return string.IsNullOrWhiteSpace(expectedUpdatedAt)
+        || DateTimeOffset.TryParse(
+            expectedUpdatedAt,
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.AllowWhiteSpaces,
+            out _);
+}
+
+static bool InvoiceDocumentUpdatedAtMatches(string currentUpdatedAt, string? expectedUpdatedAt)
+{
+    if (string.IsNullOrWhiteSpace(expectedUpdatedAt)
+        || string.Equals(currentUpdatedAt, expectedUpdatedAt, StringComparison.Ordinal))
+    {
+        return true;
+    }
+
+    return DateTimeOffset.TryParse(
+            currentUpdatedAt,
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.AllowWhiteSpaces,
+            out var current)
+        && DateTimeOffset.TryParse(
+            expectedUpdatedAt,
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.AllowWhiteSpaces,
+            out var expected)
+        && current.Equals(expected);
+}
+
+static IResult? ValidateCrudEntity(AuditableEntity entity)
+{
+    var validationResults = new List<ValidationResult>();
+    if (Validator.TryValidateObject(entity, new ValidationContext(entity), validationResults, validateAllProperties: true))
+    {
+        return null;
+    }
+
+    var errors = validationResults
+        .SelectMany(result => result.MemberNames.DefaultIfEmpty(string.Empty).Select(member => new
+        {
+            Member = string.IsNullOrWhiteSpace(member) ? "record" : char.ToLowerInvariant(member[0]) + member[1..],
+            Message = result.ErrorMessage ?? "The supplied value is invalid."
+        }))
+        .GroupBy(item => item.Member, StringComparer.OrdinalIgnoreCase)
+        .ToDictionary(
+            group => group.Key,
+            group => group.Select(item => item.Message).Distinct(StringComparer.Ordinal).ToArray(),
+            StringComparer.OrdinalIgnoreCase);
+    return Results.ValidationProblem(errors, statusCode: StatusCodes.Status400BadRequest);
 }
 
 static IResult Csv(string fileName, string csv)
 {
     return Results.File(Encoding.UTF8.GetBytes(csv), "text/csv", fileName);
 }
+
+static string? GeneratedRecordOwnershipMessage(AuditableEntity entity)
+{
+    if (entity is ReceivableInvoice invoice
+        && HasGeneratedSource(invoice.SourceProof, "Unified invoice "))
+    {
+        return "This receivable is generated from an Invoice Record. Edit, archive, or restore the source Invoice Record instead.";
+    }
+
+    if (entity is CustomerJob job
+        && HasGeneratedSource(job.SourceProof, "Unified estimate "))
+    {
+        return "This customer job is generated from an Estimate Record. Edit, archive, or restore the source Estimate Record instead.";
+    }
+
+    if (entity is Sale sale)
+    {
+        if (HasGeneratedSource(sale.SourceProof, "Unified invoice "))
+        {
+            return "This sale is generated from an Invoice Record. Edit, archive, or restore the source Invoice Record instead.";
+        }
+        if (sale.SourceReceivableInvoiceId.HasValue
+            || sale.Notes?.Contains("automatically", StringComparison.OrdinalIgnoreCase) == true
+                && sale.Notes.Contains("receivable invoice", StringComparison.OrdinalIgnoreCase))
+        {
+            return "This sale is generated from a receivable invoice. Edit, archive, or restore the source receivable instead.";
+        }
+    }
+
+    return null;
+}
+
+static bool HasGeneratedSource(string? sourceProof, string prefix) =>
+    sourceProof?.TrimStart().StartsWith(prefix, StringComparison.OrdinalIgnoreCase) == true;
 
 static string PaymentChannelFor(Sale sale)
 {
@@ -2674,19 +3935,32 @@ static void NormalizeCrudEntity<TEntity>(TEntity entity) where TEntity : Auditab
 
     switch (entity)
     {
+        case Party party:
+            party.Name ??= string.Empty;
+            party.PartyType = string.IsNullOrWhiteSpace(party.PartyType) ? "Customer" : party.PartyType;
+            break;
         case Bill bill:
+            bill.VendorName ??= string.Empty;
+            bill.Category = string.IsNullOrWhiteSpace(bill.Category) ? "General Business" : bill.Category;
+            bill.Description ??= string.Empty;
+            bill.Status = string.IsNullOrWhiteSpace(bill.Status) ? "Unpaid" : bill.Status;
             bill.Amount = ClampMoney(bill.Amount);
             bill.SalesTax = ClampMoney(bill.SalesTax);
             bill.Total = (bill.Amount ?? 0) + (bill.SalesTax ?? 0);
             bill.AmountPaid = ClampMoney(bill.AmountPaid);
             bill.PaymentMethod = NormalizePaymentMethod(bill.PaymentMethod);
             if (string.IsNullOrWhiteSpace(bill.TaxCategory)) bill.TaxCategory = "Other business expense";
-            if (bill.Status.Equals("Paid", StringComparison.OrdinalIgnoreCase) && (bill.AmountPaid ?? 0) <= 0 && (bill.Total ?? 0) > 0)
+            if (string.Equals(bill.Status, "Paid", StringComparison.OrdinalIgnoreCase) && (bill.AmountPaid ?? 0) <= 0 && (bill.Total ?? 0) > 0)
             {
                 bill.AmountPaid = bill.Total;
             }
             break;
         case Expense expense:
+            expense.VendorName ??= string.Empty;
+            expense.Category = string.IsNullOrWhiteSpace(expense.Category) ? "General Business" : expense.Category;
+            expense.Description ??= string.Empty;
+            expense.TaxBucket = string.IsNullOrWhiteSpace(expense.TaxBucket) ? "Operating Expense" : expense.TaxBucket;
+            expense.DeductibleStatus = string.IsNullOrWhiteSpace(expense.DeductibleStatus) ? "Yes" : expense.DeductibleStatus;
             expense.Amount = ClampMoney(expense.Amount);
             expense.SalesTax = ClampMoney(expense.SalesTax);
             expense.Total = (expense.Amount ?? 0) + (expense.SalesTax ?? 0);
@@ -2694,26 +3968,53 @@ static void NormalizeCrudEntity<TEntity>(TEntity entity) where TEntity : Auditab
             expense.PaymentMethod = NormalizePaymentMethod(expense.PaymentMethod);
             if (string.IsNullOrWhiteSpace(expense.TaxCategory)) expense.TaxCategory = "Other business expense";
             break;
+        case OrderLossIncident incident:
+            incident.ProductName ??= string.Empty;
+            incident.CustomerRefund = ClampMoney(incident.CustomerRefund);
+            incident.ReplacementCogs = ClampMoney(incident.ReplacementCogs);
+            incident.AdditionalShippingCost = ClampMoney(incident.AdditionalShippingCost);
+            incident.OtherCost = ClampMoney(incident.OtherCost);
+            incident.ReimbursementReceived = ClampMoney(incident.ReimbursementReceived);
+            if (string.IsNullOrWhiteSpace(incident.Platform)) incident.Platform = "Other";
+            if (string.IsNullOrWhiteSpace(incident.IncidentType)) incident.IncidentType = "Damaged in transit";
+            if (string.IsNullOrWhiteSpace(incident.Resolution)) incident.Resolution = "Replacement / reship";
+            if (string.IsNullOrWhiteSpace(incident.Status)) incident.Status = "Resolved";
+            break;
         case ReceivableInvoice invoice:
+            invoice.InvoiceNumber ??= string.Empty;
+            invoice.CustomerName ??= string.Empty;
+            invoice.Status = string.IsNullOrWhiteSpace(invoice.Status) ? "Draft" : invoice.Status;
             invoice.Subtotal = ClampMoney(invoice.Subtotal);
             invoice.Discount = ClampMoney(invoice.Discount);
             invoice.RushFee = ClampMoney(invoice.RushFee);
             invoice.SalesTax = ClampMoney(invoice.SalesTax);
             invoice.InvoiceTotal = Math.Max(0, (invoice.Subtotal ?? 0) - (invoice.Discount ?? 0) + (invoice.RushFee ?? 0) + (invoice.SalesTax ?? 0));
             invoice.AmountPaid = Math.Min(invoice.InvoiceTotal ?? 0, ClampMoney(invoice.AmountPaid) ?? 0);
-            if (invoice.Status.Equals("Paid", StringComparison.OrdinalIgnoreCase) && invoice.AmountPaid <= 0 && invoice.InvoiceTotal > 0)
+            if (string.Equals(invoice.Status, "Paid", StringComparison.OrdinalIgnoreCase) && invoice.AmountPaid <= 0 && invoice.InvoiceTotal > 0)
             {
                 invoice.AmountPaid = invoice.InvoiceTotal;
             }
+            else if (string.Equals(invoice.Status, "Draft", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(invoice.Status, "Sent", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(invoice.Status, "Void", StringComparison.OrdinalIgnoreCase))
+            {
+                invoice.AmountPaid = 0;
+            }
             invoice.PaymentMethod = NormalizePaymentMethod(invoice.PaymentMethod);
-            invoice.IncludeInCashReports = invoice.AmountPaid > 0 && !invoice.Status.Equals("Void", StringComparison.OrdinalIgnoreCase);
-            if (invoice.Status.Equals("Void", StringComparison.OrdinalIgnoreCase))
+            invoice.IncludeInCashReports = !invoice.IsArchived
+                && invoice.AmountPaid > 0
+                && !string.Equals(invoice.Status, "Void", StringComparison.OrdinalIgnoreCase);
+            if (string.Equals(invoice.Status, "Void", StringComparison.OrdinalIgnoreCase))
             {
                 invoice.AmountPaid = 0;
                 invoice.IncludeInCashReports = false;
             }
             break;
         case Sale sale:
+            sale.CustomerName ??= string.Empty;
+            sale.ProductName ??= string.Empty;
+            sale.Status = string.IsNullOrWhiteSpace(sale.Status) ? "Paid" : sale.Status;
+            sale.Platform = string.IsNullOrWhiteSpace(sale.Platform) ? "Direct" : sale.Platform;
             sale.Quantity = ClampMoney(sale.Quantity);
             sale.ItemSales = ClampMoney(sale.ItemSales);
             sale.ShippingCharged = ClampMoney(sale.ShippingCharged);
@@ -2724,14 +4025,14 @@ static void NormalizeCrudEntity<TEntity>(TEntity entity) where TEntity : Auditab
             sale.EstimatedCogs = ClampMoney(sale.EstimatedCogs);
             sale.CustomerPaid = ClampMoney(sale.CustomerPaid);
             var expectedCustomerPaid = MoneyRules.SaleGrossReceipts(sale) + MoneyRules.SaleSalesTaxMemo(sale);
-            if (expectedCustomerPaid > 0 && !sale.Status.Equals("Draft", StringComparison.OrdinalIgnoreCase))
+            if (expectedCustomerPaid > 0 && !string.Equals(sale.Status, "Draft", StringComparison.OrdinalIgnoreCase))
             {
                 sale.CustomerPaid = expectedCustomerPaid;
             }
-            if (sale.Status.Equals("Draft", StringComparison.OrdinalIgnoreCase)
-                || sale.Status.Equals("Void", StringComparison.OrdinalIgnoreCase)
-                || sale.Status.Equals("Cancelled", StringComparison.OrdinalIgnoreCase)
-                || sale.Status.Equals("Canceled", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(sale.Status, "Draft", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(sale.Status, "Void", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(sale.Status, "Cancelled", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(sale.Status, "Canceled", StringComparison.OrdinalIgnoreCase))
             {
                 sale.IncludeInDashboard = false;
             }
@@ -2742,21 +4043,31 @@ static void NormalizeCrudEntity<TEntity>(TEntity entity) where TEntity : Auditab
             }
             break;
         case TaxObligation obligation:
+            obligation.Title ??= string.Empty;
+            obligation.Jurisdiction = string.IsNullOrWhiteSpace(obligation.Jurisdiction) ? "Federal" : obligation.Jurisdiction;
+            obligation.ObligationType = string.IsNullOrWhiteSpace(obligation.ObligationType) ? "Other" : obligation.ObligationType;
+            obligation.Status = string.IsNullOrWhiteSpace(obligation.Status) ? "Review Applicability" : obligation.Status;
             obligation.EstimatedAmount = ClampMoney(obligation.EstimatedAmount);
             obligation.AmountPaid = ClampMoney(obligation.AmountPaid);
             obligation.PaymentMethod = NormalizePaymentMethod(obligation.PaymentMethod);
             obligation.TaxYear = obligation.TaxYear is >= 2000 and <= 2200 ? obligation.TaxYear : DateTime.Today.Year;
-            if (obligation.Status.Equals("Filed / Paid", StringComparison.OrdinalIgnoreCase)
-                || obligation.Status.Equals("Not Required", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(obligation.Status, "Filed / Paid", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(obligation.Status, "Not Required", StringComparison.OrdinalIgnoreCase))
             {
                 obligation.NeedsReview = false;
             }
             break;
         case MileageLog mileage:
+            mileage.BusinessPurpose ??= string.Empty;
             mileage.BusinessMiles = ClampMoney(mileage.BusinessMiles);
             mileage.ParkingAndTolls = ClampMoney(mileage.ParkingAndTolls);
             break;
         case CustomerJob job:
+            job.CustomerName ??= string.Empty;
+            job.Platform = string.IsNullOrWhiteSpace(job.Platform) ? "Direct" : job.Platform;
+            job.JobName ??= string.Empty;
+            job.JobType = string.IsNullOrWhiteSpace(job.JobType) ? "Print" : job.JobType;
+            job.Status = string.IsNullOrWhiteSpace(job.Status) ? "Open" : job.Status;
             job.QuoteAmount = ClampMoney(job.QuoteAmount);
             job.InvoiceAmount = ClampMoney(job.InvoiceAmount);
             job.AmountPaid = ClampMoney(job.AmountPaid);
@@ -2767,51 +4078,79 @@ static void NormalizeCrudEntity<TEntity>(TEntity entity) where TEntity : Auditab
                 job.JobType = "Estimate";
                 job.InvoiceAmount = null;
                 job.AmountPaid = null;
-                if (job.Status.Equals("Paid", StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(job.Status, "Paid", StringComparison.OrdinalIgnoreCase))
                 {
                     job.Status = "Quoted";
                 }
             }
             break;
         case CustomerCommunication communication:
+            communication.CustomerName ??= string.Empty;
+            communication.Direction = string.IsNullOrWhiteSpace(communication.Direction) ? "Outgoing" : communication.Direction;
+            communication.Channel = string.IsNullOrWhiteSpace(communication.Channel) ? "Email" : communication.Channel;
+            communication.Summary ??= string.Empty;
+            communication.FollowUpStatus = string.IsNullOrWhiteSpace(communication.FollowUpStatus) ? "None" : communication.FollowUpStatus;
             communication.OccurredAt ??= DateTime.Now;
-            if (!communication.FollowUpStatus.Equals("Open", StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(communication.FollowUpStatus, "Open", StringComparison.OrdinalIgnoreCase))
             {
-                communication.FollowUpDate = communication.FollowUpStatus.Equals("Done", StringComparison.OrdinalIgnoreCase)
+                communication.FollowUpDate = string.Equals(communication.FollowUpStatus, "Done", StringComparison.OrdinalIgnoreCase)
                     ? communication.FollowUpDate
                     : null;
             }
             break;
         case PrinterQueueItem queue:
+            queue.Priority = string.IsNullOrWhiteSpace(queue.Priority) ? "Normal" : queue.Priority;
+            queue.JobName ??= string.Empty;
+            queue.Status = string.IsNullOrWhiteSpace(queue.Status) ? "Queued" : queue.Status;
             queue.Quantity = Math.Max(1, queue.Quantity);
             queue.PlateCount = Math.Max(1, queue.PlateCount);
             queue.FailureCount = Math.Max(0, queue.FailureCount);
             queue.EstimatedHours = ClampMoney(queue.EstimatedHours);
             queue.ActualHours = ClampMoney(queue.ActualHours);
             queue.ProgressPercent = Math.Clamp(queue.ProgressPercent, 0, 100);
-            if (queue.Status.Equals("Printing", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(queue.Status, "Printing", StringComparison.OrdinalIgnoreCase))
             {
                 queue.StartedAt ??= DateTime.Now;
-                queue.ProgressPercent = Math.Max(1, queue.ProgressPercent);
+                queue.CompletedAt = null;
+                queue.ProgressPercent = Math.Clamp(queue.ProgressPercent, 1, 99);
             }
-            if (queue.Status.Equals("Completed", StringComparison.OrdinalIgnoreCase))
+            else if (string.Equals(queue.Status, "Completed", StringComparison.OrdinalIgnoreCase))
             {
                 queue.CompletedAt ??= DateTime.Now;
                 queue.ProgressPercent = 100;
                 queue.NeedsReview = false;
             }
+            else
+            {
+                queue.CompletedAt = null;
+                queue.ProgressPercent = Math.Min(queue.ProgressPercent, 99);
+                if (string.Equals(queue.Status, "Queued", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(queue.Status, "Ready", StringComparison.OrdinalIgnoreCase))
+                {
+                    queue.StartedAt = null;
+                    queue.ProgressPercent = 0;
+                }
+            }
             break;
         case Asset asset:
+            asset.Name ??= string.Empty;
+            asset.Category = string.IsNullOrWhiteSpace(asset.Category) ? "Equipment" : asset.Category;
+            asset.TaxTreatment = string.IsNullOrWhiteSpace(asset.TaxTreatment) ? "Review" : asset.TaxTreatment;
             asset.Cost = ClampMoney(asset.Cost);
             asset.BusinessUsePercent = ClampPercent(asset.BusinessUsePercent);
             asset.NotYetExpensed = ClampMoney(asset.NotYetExpensed);
             asset.PaymentMethod = NormalizePaymentMethod(asset.PaymentMethod);
             break;
         case MakerWorldReward reward:
+            reward.RewardType = string.IsNullOrWhiteSpace(reward.RewardType) ? "Points" : reward.RewardType;
+            reward.Status = string.IsNullOrWhiteSpace(reward.Status) ? "Available" : reward.Status;
+            reward.IncomeStatus = string.IsNullOrWhiteSpace(reward.IncomeStatus) ? "Review" : reward.IncomeStatus;
             reward.GiftCardAmount = ClampMoney(reward.GiftCardAmount);
             reward.PointsChange ??= 0;
             break;
         case Product product:
+            product.Name ??= string.Empty;
+            product.Category = string.IsNullOrWhiteSpace(product.Category) ? "3D Printed Product" : product.Category;
             product.TargetPrice = ClampMoney(product.TargetPrice);
             product.Grams = ClampMoney(product.Grams);
             product.MaterialCostPerGram = ClampMoney(product.MaterialCostPerGram);
@@ -2819,6 +4158,23 @@ static void NormalizeCrudEntity<TEntity>(TEntity entity) where TEntity : Auditab
             product.MachineRatePerHour = ClampMoney(product.MachineRatePerHour);
             product.PackagingCost = ClampMoney(product.PackagingCost);
             product.DesignMinutes = ClampMoney(product.DesignMinutes);
+            break;
+        case AuditDocument document:
+            document.DocumentType = string.IsNullOrWhiteSpace(document.DocumentType) ? "Receipt" : document.DocumentType;
+            document.FileName ??= string.Empty;
+            break;
+        case BusinessAccount account:
+            account.Name ??= string.Empty;
+            account.AccountType = string.IsNullOrWhiteSpace(account.AccountType) ? "Cash" : account.AccountType;
+            break;
+        case ActionItem action:
+            action.Title ??= string.Empty;
+            action.Area = string.IsNullOrWhiteSpace(action.Area) ? "General" : action.Area;
+            action.Priority = string.IsNullOrWhiteSpace(action.Priority) ? "Normal" : action.Priority;
+            action.Status = string.IsNullOrWhiteSpace(action.Status) ? "Open" : action.Status;
+            break;
+        case AppSetting setting:
+            setting.Key ??= string.Empty;
             break;
     }
 }
@@ -2895,30 +4251,71 @@ static DateTime? AddClockIfMidnight(DateTime? value, DateTime clock, int minuteO
         .Add(timeOfDay);
 }
 
-static async Task ApplyCrudSideEffectsAsync<TEntity>(AppDbContext db, TEntity entity) where TEntity : AuditableEntity
+static async Task ApplyCrudSideEffectsAsync<TEntity>(
+    AppDbContext db,
+    TEntity entity,
+    ReceivableInvoiceSyncIdentity? previousReceivableIdentity = null,
+    int? previousQueueJobId = null) where TEntity : AuditableEntity
 {
     if (entity is ReceivableInvoice invoice)
     {
-        await SyncManualReceivableInvoiceToSaleAsync(db, invoice);
+        await SyncManualReceivableInvoiceToSaleAsync(db, invoice, previousReceivableIdentity);
     }
-    if (entity is PrinterQueueItem queue && queue.CustomerJobId.HasValue)
+    if (entity is PrinterQueueItem queue)
     {
-        var job = await db.CustomerJobs.FirstOrDefaultAsync(x => x.Id == queue.CustomerJobId.Value && !x.IsArchived);
-        if (job is not null)
+        if (previousQueueJobId.HasValue && previousQueueJobId != queue.CustomerJobId)
         {
-            if (queue.Status.Equals("Printing", StringComparison.OrdinalIgnoreCase)
-                && job.Status is not ("Paid" or "Completed" or "Cancelled"))
-            {
-                job.Status = "In Progress";
-            }
-            else if (queue.Status.Equals("Completed", StringComparison.OrdinalIgnoreCase)
-                && job.Status is not ("Paid" or "Cancelled"))
-            {
-                job.Status = "Completed";
-            }
+            await SyncCustomerJobFromPrinterQueueAsync(db, previousQueueJobId.Value, queue, includeChangedQueue: false);
+        }
+        if (queue.CustomerJobId.HasValue)
+        {
+            await SyncCustomerJobFromPrinterQueueAsync(db, queue.CustomerJobId.Value, queue, includeChangedQueue: true);
         }
     }
 }
+
+static async Task SyncCustomerJobFromPrinterQueueAsync(
+    AppDbContext db,
+    int jobId,
+    PrinterQueueItem changedQueue,
+    bool includeChangedQueue)
+{
+    var job = await db.CustomerJobs.FirstOrDefaultAsync(x => x.Id == jobId && !x.IsArchived);
+    if (job is null || job.Status is "Paid" or "Cancelled")
+    {
+        return;
+    }
+
+    var persisted = await db.PrinterQueueItems
+        .Where(x => x.CustomerJobId == jobId && x.Id != changedQueue.Id)
+        .ToListAsync();
+    var active = persisted.Where(x => !x.IsArchived).ToList();
+    if (includeChangedQueue && !changedQueue.IsArchived)
+    {
+        active.Add(changedQueue);
+    }
+
+    var anyActivelyWorked = active.Any(x => QueueStatusIs(x, "Printing", "Paused", "Needs Attention"));
+    var anyCompleted = active.Any(x => QueueStatusIs(x, "Completed"));
+    var anyWaiting = active.Any(x => QueueStatusIs(x, "Queued", "Ready"));
+    var allTerminal = active.Count > 0 && active.All(x => QueueStatusIs(x, "Completed", "Cancelled"));
+
+    if (anyActivelyWorked || (anyCompleted && anyWaiting))
+    {
+        job.Status = "In Progress";
+    }
+    else if (allTerminal && anyCompleted)
+    {
+        job.Status = "Completed";
+    }
+    else if (active.Count == 0 || anyWaiting)
+    {
+        job.Status = "Open";
+    }
+}
+
+static bool QueueStatusIs(PrinterQueueItem queue, params string[] statuses) =>
+    statuses.Any(status => string.Equals(queue.Status, status, StringComparison.OrdinalIgnoreCase));
 
 static decimal? ClampMoney(decimal? value)
 {
@@ -3143,23 +4540,42 @@ static bool IsGeneratedReceivableForActiveInvoiceDocument(ReceivableInvoice invo
 
 static async Task<InvoiceDocument> CreateInvoiceDocumentAsync(AppDbContext db, SaveInvoiceDocumentRequest request)
 {
-    var now = DateTimeOffset.UtcNow.ToString("O");
-    var doc = new InvoiceDocument
+    await InvoiceDocumentMutationLocks.Gate.WaitAsync();
+    try
     {
-        CreatedAt = now,
-        UpdatedAt = now,
-        DocNumber = string.IsNullOrWhiteSpace(request.DocNumber)
-            ? await NextInvoiceDocumentNumberAsync(db, request.DocType ?? "ESTIMATE")
-            : request.DocNumber.Trim()
-    };
-    ApplyInvoiceDocumentRequest(doc, request);
-    await ValidateInvoiceDocumentIdentityAsync(db, doc);
-    db.InvoiceDocuments.Add(doc);
-    await db.SaveChangesAsync();
-    AddInvoiceDocumentEvent(db, doc, "Created", null, doc.Status, $"{doc.DocType} created as {doc.Status}", $"{doc.DocNumber} was created.", doc.Total);
-    await db.SaveChangesAsync();
-    await SyncUnifiedInvoiceDocumentToLedgerAsync(db, doc);
-    return doc;
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        try
+        {
+            var now = DateTimeOffset.UtcNow.ToString("O");
+            var doc = new InvoiceDocument
+            {
+                CreatedAt = now,
+                UpdatedAt = now,
+                DocNumber = string.IsNullOrWhiteSpace(request.DocNumber)
+                    ? await NextInvoiceDocumentNumberAsync(db, request.DocType ?? "ESTIMATE")
+                    : request.DocNumber.Trim()
+            };
+            ApplyInvoiceDocumentRequest(doc, request);
+            await ValidateInvoiceDocumentIdentityAsync(db, doc);
+            db.InvoiceDocuments.Add(doc);
+            await db.SaveChangesAsync();
+            AddInvoiceDocumentEvent(db, doc, "Created", null, doc.Status, $"{doc.DocType} created as {doc.Status}", $"{doc.DocNumber} was created.", doc.Total);
+            await db.SaveChangesAsync();
+            await SyncUnifiedInvoiceDocumentToLedgerAsync(db, doc);
+            await transaction.CommitAsync();
+            return doc;
+        }
+        catch
+        {
+            await transaction.RollbackAsync();
+            db.ChangeTracker.Clear();
+            throw;
+        }
+    }
+    finally
+    {
+        InvoiceDocumentMutationLocks.Gate.Release();
+    }
 }
 
 static async Task<IResult> CreateInvoiceDocumentResultAsync(AppDbContext db, SaveInvoiceDocumentRequest request)
@@ -3175,133 +4591,295 @@ static async Task<IResult> CreateInvoiceDocumentResultAsync(AppDbContext db, Sav
     }
 }
 
-static async Task<InvoiceDocument?> UpdateInvoiceDocumentAsync(AppDbContext db, int id, SaveInvoiceDocumentRequest request)
+static async Task<InvoiceDocument?> UpdateInvoiceDocumentAsync(
+    AppDbContext db,
+    int id,
+    SaveInvoiceDocumentRequest request,
+    string? expectedUpdatedAt,
+    CancellationToken cancellationToken)
 {
-    var doc = await db.InvoiceDocuments.Include(d => d.LineItems).FirstOrDefaultAsync(d => d.Id == id);
+    await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+    var doc = await db.InvoiceDocuments
+        .Include(d => d.LineItems)
+        .FirstOrDefaultAsync(d => d.Id == id, cancellationToken);
     if (doc is null)
     {
+        await transaction.RollbackAsync(CancellationToken.None);
         return null;
     }
-    if (doc.IsArchived)
-    {
-        throw new InvalidOperationException($"Archived document {doc.DocNumber} must be restored before it can be edited.");
-    }
-
-    var before = CaptureInvoiceDocumentAuditState(doc);
-    doc.UpdatedAt = DateTimeOffset.UtcNow.ToString("O");
-    var requestedType = (request.DocType ?? doc.DocType ?? "ESTIMATE").ToUpperInvariant();
-    if (!string.Equals(doc.DocType, requestedType, StringComparison.OrdinalIgnoreCase))
-    {
-        throw new InvalidOperationException($"Cannot change saved {doc.DocType} {doc.DocNumber} into a {requestedType} by saving. Use Create Invoice from the estimate row so the original estimate stays intact.");
-    }
-
-    ApplyInvoiceDocumentRequest(doc, request);
-    await ValidateInvoiceDocumentIdentityAsync(db, doc);
-    await RepointUnifiedDocumentLedgerLinksAsync(db, doc, before);
-    AddInvoiceDocumentChangeEvents(db, doc, before);
-    await db.SaveChangesAsync();
-    await SyncUnifiedInvoiceDocumentToLedgerAsync(db, doc);
-    return doc;
-}
-
-static async Task<IResult> UpdateInvoiceDocumentResultAsync(AppDbContext db, int id, SaveInvoiceDocumentRequest request)
-{
     try
     {
-        var doc = await UpdateInvoiceDocumentAsync(db, id, request);
+        if (doc.IsArchived)
+        {
+            throw new InvalidOperationException($"Archived document {doc.DocNumber} must be restored before it can be edited.");
+        }
+        if (!InvoiceDocumentUpdatedAtMatches(doc.UpdatedAt, expectedUpdatedAt))
+        {
+            throw new StaleInvoiceDocumentException(doc.UpdatedAt);
+        }
+
+        var before = CaptureInvoiceDocumentAuditState(doc);
+        doc.UpdatedAt = DateTimeOffset.UtcNow.ToString("O");
+        var requestedType = (request.DocType ?? doc.DocType ?? "ESTIMATE").ToUpperInvariant();
+        if (!string.Equals(doc.DocType, requestedType, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException($"Cannot change saved {doc.DocType} {doc.DocNumber} into a {requestedType} by saving. Use Create Invoice from the estimate row so the original estimate stays intact.");
+        }
+
+        ApplyInvoiceDocumentRequest(doc, request);
+        await ValidateInvoiceDocumentIdentityAsync(db, doc, cancellationToken);
+        await RepointUnifiedDocumentLedgerLinksAsync(db, doc, before, cancellationToken);
+        AddInvoiceDocumentChangeEvents(db, doc, before);
+        await db.SaveChangesAsync(cancellationToken);
+        await SyncUnifiedInvoiceDocumentToLedgerAsync(db, doc, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return doc;
+    }
+    catch
+    {
+        await transaction.RollbackAsync(CancellationToken.None);
+        db.ChangeTracker.Clear();
+        throw;
+    }
+}
+
+static async Task<IResult> UpdateInvoiceDocumentResultAsync(
+    AppDbContext db,
+    int id,
+    SaveInvoiceDocumentRequest request,
+    HttpRequest httpRequest,
+    CancellationToken cancellationToken)
+{
+    if (!TryReadExpectedInvoiceDocumentUpdatedAt(httpRequest, out var expectedUpdatedAt))
+    {
+        return Results.BadRequest(new
+        {
+            message = "X-EPATA-Updated-At must be the ISO-8601 timestamp returned with this Invoice Record. Reload the record and try again."
+        });
+    }
+
+    await InvoiceDocumentMutationLocks.Gate.WaitAsync(cancellationToken);
+    try
+    {
+        var doc = await UpdateInvoiceDocumentAsync(db, id, request, expectedUpdatedAt, cancellationToken);
         return doc is null
             ? Results.NotFound(new { message = $"Document {id} was not found." })
             : Results.Ok(ToInvoiceDocumentDto(doc));
+    }
+    catch (StaleInvoiceDocumentException ex)
+    {
+        return Results.Conflict(new
+        {
+            message = "This Invoice Record changed after you opened it. Reload it, review the newer values, and save again. No fields were overwritten.",
+            currentUpdatedAt = ex.CurrentUpdatedAt
+        });
     }
     catch (InvalidOperationException ex)
     {
         return Results.BadRequest(new { message = ex.Message });
     }
+    finally
+    {
+        InvoiceDocumentMutationLocks.Gate.Release();
+    }
 }
 
 static async Task<InvoiceDocument?> DuplicateInvoiceDocumentAsync(AppDbContext db, int id, string? targetType)
 {
-    var source = await db.InvoiceDocuments.AsNoTracking()
+    await InvoiceDocumentMutationLocks.Gate.WaitAsync();
+    try
+    {
+        var source = await db.InvoiceDocuments.AsNoTracking()
         .Include(d => d.LineItems.OrderBy(li => li.SortOrder))
         .FirstOrDefaultAsync(d => d.Id == id && !d.IsArchived);
-    if (source is null)
+        if (source is null)
+        {
+            return null;
+        }
+
+        var isConversion = string.Equals(targetType, "INVOICE", StringComparison.OrdinalIgnoreCase);
+        if (isConversion && !source.DocType.Equals("ESTIMATE", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("Create Invoice is available only for an estimate. Duplicate an invoice with Save as New instead.");
+        }
+
+        await using var transaction = await db.Database.BeginTransactionAsync();
+        try
+        {
+            if (isConversion)
+            {
+                var existingConversion = await FindConvertedInvoiceAsync(db, source.Id);
+                if (existingConversion is not null)
+                {
+                    await transaction.CommitAsync();
+                    return existingConversion;
+                }
+            }
+
+            var docType = targetType ?? source.DocType;
+            var now = DateTimeOffset.UtcNow.ToString("O");
+            var copy = new InvoiceDocument
+            {
+                SourceEstimateId = isConversion ? source.Id : null,
+                DocNumber = await NextInvoiceDocumentNumberAsync(db, docType),
+                DocType = docType,
+                Status = "Draft",
+                CustomerName = source.CustomerName,
+                CustomerPhone = source.CustomerPhone,
+                CustomerAddress = source.CustomerAddress,
+                CustomerEmail = source.CustomerEmail,
+                PreparedFor = source.PreparedFor,
+                ProjectName = source.ProjectName,
+                Material = source.Material,
+                Color = source.Color,
+                Infill = source.Infill,
+                ProjectDescription = source.ProjectDescription,
+                ProjectNotes = targetType == "INVOICE" ? $"Converted from estimate {source.DocNumber}. {source.ProjectNotes}".Trim() : source.ProjectNotes,
+                PageSize = source.PageSize,
+                DocDate = DateTime.Now.ToString("yyyy-MM-dd"),
+                DueDate = DateTime.Now.AddDays(docType == "INVOICE" ? 7 : 14).ToString("yyyy-MM-dd"),
+                Subtotal = source.Subtotal,
+                DiscountAmount = source.DiscountAmount,
+                RushAmount = source.RushAmount,
+                TaxAmount = source.TaxAmount,
+                Total = source.Total,
+                AmountPaid = 0,
+                Balance = docType == "INVOICE" ? source.Total : 0,
+                PaymentMethod = source.PaymentMethod,
+                PricingGuide = source.PricingGuide,
+                TermsNotes = docType == "INVOICE" ? "Payment due by the due date shown above." : source.TermsNotes,
+                StandardTurnaround = source.StandardTurnaround,
+                RushTurnaround = source.RushTurnaround,
+                CalcGrams = source.CalcGrams,
+                CalcHours = source.CalcHours,
+                CalcDesignHours = source.CalcDesignHours,
+                CalcSetupFee = source.CalcSetupFee,
+                CalcPostFee = source.CalcPostFee,
+                CalcGramRate = source.CalcGramRate,
+                CalcHourRate = source.CalcHourRate,
+                CalcDesignRate = source.CalcDesignRate,
+                CalcMinimum = source.CalcMinimum,
+                CalcDifficulty = source.CalcDifficulty,
+                CalcRush = source.CalcRush,
+                CalcDiscount = source.CalcDiscount,
+                CalcTaxRate = source.CalcTaxRate,
+                Json = BuildConvertedInvoiceJson(source, docType),
+                CreatedAt = now,
+                UpdatedAt = now,
+                LineItems = source.LineItems.Select(li => new InvoiceLineItem
+                {
+                    SortOrder = li.SortOrder,
+                    Description = li.Description,
+                    Details = li.Details,
+                    Quantity = li.Quantity,
+                    Rate = li.Rate,
+                    Amount = li.Amount
+                }).ToList()
+            };
+
+            NormalizeExistingInvoiceDocumentMoney(copy);
+            await ValidateInvoiceDocumentIdentityAsync(db, copy);
+            db.InvoiceDocuments.Add(copy);
+            await db.SaveChangesAsync();
+            AddInvoiceDocumentEvent(db, copy, targetType == "INVOICE" ? "Converted" : "Duplicated", source.Status, copy.Status,
+                targetType == "INVOICE" ? $"Invoice created from {source.DocNumber}" : $"Document duplicated from {source.DocNumber}",
+                $"{copy.DocNumber} was created from {source.DocNumber}.", copy.Total);
+            await db.SaveChangesAsync();
+            await SyncUnifiedInvoiceDocumentToLedgerAsync(db, copy);
+            if (isConversion)
+            {
+                await MarkEstimateConvertedAsync(db, source.Id, copy.DocNumber);
+            }
+            await transaction.CommitAsync();
+            return copy;
+        }
+        catch
+        {
+            await transaction.RollbackAsync();
+            db.ChangeTracker.Clear();
+            throw;
+        }
+    }
+    finally
+    {
+        InvoiceDocumentMutationLocks.Gate.Release();
+    }
+}
+
+static async Task<InvoiceDocument?> FindConvertedInvoiceAsync(AppDbContext db, int estimateId)
+{
+    var linked = await db.InvoiceDocuments
+        .Include(document => document.LineItems.OrderBy(line => line.SortOrder))
+        .FirstOrDefaultAsync(document => document.SourceEstimateId == estimateId);
+    if (linked is not null)
+    {
+        return linked;
+    }
+
+    var estimate = await db.InvoiceDocuments.AsNoTracking()
+        .FirstOrDefaultAsync(document => document.Id == estimateId && document.DocType == "ESTIMATE");
+    if (estimate is null || string.IsNullOrWhiteSpace(estimate.DocNumber))
     {
         return null;
     }
 
-    var docType = targetType ?? source.DocType;
-    var now = DateTimeOffset.UtcNow.ToString("O");
-    var copy = new InvoiceDocument
+    var referencedInvoiceNumbers = Regex.Matches(
+            estimate.ProjectNotes ?? string.Empty,
+            @"Converted to invoice (?<number>INV-[A-Za-z0-9-]+)",
+            RegexOptions.IgnoreCase)
+        .Select(match => match.Groups["number"].Value)
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    var legacyMarker = $"Converted from estimate {estimate.DocNumber}";
+    var unlinkedInvoices = await db.InvoiceDocuments
+        .Include(document => document.LineItems.OrderBy(line => line.SortOrder))
+        .Where(document => document.DocType == "INVOICE" && document.SourceEstimateId == null)
+        .OrderBy(document => document.Id)
+        .ToListAsync();
+    var legacy = unlinkedInvoices.FirstOrDefault(document =>
+        !string.IsNullOrWhiteSpace(document.DocNumber)
+        && (referencedInvoiceNumbers.Contains(document.DocNumber)
+            || document.ProjectNotes?.Contains(legacyMarker, StringComparison.OrdinalIgnoreCase) == true));
+    if (legacy is null)
     {
-        DocNumber = await NextInvoiceDocumentNumberAsync(db, docType),
-        DocType = docType,
-        Status = "Draft",
-        CustomerName = source.CustomerName,
-        CustomerPhone = source.CustomerPhone,
-        CustomerAddress = source.CustomerAddress,
-        CustomerEmail = source.CustomerEmail,
-        PreparedFor = source.PreparedFor,
-        ProjectName = source.ProjectName,
-        Material = source.Material,
-        Color = source.Color,
-        Infill = source.Infill,
-        ProjectDescription = source.ProjectDescription,
-        ProjectNotes = targetType == "INVOICE" ? $"Converted from estimate {source.DocNumber}. {source.ProjectNotes}".Trim() : source.ProjectNotes,
-        PageSize = source.PageSize,
-        DocDate = DateTime.Now.ToString("yyyy-MM-dd"),
-        DueDate = DateTime.Now.AddDays(docType == "INVOICE" ? 7 : 14).ToString("yyyy-MM-dd"),
-        Subtotal = source.Subtotal,
-        DiscountAmount = source.DiscountAmount,
-        RushAmount = source.RushAmount,
-        TaxAmount = source.TaxAmount,
-        Total = source.Total,
-        AmountPaid = 0,
-        Balance = docType == "INVOICE" ? source.Total : 0,
-        PaymentMethod = source.PaymentMethod,
-        PricingGuide = source.PricingGuide,
-        TermsNotes = docType == "INVOICE" ? "Payment due by the due date shown above." : source.TermsNotes,
-        StandardTurnaround = source.StandardTurnaround,
-        RushTurnaround = source.RushTurnaround,
-        CalcGrams = source.CalcGrams,
-        CalcHours = source.CalcHours,
-        CalcDesignHours = source.CalcDesignHours,
-        CalcSetupFee = source.CalcSetupFee,
-        CalcPostFee = source.CalcPostFee,
-        CalcGramRate = source.CalcGramRate,
-        CalcHourRate = source.CalcHourRate,
-        CalcDesignRate = source.CalcDesignRate,
-        CalcMinimum = source.CalcMinimum,
-        CalcDifficulty = source.CalcDifficulty,
-        CalcRush = source.CalcRush,
-        CalcDiscount = source.CalcDiscount,
-        CalcTaxRate = source.CalcTaxRate,
-        Json = BuildConvertedInvoiceJson(source, docType),
-        CreatedAt = now,
-        UpdatedAt = now,
-        LineItems = source.LineItems.Select(li => new InvoiceLineItem
-        {
-            SortOrder = li.SortOrder,
-            Description = li.Description,
-            Details = li.Details,
-            Quantity = li.Quantity,
-            Rate = li.Rate,
-            Amount = li.Amount
-        }).ToList()
-    };
-
-    NormalizeExistingInvoiceDocumentMoney(copy);
-    db.InvoiceDocuments.Add(copy);
-    await db.SaveChangesAsync();
-    AddInvoiceDocumentEvent(db, copy, targetType == "INVOICE" ? "Converted" : "Duplicated", source.Status, copy.Status,
-        targetType == "INVOICE" ? $"Invoice created from {source.DocNumber}" : $"Document duplicated from {source.DocNumber}",
-        $"{copy.DocNumber} was created from {source.DocNumber}.", copy.Total);
-    await db.SaveChangesAsync();
-    await SyncUnifiedInvoiceDocumentToLedgerAsync(db, copy);
-    if (targetType == "INVOICE")
-    {
-        await MarkEstimateConvertedAsync(db, source.Id, copy.DocNumber);
+        return null;
     }
-    return copy;
+
+    legacy.SourceEstimateId = estimateId;
+    await db.SaveChangesAsync();
+    await MarkEstimateConvertedAsync(db, estimateId, legacy.DocNumber);
+    return legacy;
+}
+
+static async Task<IResult> ConvertInvoiceDocumentResultAsync(AppDbContext db, int id)
+{
+    var gate = InvoiceDocumentConversionLocks.For(id);
+    await gate.WaitAsync();
+    try
+    {
+        var invoice = await DuplicateInvoiceDocumentAsync(db, id, "INVOICE");
+        return invoice is null
+            ? Results.NotFound(new { message = $"Document {id} was not found." })
+            : Results.Ok(ToInvoiceDocumentDto(invoice));
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.BadRequest(new { message = ex.Message });
+    }
+    catch (DbUpdateException ex) when (ex.InnerException is SqliteException { SqliteErrorCode: 19 })
+    {
+        db.ChangeTracker.Clear();
+        var existing = await FindConvertedInvoiceAsync(db, id);
+        if (existing is not null)
+        {
+            return Results.Ok(ToInvoiceDocumentDto(existing));
+        }
+
+        throw;
+    }
+    finally
+    {
+        gate.Release();
+    }
 }
 
 static string BuildConvertedInvoiceJson(InvoiceDocument source, string docType)
@@ -3362,7 +4940,47 @@ static async Task MarkEstimateConvertedAsync(AppDbContext db, int estimateId, st
     await db.SaveChangesAsync();
 }
 
-static async Task ValidateInvoiceDocumentIdentityAsync(AppDbContext db, InvoiceDocument doc)
+static async Task SyncSourceEstimateJobAfterConversionStateChangeAsync(
+    AppDbContext db,
+    int estimateId,
+    int changedInvoiceId,
+    bool changedInvoiceIsActive)
+{
+    var estimate = await db.InvoiceDocuments.AsNoTracking()
+        .FirstOrDefaultAsync(document => document.Id == estimateId && document.DocType == "ESTIMATE");
+    if (estimate is null || string.IsNullOrWhiteSpace(estimate.DocNumber))
+    {
+        return;
+    }
+
+    var sourceProof = $"Unified estimate {estimate.DocNumber}";
+    var job = await db.CustomerJobs.FirstOrDefaultAsync(candidate =>
+        candidate.RelatedInvoiceNumber == estimate.DocNumber
+        && candidate.SourceProof == sourceProof);
+    if (job is null)
+    {
+        return;
+    }
+
+    var hasActiveConversion = changedInvoiceIsActive
+        || await db.InvoiceDocuments.AsNoTracking().AnyAsync(document =>
+            document.SourceEstimateId == estimateId
+            && document.Id != changedInvoiceId
+            && !document.IsArchived);
+
+    job.IsArchived = estimate.IsArchived && !hasActiveConversion;
+    job.Status = hasActiveConversion
+        ? "Invoiced"
+        : estimate.Status.Equals("Void", StringComparison.OrdinalIgnoreCase)
+            ? "Cancelled"
+            : "Quoted";
+    job.UpdatedAtUtc = DateTime.UtcNow;
+}
+
+static async Task ValidateInvoiceDocumentIdentityAsync(
+    AppDbContext db,
+    InvoiceDocument doc,
+    CancellationToken cancellationToken = default)
 {
     if (string.IsNullOrWhiteSpace(doc.DocNumber))
     {
@@ -3378,7 +4996,7 @@ static async Task ValidateInvoiceDocumentIdentityAsync(AppDbContext db, InvoiceD
     var duplicate = await db.InvoiceDocuments.AsNoTracking()
         .Where(d => d.Id != doc.Id && d.DocNumber == doc.DocNumber)
         .Select(d => new { d.Id, d.DocType, d.CustomerName, d.ProjectName, d.IsArchived })
-        .FirstOrDefaultAsync();
+        .FirstOrDefaultAsync(cancellationToken);
     if (duplicate is not null)
     {
         var archiveState = duplicate.IsArchived ? "archived " : string.Empty;
@@ -3393,6 +5011,10 @@ static async Task<IResult> DeleteInvoiceDocumentAndSyncAsync(AppDbContext db, in
     {
         return Results.NotFound(new { message = $"Document {id} was not found." });
     }
+    if (doc.IsArchived)
+    {
+        return Results.Ok(new { archived = id, docNumber = doc.DocNumber ?? string.Empty, alreadyArchived = true });
+    }
 
     var docNumber = doc.DocNumber ?? string.Empty;
     if (!string.IsNullOrWhiteSpace(docNumber))
@@ -3400,12 +5022,18 @@ static async Task<IResult> DeleteInvoiceDocumentAndSyncAsync(AppDbContext db, in
         if (doc.DocType.Equals("ESTIMATE", StringComparison.OrdinalIgnoreCase))
         {
             var sourceProof = $"Unified estimate {docNumber}";
+            var hasActiveConvertedInvoice = await db.InvoiceDocuments.AsNoTracking()
+                .AnyAsync(x => x.SourceEstimateId == doc.Id && !x.IsArchived);
             var jobs = await db.CustomerJobs
                 .Where(x => !x.IsArchived && x.RelatedInvoiceNumber == docNumber && x.SourceProof == sourceProof)
                 .ToListAsync();
             foreach (var job in jobs)
             {
-                job.IsArchived = true;
+                job.IsArchived = !hasActiveConvertedInvoice;
+                if (hasActiveConvertedInvoice)
+                {
+                    job.Status = "Invoiced";
+                }
                 job.UpdatedAtUtc = DateTime.UtcNow;
             }
         }
@@ -3435,6 +5063,10 @@ static async Task<IResult> DeleteInvoiceDocumentAndSyncAsync(AppDbContext db, in
     doc.ArchivedAt = DateTimeOffset.UtcNow.ToString("O");
     doc.ArchiveReason = "Archived from the invoice records page. Linked generated ledger rows were archived too; the original document and line items remain in the database.";
     doc.UpdatedAt = DateTimeOffset.UtcNow.ToString("O");
+    if (doc.SourceEstimateId.HasValue)
+    {
+        await SyncSourceEstimateJobAfterConversionStateChangeAsync(db, doc.SourceEstimateId.Value, doc.Id, false);
+    }
     AddInvoiceDocumentEvent(db, doc, "Archived", doc.Status, doc.Status, $"{doc.DocType} archived", $"{doc.DocNumber} was archived, not deleted.", doc.Total);
     await db.SaveChangesAsync();
     return Results.Ok(new { archived = id, docNumber });
@@ -3446,6 +5078,10 @@ static async Task<IResult> RestoreInvoiceDocumentAndSyncAsync(AppDbContext db, i
     if (doc is null)
     {
         return Results.NotFound(new { message = $"Document {id} was not found." });
+    }
+    if (!doc.IsArchived)
+    {
+        return Results.Ok(ToInvoiceDocumentDto(doc));
     }
 
     try
@@ -3461,6 +5097,10 @@ static async Task<IResult> RestoreInvoiceDocumentAndSyncAsync(AppDbContext db, i
     doc.ArchivedAt = null;
     doc.ArchiveReason = null;
     doc.UpdatedAt = DateTimeOffset.UtcNow.ToString("O");
+    if (doc.SourceEstimateId.HasValue)
+    {
+        await SyncSourceEstimateJobAfterConversionStateChangeAsync(db, doc.SourceEstimateId.Value, doc.Id, true);
+    }
     AddInvoiceDocumentEvent(db, doc, "Restored", doc.Status, doc.Status, $"{doc.DocType} restored", $"{doc.DocNumber} was restored from archive.", doc.Total);
     await SyncUnifiedInvoiceDocumentToLedgerAsync(db, doc);
     await db.SaveChangesAsync();
@@ -3494,12 +5134,12 @@ static InvoiceBuilderConfigRequest NormalizeInvoiceBuilderConfigRequest(InvoiceB
         BusinessInstagram = NormalizeConfigText(request.BusinessInstagram, 160),
         BusinessFacebook = NormalizeConfigText(request.BusinessFacebook, 300),
         BrandColor = NormalizeConfigBrandColor(request.BrandColor),
-        CalcGramRate = ClampDefaultedConfigDecimal(request.CalcGramRate, 0.05m, 0m, 1_000m),
-        CalcHourRate = ClampDefaultedConfigDecimal(request.CalcHourRate, 3m, 0m, 10_000m),
-        CalcDesignRate = ClampDefaultedConfigDecimal(request.CalcDesignRate, 25m, 0m, 10_000m),
+        CalcGramRate = Math.Clamp(request.CalcGramRate, 0m, 1_000m),
+        CalcHourRate = Math.Clamp(request.CalcHourRate, 0m, 10_000m),
+        CalcDesignRate = Math.Clamp(request.CalcDesignRate, 0m, 10_000m),
         CalcSetupFee = Math.Clamp(request.CalcSetupFee, 0m, 1_000_000_000m),
         CalcPostFee = Math.Clamp(request.CalcPostFee, 0m, 1_000_000_000m),
-        CalcMinimum = ClampDefaultedConfigDecimal(request.CalcMinimum, 15m, 0m, 1_000_000_000m)
+        CalcMinimum = Math.Clamp(request.CalcMinimum, 0m, 1_000_000_000m)
     };
 }
 
@@ -3515,12 +5155,11 @@ static string NormalizeConfigBrandColor(string? value)
     return Regex.IsMatch(clean, "^#[0-9a-fA-F]{6}$") ? clean.ToLowerInvariant() : "#17468f";
 }
 
-static decimal ClampDefaultedConfigDecimal(decimal value, decimal fallback, decimal min, decimal max)
-{
-    return Math.Clamp(value <= 0m ? fallback : value, min, max);
-}
-
-static async Task<(byte[] Bytes, string FileName)> CreateDatabaseBackupAsync(AppDbContext db, IWebHostEnvironment env, IConfiguration configuration)
+static async Task<(byte[] Bytes, string FileName)> CreateDatabaseBackupAsync(
+    AppDbContext db,
+    IWebHostEnvironment env,
+    IConfiguration configuration,
+    bool retainServerCopy)
 {
     var dbPath = GetDatabasePath(configuration, env);
     if (!System.IO.File.Exists(dbPath))
@@ -3529,7 +5168,9 @@ static async Task<(byte[] Bytes, string FileName)> CreateDatabaseBackupAsync(App
     }
 
     var fileName = $"epata-business-ledger-{DateTime.Now:yyyyMMdd-HHmmss-fff}-{Guid.NewGuid().ToString("N")[..8]}.db";
-    var backupDir = Path.Combine(env.ContentRootPath, "Backups");
+    var backupDir = retainServerCopy
+        ? Path.Combine(env.ContentRootPath, "Backups")
+        : Path.Combine(Path.GetTempPath(), "EPATA-BusinessLedger-Backups");
     Directory.CreateDirectory(backupDir);
     var backupPath = Path.Combine(backupDir, fileName);
     var sourceConnectionString = new SqliteConnectionStringBuilder(ResolveConnectionString(configuration, env.ContentRootPath))
@@ -3538,17 +5179,38 @@ static async Task<(byte[] Bytes, string FileName)> CreateDatabaseBackupAsync(App
     }.ToString();
     var destinationConnectionString = new SqliteConnectionStringBuilder { DataSource = backupPath, Pooling = false }.ToString();
 
-    await using (var source = new SqliteConnection(sourceConnectionString))
-    await using (var destination = new SqliteConnection(destinationConnectionString))
+    try
     {
-        await source.OpenAsync();
-        await destination.OpenAsync();
-        source.BackupDatabase(destination);
-    }
+        await using (var source = new SqliteConnection(sourceConnectionString))
+        await using (var destination = new SqliteConnection(destinationConnectionString))
+        {
+            await source.OpenAsync();
+            await destination.OpenAsync();
+            source.BackupDatabase(destination);
+        }
 
-    SqliteConnection.ClearAllPools();
-    var bytes = await System.IO.File.ReadAllBytesAsync(backupPath);
-    return (bytes, fileName);
+        SqliteConnection.ClearAllPools();
+        var bytes = await System.IO.File.ReadAllBytesAsync(backupPath);
+        return (bytes, fileName);
+    }
+    finally
+    {
+        if (!retainServerCopy)
+        {
+            TryDeleteFile(backupPath);
+            try
+            {
+                if (Directory.Exists(backupDir) && !Directory.EnumerateFileSystemEntries(backupDir).Any())
+                {
+                    Directory.Delete(backupDir);
+                }
+            }
+            catch
+            {
+                // Another backup may be using the shared temporary directory.
+            }
+        }
+    }
 }
 
 static string GetDatabasePath(IConfiguration configuration, IWebHostEnvironment env)
@@ -3594,6 +5256,41 @@ static bool IsSupportedProofUploadFile(string? fileName)
     return extension is ".pdf" or ".docx" or ".png" or ".jpg" or ".jpeg" or ".webp" or ".txt" or ".csv" or ".json" or ".md";
 }
 
+static bool IsCrossSiteApiMutation(HttpRequest request)
+{
+    if (!request.Path.StartsWithSegments("/api")
+        || HttpMethods.IsGet(request.Method)
+        || HttpMethods.IsHead(request.Method)
+        || HttpMethods.IsOptions(request.Method))
+    {
+        return false;
+    }
+
+    var fetchSite = request.Headers["Sec-Fetch-Site"].FirstOrDefault();
+    if (fetchSite?.Equals("cross-site", StringComparison.OrdinalIgnoreCase) == true)
+    {
+        return true;
+    }
+
+    var originValue = request.Headers.Origin.FirstOrDefault();
+    if (string.IsNullOrWhiteSpace(originValue))
+    {
+        // Local scripts and integration tools do not send Origin. Browser cross-site
+        // requests do, and modern browsers also send Sec-Fetch-Site above.
+        return false;
+    }
+
+    if (!Uri.TryCreate(originValue, UriKind.Absolute, out var origin)
+        || !origin.Scheme.Equals(request.Scheme, StringComparison.OrdinalIgnoreCase))
+    {
+        return true;
+    }
+
+    var requestPort = request.Host.Port ?? (request.IsHttps ? 443 : 80);
+    return !origin.Host.Equals(request.Host.Host, StringComparison.OrdinalIgnoreCase)
+        || origin.Port != requestPort;
+}
+
 static bool IsSqliteBusyOrLocked(Exception exception)
 {
     for (var current = exception; current is not null; current = current.InnerException)
@@ -3609,6 +5306,19 @@ static bool IsSqliteBusyOrLocked(Exception exception)
 
         if (current.Message.Contains("database is locked", StringComparison.OrdinalIgnoreCase)
             || current.Message.Contains("database is busy", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool IsSqliteConstraintViolation(Exception exception)
+{
+    for (var current = exception; current is not null; current = current.InnerException)
+    {
+        if (current is SqliteException sqlite && sqlite.SqliteErrorCode == 19)
         {
             return true;
         }
@@ -3662,60 +5372,20 @@ static string AppendNote(string? existing, string note)
         : $"{existing.Trim()}\n{note}";
 }
 
-static string GuessDocumentType(string fileName)
+static string GuessDocumentType(string fileName, string? extractedText = null)
 {
     var lower = fileName.ToLowerInvariant();
+    var text = extractedText ?? string.Empty;
+    if (text.Contains("etsy", StringComparison.OrdinalIgnoreCase)
+        && Regex.IsMatch(text, @"(?i)\border\s*(?:number|no\.?|#)?\s*[:#]?\s*\d{7,}")
+        && (text.Contains("Etsy Payments", StringComparison.OrdinalIgnoreCase)
+            || text.Contains("Order total", StringComparison.OrdinalIgnoreCase))) return "Etsy Order";
     if (lower.Contains("etsy") || lower.Contains("order")) return "Etsy Order";
     if (lower.Contains("invoice") || lower.Contains("inv-")) return "Invoice";
     if (lower.Contains("receipt")) return "Receipt";
     if (lower.Contains("tax")) return "Tax";
     if (lower.Contains("bank") || lower.Contains("statement")) return "Bank";
     return "Other";
-}
-
-static async Task<string> TryExtractDocumentPreviewAsync(string path, string? contentType)
-{
-    try
-    {
-        var extension = Path.GetExtension(path).ToLowerInvariant();
-        if (contentType?.StartsWith("text/", StringComparison.OrdinalIgnoreCase) == true ||
-            extension is ".txt" or ".csv" or ".json" or ".md")
-        {
-            var text = await System.IO.File.ReadAllTextAsync(path);
-            return TrimPreview(text);
-        }
-
-        if (extension == ".pdf")
-        {
-            var bytes = await System.IO.File.ReadAllBytesAsync(path);
-            var raw = Encoding.Latin1.GetString(bytes);
-            var matches = System.Text.RegularExpressions.Regex.Matches(raw, @"\((?<text>(?:\\.|[^\\)]){3,})\)");
-            var pieces = matches
-                .Select(m => m.Groups["text"].Value.Replace("\\(", "(").Replace("\\)", ")").Replace("\\n", " "))
-                .Where(s => s.Any(char.IsLetterOrDigit))
-                .Take(80);
-            return TrimPreview(string.Join(" ", pieces));
-        }
-
-        if (extension == ".docx")
-        {
-            using var archive = System.IO.Compression.ZipFile.OpenRead(path);
-            var document = archive.GetEntry("word/document.xml");
-            if (document is null) return string.Empty;
-
-            await using var stream = document.Open();
-            using var reader = new StreamReader(stream);
-            var xml = await reader.ReadToEndAsync();
-            var text = System.Text.RegularExpressions.Regex.Replace(xml, "<[^>]+>", " ");
-            return TrimPreview(System.Net.WebUtility.HtmlDecode(text));
-        }
-    }
-    catch
-    {
-        return string.Empty;
-    }
-
-    return string.Empty;
 }
 
 static string TrimPreview(string text)
@@ -3797,7 +5467,11 @@ static void AddInvoiceDocumentChangeEvents(AppDbContext db, InvoiceDocument doc,
     }
 }
 
-static async Task RepointUnifiedDocumentLedgerLinksAsync(AppDbContext db, InvoiceDocument doc, InvoiceDocumentAuditState before)
+static async Task RepointUnifiedDocumentLedgerLinksAsync(
+    AppDbContext db,
+    InvoiceDocument doc,
+    InvoiceDocumentAuditState before,
+    CancellationToken cancellationToken = default)
 {
     var oldNumber = before.DocNumber?.Trim();
     var newNumber = doc.DocNumber?.Trim();
@@ -3817,7 +5491,7 @@ static async Task RepointUnifiedDocumentLedgerLinksAsync(AppDbContext db, Invoic
 
         var invoices = await db.ReceivableInvoices
             .Where(x => x.SourceProof == oldSource)
-            .ToListAsync();
+            .ToListAsync(cancellationToken);
         foreach (var invoice in invoices)
         {
             invoice.OriginalInvoiceNumber ??= oldNumber;
@@ -3828,7 +5502,7 @@ static async Task RepointUnifiedDocumentLedgerLinksAsync(AppDbContext db, Invoic
 
         var sales = await db.Sales
             .Where(x => x.Platform == "Direct" && x.SourceProof == oldSource)
-            .ToListAsync();
+            .ToListAsync(cancellationToken);
         foreach (var sale in sales)
         {
             sale.InvoiceNumber = newNumber;
@@ -3843,7 +5517,7 @@ static async Task RepointUnifiedDocumentLedgerLinksAsync(AppDbContext db, Invoic
 
         var jobs = await db.CustomerJobs
             .Where(x => x.SourceProof == oldSource)
-            .ToListAsync();
+            .ToListAsync(cancellationToken);
         foreach (var job in jobs)
         {
             job.RelatedInvoiceNumber = newNumber;
@@ -3894,6 +5568,7 @@ static async Task EnsureUnifiedInvoiceTablesAsync(AppDbContext db)
     await db.Database.ExecuteSqlRawAsync("""
         CREATE TABLE IF NOT EXISTS "InvoiceDocuments" (
             "Id" INTEGER NOT NULL CONSTRAINT "PK_InvoiceDocuments" PRIMARY KEY AUTOINCREMENT,
+            "SourceEstimateId" INTEGER NULL,
             "DocNumber" TEXT NULL,
             "DocType" TEXT NOT NULL DEFAULT 'ESTIMATE',
             "Status" TEXT NOT NULL DEFAULT 'Draft',
@@ -4079,6 +5754,82 @@ static async Task EnsureUnifiedInvoiceTablesAsync(AppDbContext db)
         );
         """);
 
+    await db.Database.ExecuteSqlRawAsync("""
+        CREATE TABLE IF NOT EXISTS "OrderLossIncidents" (
+            "Id" INTEGER NOT NULL CONSTRAINT "PK_OrderLossIncidents" PRIMARY KEY AUTOINCREMENT,
+            "IncidentDate" TEXT NULL,
+            "SaleId" INTEGER NULL,
+            "Platform" TEXT NOT NULL DEFAULT 'Other',
+            "OrderNumber" TEXT NULL,
+            "CustomerName" TEXT NULL,
+            "ProductName" TEXT NOT NULL DEFAULT '',
+            "IncidentType" TEXT NOT NULL DEFAULT 'Damaged in transit',
+            "Resolution" TEXT NOT NULL DEFAULT 'Replacement / reship',
+            "Status" TEXT NOT NULL DEFAULT 'Resolved',
+            "CustomerRefund" TEXT NULL,
+            "ReplacementCogs" TEXT NULL,
+            "AdditionalShippingCost" TEXT NULL,
+            "OtherCost" TEXT NULL,
+            "ReimbursementReceived" TEXT NULL,
+            "ReimbursementSource" TEXT NULL,
+            "ClaimNumber" TEXT NULL,
+            "CountInTaxReports" INTEGER NOT NULL DEFAULT 1,
+            "SourceProof" TEXT NULL,
+            "NeedsReview" INTEGER NOT NULL DEFAULT 0,
+            "Notes" TEXT NULL,
+            "CreatedAtUtc" TEXT NOT NULL,
+            "UpdatedAtUtc" TEXT NOT NULL,
+            "IsArchived" INTEGER NOT NULL DEFAULT 0
+        );
+        """);
+
+    await db.Database.ExecuteSqlRawAsync("""
+        CREATE TABLE IF NOT EXISTS "TaxYearSetups" (
+            "Id" INTEGER NOT NULL CONSTRAINT "PK_TaxYearSetups" PRIMARY KEY AUTOINCREMENT,
+            "TaxYear" INTEGER NOT NULL,
+            "BusinessName" TEXT NOT NULL DEFAULT 'EPATA 3D Prints',
+            "PrincipalBusinessActivity" TEXT NOT NULL DEFAULT '3D printed products and custom fabrication',
+            "PrincipalBusinessCode" TEXT NOT NULL DEFAULT '',
+            "Ein" TEXT NULL,
+            "BusinessAddress" TEXT NOT NULL DEFAULT '',
+            "AccountingMethod" TEXT NOT NULL DEFAULT 'Cash',
+            "MateriallyParticipated" TEXT NOT NULL DEFAULT 'Review',
+            "StartedOrAcquiredThisYear" TEXT NOT NULL DEFAULT 'Review',
+            "MadeReportablePayments" TEXT NOT NULL DEFAULT 'Review',
+            "FiledRequired1099s" TEXT NOT NULL DEFAULT 'Not applicable / Review',
+            "AtRiskStatus" TEXT NOT NULL DEFAULT 'Review if the business has a loss',
+            "CogsMethod" TEXT NOT NULL DEFAULT 'Not confirmed',
+            "InventoryValuationMethod" TEXT NOT NULL DEFAULT 'Cost',
+            "InventoryMethodChanged" TEXT NOT NULL DEFAULT 'No / Review',
+            "BeginningInventory" TEXT NOT NULL DEFAULT '0',
+            "PurchasesLessPersonalUse" TEXT NOT NULL DEFAULT '0',
+            "CostOfLabor" TEXT NOT NULL DEFAULT '0',
+            "MaterialsAndSupplies" TEXT NOT NULL DEFAULT '0',
+            "OtherCogsCosts" TEXT NOT NULL DEFAULT '0',
+            "EndingInventory" TEXT NOT NULL DEFAULT '0',
+            "Form1099KTotal" TEXT NOT NULL DEFAULT '0',
+            "Form1099NecTotal" TEXT NOT NULL DEFAULT '0',
+            "Form1099MiscTotal" TEXT NOT NULL DEFAULT '0',
+            "OtherBusinessIncome" TEXT NOT NULL DEFAULT '0',
+            "VehicleDeductionMethod" TEXT NOT NULL DEFAULT 'Not confirmed',
+            "VehiclePlacedInService" TEXT NULL,
+            "CommutingMiles" TEXT NOT NULL DEFAULT '0',
+            "OtherPersonalMiles" TEXT NOT NULL DEFAULT '0',
+            "VehicleAvailableForPersonalUse" TEXT NOT NULL DEFAULT 'Review',
+            "AnotherVehicleAvailable" TEXT NOT NULL DEFAULT 'Review',
+            "VehicleEvidence" TEXT NOT NULL DEFAULT 'Review',
+            "VehicleEvidenceWritten" TEXT NOT NULL DEFAULT 'Review',
+            "HomeOfficeMethod" TEXT NOT NULL DEFAULT 'Not claimed / Review',
+            "HomeSquareFeet" TEXT NOT NULL DEFAULT '0',
+            "OfficeSquareFeet" TEXT NOT NULL DEFAULT '0',
+            "HomeOfficeDeduction" TEXT NOT NULL DEFAULT '0',
+            "Notes" TEXT NULL,
+            "CreatedAtUtc" TEXT NOT NULL,
+            "UpdatedAtUtc" TEXT NOT NULL,
+            "IsArchived" INTEGER NOT NULL DEFAULT 0
+        );
+        """);
+
     await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_InvoiceDocuments_DocNumber\" ON \"InvoiceDocuments\" (\"DocNumber\");");
     await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_InvoiceDocuments_UpdatedAt\" ON \"InvoiceDocuments\" (\"UpdatedAt\");");
     await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_InvoiceLineItems_InvoiceDocumentId\" ON \"InvoiceLineItems\" (\"InvoiceDocumentId\");");
@@ -4092,6 +5843,10 @@ static async Task EnsureUnifiedInvoiceTablesAsync(AppDbContext db)
     await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_PrinterQueueItems_Status\" ON \"PrinterQueueItems\" (\"Status\");");
     await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_PrinterQueueItems_PrinterName\" ON \"PrinterQueueItems\" (\"PrinterName\");");
     await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_PrinterQueueItems_CustomerJobId\" ON \"PrinterQueueItems\" (\"CustomerJobId\");");
+    await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_OrderLossIncidents_IncidentDate\" ON \"OrderLossIncidents\" (\"IncidentDate\");");
+    await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_OrderLossIncidents_OrderNumber\" ON \"OrderLossIncidents\" (\"OrderNumber\");");
+    await db.Database.ExecuteSqlRawAsync("CREATE INDEX IF NOT EXISTS \"IX_OrderLossIncidents_SaleId\" ON \"OrderLossIncidents\" (\"SaleId\");");
+    await db.Database.ExecuteSqlRawAsync("CREATE UNIQUE INDEX IF NOT EXISTS \"IX_TaxYearSetups_TaxYear\" ON \"TaxYearSetups\" (\"TaxYear\");");
 
     // ── Schema migrations for new fields (safe on existing DBs) ──────────────
     var alterations = new (string Table, string Column, string Sql)[]
@@ -4118,10 +5873,13 @@ static async Task EnsureUnifiedInvoiceTablesAsync(AppDbContext db)
         // MakerWorld
         ("MakerWorldRewards", "IncomeStatus", "ALTER TABLE \"MakerWorldRewards\" ADD COLUMN \"IncomeStatus\" TEXT NOT NULL DEFAULT 'Review'"),
         // Payment-channel tax exports
+        ("Sales", "SourceReceivableInvoiceId", "ALTER TABLE \"Sales\" ADD COLUMN \"SourceReceivableInvoiceId\" INTEGER NULL"),
         ("Sales", "PaymentMethod", "ALTER TABLE \"Sales\" ADD COLUMN \"PaymentMethod\" TEXT NOT NULL DEFAULT 'Unknown / Review'"),
         ("Sales", "SalesTaxHandling", "ALTER TABLE \"Sales\" ADD COLUMN \"SalesTaxHandling\" TEXT NOT NULL DEFAULT 'Unknown / Review'"),
+        ("AuditDocuments", "UploadFingerprint", "ALTER TABLE \"AuditDocuments\" ADD COLUMN \"UploadFingerprint\" TEXT NULL"),
         ("InvoiceDocuments", "PaymentMethod", "ALTER TABLE \"InvoiceDocuments\" ADD COLUMN \"PaymentMethod\" TEXT NOT NULL DEFAULT 'Unknown / Review'"),
         // Unified invoice/estimate archive safety
+        ("InvoiceDocuments", "SourceEstimateId", "ALTER TABLE \"InvoiceDocuments\" ADD COLUMN \"SourceEstimateId\" INTEGER NULL"),
         ("InvoiceDocuments", "IsArchived", "ALTER TABLE \"InvoiceDocuments\" ADD COLUMN \"IsArchived\" INTEGER NOT NULL DEFAULT 0"),
         ("InvoiceDocuments", "ArchivedAt", "ALTER TABLE \"InvoiceDocuments\" ADD COLUMN \"ArchivedAt\" TEXT NULL"),
         ("InvoiceDocuments", "ArchiveReason", "ALTER TABLE \"InvoiceDocuments\" ADD COLUMN \"ArchiveReason\" TEXT NULL"),
@@ -4131,6 +5889,10 @@ static async Task EnsureUnifiedInvoiceTablesAsync(AppDbContext db)
     {
         await AddSqliteColumnIfMissingAsync(db, alteration.Table, alteration.Column, alteration.Sql);
     }
+
+    await db.Database.ExecuteSqlRawAsync("CREATE UNIQUE INDEX IF NOT EXISTS \"IX_InvoiceDocuments_SourceEstimateId\" ON \"InvoiceDocuments\" (\"SourceEstimateId\") WHERE \"SourceEstimateId\" IS NOT NULL;");
+    await db.Database.ExecuteSqlRawAsync("CREATE UNIQUE INDEX IF NOT EXISTS \"IX_Sales_SourceReceivableInvoiceId\" ON \"Sales\" (\"SourceReceivableInvoiceId\") WHERE \"SourceReceivableInvoiceId\" IS NOT NULL;");
+    await db.Database.ExecuteSqlRawAsync("CREATE UNIQUE INDEX IF NOT EXISTS \"IX_AuditDocuments_UploadFingerprint\" ON \"AuditDocuments\" (\"UploadFingerprint\") WHERE \"UploadFingerprint\" IS NOT NULL AND \"IsArchived\" = 0;");
 }
 
 static async Task AddSqliteColumnIfMissingAsync(AppDbContext db, string tableName, string columnName, string sql)
@@ -4694,7 +6456,10 @@ static void NormalizeExistingInvoiceDocumentMoney(InvoiceDocument doc)
         : 0;
 }
 
-static async Task SyncUnifiedInvoiceDocumentToLedgerAsync(AppDbContext db, InvoiceDocument doc)
+static async Task SyncUnifiedInvoiceDocumentToLedgerAsync(
+    AppDbContext db,
+    InvoiceDocument doc,
+    CancellationToken cancellationToken = default)
 {
     if (string.IsNullOrWhiteSpace(doc.DocNumber))
     {
@@ -4704,7 +6469,9 @@ static async Task SyncUnifiedInvoiceDocumentToLedgerAsync(AppDbContext db, Invoi
     if (doc.DocType == "ESTIMATE")
     {
         var unifiedSource = $"Unified estimate {doc.DocNumber}";
-        var job = await db.CustomerJobs.FirstOrDefaultAsync(x => x.SourceProof == unifiedSource);
+        var hasConvertedInvoice = await db.InvoiceDocuments.AsNoTracking()
+            .AnyAsync(x => x.SourceEstimateId == doc.Id && !x.IsArchived, cancellationToken);
+        var job = await db.CustomerJobs.FirstOrDefaultAsync(x => x.SourceProof == unifiedSource, cancellationToken);
         if (job is null)
         {
             job = new CustomerJob
@@ -4729,7 +6496,11 @@ static async Task SyncUnifiedInvoiceDocumentToLedgerAsync(AppDbContext db, Invoi
         job.Material = doc.Material ?? job.Material;
         job.Color = doc.Color ?? job.Color;
         job.Description = doc.ProjectDescription ?? job.Description;
-        job.Status = doc.Status.Equals("Void", StringComparison.OrdinalIgnoreCase) ? "Cancelled" : "Quoted";
+        job.Status = doc.Status.Equals("Void", StringComparison.OrdinalIgnoreCase)
+            ? "Cancelled"
+            : hasConvertedInvoice
+                ? "Invoiced"
+                : "Quoted";
         job.QuoteAmount = doc.Total;
         job.AmountPaid = null;
         job.InvoiceAmount = null;
@@ -4740,7 +6511,7 @@ static async Task SyncUnifiedInvoiceDocumentToLedgerAsync(AppDbContext db, Invoi
     else if (doc.DocType == "INVOICE")
     {
         var unifiedSource = $"Unified invoice {doc.DocNumber}";
-        var invoice = await db.ReceivableInvoices.FirstOrDefaultAsync(x => x.SourceProof == unifiedSource);
+        var invoice = await db.ReceivableInvoices.FirstOrDefaultAsync(x => x.SourceProof == unifiedSource, cancellationToken);
 
         if (invoice is null)
         {
@@ -4770,19 +6541,23 @@ static async Task SyncUnifiedInvoiceDocumentToLedgerAsync(AppDbContext db, Invoi
         invoice.IncludeInCashReports = doc.AmountPaid > 0;
         invoice.NeedsReview = doc.AmountPaid < doc.Total && !invoice.Status.Equals("Void", StringComparison.OrdinalIgnoreCase);
 
-        await SyncInvoicePaymentToSaleAsync(db, doc);
+        await SyncInvoicePaymentToSaleAsync(db, doc, cancellationToken);
     }
 
-    await db.SaveChangesAsync();
+    await db.SaveChangesAsync(cancellationToken);
 }
 
-static async Task SyncInvoicePaymentToSaleAsync(AppDbContext db, InvoiceDocument doc)
+static async Task SyncInvoicePaymentToSaleAsync(
+    AppDbContext db,
+    InvoiceDocument doc,
+    CancellationToken cancellationToken = default)
 {
     var unifiedSource = $"Unified invoice {doc.DocNumber}";
     var sale = await db.Sales.FirstOrDefaultAsync(x =>
         x.InvoiceNumber == doc.DocNumber
         && x.Platform == "Direct"
-        && x.SourceProof == unifiedSource);
+        && x.SourceProof == unifiedSource,
+        cancellationToken);
 
     if (doc.AmountPaid <= 0 || doc.Status.Equals("Void", StringComparison.OrdinalIgnoreCase))
     {
@@ -4830,32 +6605,65 @@ static async Task SyncInvoicePaymentToSaleAsync(AppDbContext db, InvoiceDocument
     sale.UpdatedAtUtc = DateTime.UtcNow;
 }
 
-static async Task SyncManualReceivableInvoiceToSaleAsync(AppDbContext db, ReceivableInvoice invoice)
+static async Task SyncManualReceivableInvoiceToSaleAsync(
+    AppDbContext db,
+    ReceivableInvoice invoice,
+    ReceivableInvoiceSyncIdentity? previousIdentity = null)
 {
     if (string.IsNullOrWhiteSpace(invoice.InvoiceNumber))
     {
         return;
     }
 
-    var sourceProof = string.IsNullOrWhiteSpace(invoice.SourceProof)
-        ? $"Receivable invoice {invoice.InvoiceNumber}"
-        : invoice.SourceProof;
-    var sale = await db.Sales.FirstOrDefaultAsync(x =>
-        x.Platform == "Direct"
-        && x.InvoiceNumber == invoice.InvoiceNumber
-        && x.SourceProof == sourceProof);
+    var sourceProof = ReceivableInvoiceSyncIdentity.EffectiveSourceProof(invoice.InvoiceNumber, invoice.SourceProof);
+    Sale? sale = null;
+    if (invoice.Id > 0)
+    {
+        sale = await db.Sales.FirstOrDefaultAsync(x => x.SourceReceivableInvoiceId == invoice.Id);
+    }
+
+    if (sale is null)
+    {
+        var previousNumber = previousIdentity?.InvoiceNumber;
+        var previousSourceProof = previousIdentity?.SourceProofValue;
+        var candidates = await db.Sales
+            .Where(x => x.SourceReceivableInvoiceId == null
+                && x.Platform == "Direct"
+                && (x.InvoiceNumber == invoice.InvoiceNumber
+                    || x.SourceProof == sourceProof
+                    || (previousNumber != null && x.InvoiceNumber == previousNumber)
+                    || (previousSourceProof != null && x.SourceProof == previousSourceProof)))
+            .ToListAsync();
+        sale = candidates.FirstOrDefault(candidate => IsGeneratedManualReceivableSale(
+            candidate,
+            invoice.InvoiceNumber,
+            sourceProof,
+            previousNumber,
+            previousSourceProof));
+    }
+
     var paid = invoice.AmountPaid ?? 0;
     var total = invoice.InvoiceTotal ?? 0;
 
-    if (paid <= 0 || invoice.Status.Equals("Void", StringComparison.OrdinalIgnoreCase))
+    if (sale is not null)
     {
-        if (sale is not null && string.Equals(sale.SourceProof, sourceProof, StringComparison.OrdinalIgnoreCase))
+        sale.SourceReceivableInvoice = invoice;
+        sale.SourceReceivableInvoiceId = invoice.Id > 0 ? invoice.Id : null;
+        sale.InvoiceNumber = invoice.InvoiceNumber;
+        sale.SourceProof = sourceProof;
+    }
+
+    if (invoice.IsArchived || paid <= 0 || invoice.Status.Equals("Void", StringComparison.OrdinalIgnoreCase))
+    {
+        if (sale is not null)
         {
             sale.IncludeInDashboard = false;
             sale.IsArchived = true;
             sale.Status = "Draft";
             sale.NeedsReview = false;
-            sale.Notes = "Automatically hidden because the receivable invoice is unpaid or void.";
+            sale.Notes = invoice.IsArchived
+                ? "Automatically hidden because the source receivable invoice is archived."
+                : "Automatically hidden because the receivable invoice is unpaid or void.";
             sale.UpdatedAtUtc = DateTime.UtcNow;
         }
 
@@ -4869,12 +6677,17 @@ static async Task SyncManualReceivableInvoiceToSaleAsync(AppDbContext db, Receiv
             Platform = "Direct",
             InvoiceNumber = invoice.InvoiceNumber,
             SourceProof = sourceProof,
+            SourceReceivableInvoice = invoice,
             IncludeInDashboard = true,
             Notes = "Created automatically from a paid receivable invoice."
         };
         db.Sales.Add(sale);
     }
 
+    sale.SourceReceivableInvoice = invoice;
+    sale.SourceReceivableInvoiceId = invoice.Id > 0 ? invoice.Id : null;
+    sale.InvoiceNumber = invoice.InvoiceNumber;
+    sale.SourceProof = sourceProof;
     var allocated = MoneyRules.AllocateInvoicePayment(
         invoice.Subtotal ?? 0,
         invoice.Discount ?? 0,
@@ -4895,12 +6708,36 @@ static async Task SyncManualReceivableInvoiceToSaleAsync(AppDbContext db, Receiv
     sale.IncludeInDashboard = true;
     sale.IsArchived = false;
     sale.NeedsReview = false;
+    sale.Notes = "Created automatically from a paid receivable invoice.";
     sale.UpdatedAtUtc = DateTime.UtcNow;
+}
+
+static bool IsGeneratedManualReceivableSale(
+    Sale sale,
+    string currentNumber,
+    string currentSourceProof,
+    string? previousNumber,
+    string? previousSourceProof)
+{
+    if (sale.Notes?.Contains("receivable invoice", StringComparison.OrdinalIgnoreCase) == true
+        && (sale.Notes.Contains("automatically", StringComparison.OrdinalIgnoreCase)
+            || sale.Notes.Contains("Automatically", StringComparison.OrdinalIgnoreCase)))
+    {
+        return true;
+    }
+
+    return string.Equals(sale.InvoiceNumber, currentNumber, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(sale.SourceProof, currentSourceProof, StringComparison.OrdinalIgnoreCase)
+        || !string.IsNullOrWhiteSpace(previousNumber)
+            && !string.IsNullOrWhiteSpace(previousSourceProof)
+            && string.Equals(sale.InvoiceNumber, previousNumber, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(sale.SourceProof, previousSourceProof, StringComparison.OrdinalIgnoreCase);
 }
 
 static object ToInvoiceDocumentDto(InvoiceDocument doc) => new
 {
     doc.Id,
+    doc.SourceEstimateId,
     doc.DocNumber,
     doc.DocType,
     doc.Status,
@@ -4960,6 +6797,16 @@ static object ToInvoiceDocumentDto(InvoiceDocument doc) => new
         li.Amount
     })
 };
+
+public sealed record InvoiceDocumentImportRequest(string? TargetType);
+
+public sealed record InvoiceDocumentIntakeResult(
+    string Action,
+    InvoiceDocument? InvoiceDocument,
+    AuditDocument AuditDocument,
+    string Message,
+    List<string> Warnings,
+    string? SourceDocumentNumber);
 
 public sealed record ImportInvoiceRequest(string? BaseUrl);
 
@@ -5096,6 +6943,22 @@ public sealed record InvoiceDocumentAuditState(
     decimal Balance,
     string LineSignature);
 
+public sealed class StaleInvoiceDocumentException(string currentUpdatedAt)
+    : InvalidOperationException("The Invoice Record changed after it was opened.")
+{
+    public string CurrentUpdatedAt { get; } = currentUpdatedAt;
+}
+
+public sealed record ReceivableInvoiceSyncIdentity(string InvoiceNumber, string SourceProofValue)
+{
+    public static ReceivableInvoiceSyncIdentity? Capture(AuditableEntity entity) => entity is ReceivableInvoice invoice
+        ? new(invoice.InvoiceNumber, EffectiveSourceProof(invoice.InvoiceNumber, invoice.SourceProof))
+        : null;
+
+    public static string EffectiveSourceProof(string invoiceNumber, string? sourceProof) =>
+        string.IsNullOrWhiteSpace(sourceProof) ? $"Receivable invoice {invoiceNumber}" : sourceProof;
+}
+
 public sealed record TaxAuditIssue(string Severity, string Title, string Record, string Detail);
 
 public sealed record TaxSaleExportRow(
@@ -5121,5 +6984,45 @@ public sealed record TaxSaleExportRow(
     string? SourceProof,
     bool NeedsReview,
     string? Notes);
+
+public static class InvoiceDocumentMutationLocks
+{
+    public static SemaphoreSlim Gate { get; } = new(1, 1);
+}
+
+public static class InvoiceDocumentConversionLocks
+{
+    private static readonly ConcurrentDictionary<int, SemaphoreSlim> Gates = new();
+
+    public static SemaphoreSlim For(int estimateId) => Gates.GetOrAdd(estimateId, static _ => new SemaphoreSlim(1, 1));
+}
+
+public static class UploadMutationLocks
+{
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> Gates = new(StringComparer.Ordinal);
+
+    public static SemaphoreSlim For(string uploadFingerprint) =>
+        Gates.GetOrAdd(uploadFingerprint, static _ => new SemaphoreSlim(1, 1));
+}
+
+public static class MarketplaceMutationLocks
+{
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> Gates = new(StringComparer.Ordinal);
+
+    public static string? IdentityKey(string? platform, string? orderNumber)
+    {
+        var platformKey = NormalizeIdentityPart(platform);
+        var orderKey = NormalizeIdentityPart(orderNumber);
+        return string.IsNullOrWhiteSpace(platformKey) || string.IsNullOrWhiteSpace(orderKey)
+            ? null
+            : $"{platformKey}|{orderKey}";
+    }
+
+    public static SemaphoreSlim For(string marketplaceIdentityKey) =>
+        Gates.GetOrAdd(marketplaceIdentityKey, static _ => new SemaphoreSlim(1, 1));
+
+    private static string NormalizeIdentityPart(string? value) =>
+        Regex.Replace(value ?? string.Empty, @"[^a-z0-9]+", string.Empty, RegexOptions.IgnoreCase).ToLowerInvariant();
+}
 
 public partial class Program;

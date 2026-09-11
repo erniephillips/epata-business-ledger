@@ -2,7 +2,7 @@
 //  EPATA Invoice Tool — Records View
 // ═══════════════════════════════════════════════════════
 
-import { el, money, escapeHtml, fmtDate, fmtDateTime, statusBadge, typeBadge, toast } from './utils.js?v=2';
+import { el, money, escapeHtml, fmtDate, fmtDateTime, statusBadge, typeBadge, toast, todayStr } from './utils.js?v=5';
 import { api } from './api.js?v=6';
 
 export const RECORD_PAGE_SIZES = [10, 25, 50, 100];
@@ -17,10 +17,16 @@ let _sortDir  = 'desc';
 let _page     = 0;
 let _pageSize = 25;
 const _recordActionsInFlight = new Set();
+const _initializedRecordRoots = new WeakSet();
+let _refreshSequence = 0;
 
 export function initRecords({ onLoad, onNew }) {
   _onLoad = onLoad;
   _onNew  = onNew;
+
+  const root = el('view-records');
+  if (root && _initializedRecordRoots.has(root)) return;
+  if (root) _initializedRecordRoots.add(root);
 
   el('recSearch')?.addEventListener('input', () => { _page = 0; render(); });
   el('recType')?.addEventListener('change', () => { _page = 0; render(); });
@@ -47,13 +53,29 @@ export function initRecords({ onLoad, onNew }) {
 }
 
 export async function refreshRecords() {
+  const refreshSequence = ++_refreshSequence;
   const includeArchived = !!el('recIncludeArchived')?.checked;
-  _records = await api.list(includeArchived ? { includeArchived: 'true' } : {});
+  let records;
+  try {
+    records = await api.list(includeArchived ? { includeArchived: 'true' } : {});
+  } catch (error) {
+    // A superseded request must not make a newer successful refresh look failed.
+    if (refreshSequence !== _refreshSequence) return false;
+    throw error;
+  }
+  if (refreshSequence !== _refreshSequence) return false;
+  _records = records;
   render();
   updateFooterStats();
+  return true;
 }
 
 export function getRecords() { return _records; }
+
+export function isRecordActionInFlight(id = null) {
+  if (id == null) return _recordActionsInFlight.size > 0;
+  return _recordActionsInFlight.has(recordActionKey(id));
+}
 
 function findDocumentRecord(id) {
   const numericId = Number(id || 0);
@@ -176,11 +198,11 @@ function render() {
           ${r.sourceKind === 'receivable'
             ? `<button class="btn-ghost btn-sm" onclick="window.openLedgerEntityRecord && window.openLedgerEntityRecord('receivables', ${r.sourceId || r.id})" title="Open the AR ledger row for payment/status tracking. This row does not have a builder PDF document.">Open AR Ledger</button>`
             : r.isArchived
-              ? `<button type="button" class="btn-ghost btn-sm" data-record-action="restore" data-record-id="${r.id}">Restore</button>`
-              : `<button type="button" class="btn-ghost btn-sm" data-record-action="load" data-record-id="${r.id}">Open</button>
-                 ${r.docType === 'ESTIMATE' ? `<button type="button" class="btn-ghost btn-sm" data-record-action="convert" data-record-id="${r.id}">Create Invoice</button>` : ''}
-                 <button type="button" class="btn-ghost btn-sm" data-record-action="duplicate" data-record-id="${r.id}" title="Duplicate" aria-label="Duplicate ${escapeHtml(r.docNumber || 'record')}">⧉</button>
-                 <button type="button" class="btn-danger btn-sm" data-record-action="archive" data-record-id="${r.id}" title="Archive" aria-label="Archive ${escapeHtml(r.docNumber || 'record')}">✕</button>`}
+              ? `<button type="button" class="btn-ghost btn-sm" data-record-action="restore" data-record-id="${r.id}" ${recordBusyAttributes(r.id)}>Restore</button>`
+              : `<button type="button" class="btn-ghost btn-sm" data-record-action="load" data-record-id="${r.id}" ${recordBusyAttributes(r.id)}>Open</button>
+                 ${r.docType === 'ESTIMATE' ? `<button type="button" class="btn-ghost btn-sm" data-record-action="convert" data-record-id="${r.id}" ${recordBusyAttributes(r.id)}>Create Invoice</button>` : ''}
+                 <button type="button" class="btn-ghost btn-sm" data-record-action="duplicate" data-record-id="${r.id}" title="Duplicate" aria-label="Duplicate ${escapeHtml(r.docNumber || 'record')}" ${recordBusyAttributes(r.id)}>⧉</button>
+                 <button type="button" class="btn-danger btn-sm" data-record-action="archive" data-record-id="${r.id}" title="Archive" aria-label="Archive ${escapeHtml(r.docNumber || 'record')}" ${recordBusyAttributes(r.id)}>✕</button>`}
         </div>
       </td>
     </tr>`).join('');
@@ -189,6 +211,13 @@ function render() {
 }
 
 function onRecordsBodyClick(event) {
+  const customerButton = event.target?.closest?.('[data-record-customer]');
+  if (customerButton && el('recordsBody')?.contains(customerButton)) {
+    event.preventDefault();
+    window.openCustomerDetail?.(customerButton.dataset.recordCustomer || '');
+    return;
+  }
+
   const button = event.target?.closest?.('[data-record-action][data-record-id]');
   if (!button || !el('recordsBody')?.contains(button)) return;
 
@@ -204,10 +233,16 @@ function onRecordsBodyClick(event) {
   else if (action === 'restore') window._restoreRecord?.(id);
 }
 
+function recordBusyAttributes(id) {
+  return isRecordActionInFlight(id)
+    ? 'disabled aria-disabled="true" aria-description="Another action for this record is already in progress."'
+    : '';
+}
+
 function customerCell(name) {
   const clean = String(name || '').trim();
   if (!clean) return '—';
-  return `<button class="record-link" onclick="window.openCustomerDetail && window.openCustomerDetail(decodeURIComponent('${encodeURIComponent(clean)}'))">${escapeHtml(clean)}</button>`;
+  return `<button type="button" class="record-link" data-record-customer="${escapeHtml(clean)}">${escapeHtml(clean)}</button>`;
 }
 
 function renderPager(totalRows) {
@@ -220,17 +255,19 @@ function renderPager(totalRows) {
   const totalPages = Math.max(1, Math.ceil(totalRows / _pageSize));
   const start = totalRows ? (_page * _pageSize) + 1 : 0;
   const end = Math.min(totalRows, (_page + 1) * _pageSize);
+  const onFirstPage = _page === 0;
+  const onLastPage = _page >= totalPages - 1;
   pager.innerHTML = `
     <div class="records-pager-info">Showing ${start}-${end} of ${totalRows}</div>
     <div class="records-pager-controls">
-      <button class="btn-ghost btn-sm" id="recPageFirst" aria-label="First records page" ${_page === 0 ? 'disabled' : ''}>«</button>
-      <button class="btn-ghost btn-sm" id="recPagePrev" ${_page === 0 ? 'disabled' : ''}>‹ Prev</button>
-      <select id="recPageSize" class="records-page-size">
+      <button type="button" class="btn-ghost btn-sm" id="recPageFirst" aria-label="First records page" title="${onFirstPage ? 'Already on first page' : 'Go to first page'}" ${onFirstPage ? 'disabled' : ''}>«</button>
+      <button type="button" class="btn-ghost btn-sm" id="recPagePrev" aria-label="Previous records page" title="${onFirstPage ? 'Already on first page' : 'Go to previous page'}" ${onFirstPage ? 'disabled' : ''}>‹ Prev</button>
+      <select id="recPageSize" class="records-page-size" aria-label="Records per page" title="Choose how many records to show per page">
         ${RECORD_PAGE_SIZES.map(n => `<option value="${n}"${n === _pageSize ? ' selected' : ''}>${n} / page</option>`).join('')}
       </select>
       <span>Page ${_page + 1} of ${totalPages}</span>
-      <button class="btn-ghost btn-sm" id="recPageNext" ${_page >= totalPages - 1 ? 'disabled' : ''}>Next ›</button>
-      <button class="btn-ghost btn-sm" id="recPageLast" aria-label="Last records page" ${_page >= totalPages - 1 ? 'disabled' : ''}>»</button>
+      <button type="button" class="btn-ghost btn-sm" id="recPageNext" aria-label="Next records page" title="${onLastPage ? 'Already on last page' : 'Go to next page'}" ${onLastPage ? 'disabled' : ''}>Next ›</button>
+      <button type="button" class="btn-ghost btn-sm" id="recPageLast" aria-label="Last records page" title="${onLastPage ? 'Already on last page' : 'Go to last page'}" ${onLastPage ? 'disabled' : ''}>»</button>
     </div>`;
   el('recPageFirst')?.addEventListener('click', () => { _page = 0; render(); });
   el('recPagePrev')?.addEventListener('click', () => { _page = Math.max(0, _page - 1); render(); });
@@ -269,64 +306,87 @@ function updateFooterStats() {
 
 // ── Actions ───────────────────────────────────────────
 export async function loadRecord(id, setActiveId) {
-  const doc = await api.get(id);
-  if (_onLoad) _onLoad(doc);
-  setActiveId(id);
+  return runRecordAction(id, 'This record is already busy.', async () => {
+    const doc = await api.get(id);
+    if (typeof setActiveId === 'function') {
+      if (_onLoad) _onLoad(doc);
+      setActiveId(id);
+    }
+    return doc;
+  });
 }
 
 export async function duplicateRecord(id) {
-  return runRecordAction(`duplicate-document:${id}`, 'Duplicate already in progress.', async () => {
+  return runRecordAction(id, 'Another action for this record is already in progress.', async () => {
     const doc = await api.duplicate(id);
-    await refreshRecords();
-    toast(`Duplicated as ${doc.docNumber}`, 'success');
+    await refreshAfterCommittedMutation(`Duplicated as ${doc.docNumber}`);
+    return doc;
   });
 }
 
 export async function convertEstimateToInvoice(id) {
   const source = findDocumentRecord(id);
   const sourceNumber = source?.docNumber || 'estimate';
-  return runRecordAction(`convert-document:${id}`, 'Conversion already in progress.', async () => {
+  return runRecordAction(id, 'Another action for this estimate is already in progress.', async () => {
     const doc = await api.convertToInvoice(id);
-    await refreshRecords();
-    toast(`${sourceNumber} converted to ${doc.docNumber}`, 'success');
+    await refreshAfterCommittedMutation(`${sourceNumber} converted to ${doc.docNumber}`);
     return doc;
   });
 }
 
-export async function deleteRecord(id, activeId, setActiveId) {
+export async function deleteRecord(id, activeId, setActiveId, { discardUnsaved = false } = {}) {
   const record = findDocumentRecord(id);
   const label = record?.docNumber || `record #${id}`;
-  return runRecordAction(`archive-document:${id}`, `Still archiving ${label}...`, async () => {
-    if (!confirm(`Archive ${label}? It will be hidden from normal records and totals, but kept in the database and can be restored from Show Archived.`)) return;
+  return runRecordAction(id, `Another action for ${label} is already in progress.`, async () => {
+    const unsavedWarning = discardUnsaved ? ' Your unsaved edits to the open form will be discarded.' : '';
+    if (!confirm(`Archive ${label}? It will be hidden from normal records and totals, but kept in the database and can be restored from Show Archived.${unsavedWarning}`)) return null;
     await api.delete(id);
     if (activeId === id) setActiveId(null);
-    await refreshRecords();
-    toast(`${label} archived`, 'info');
+    await refreshAfterCommittedMutation(`${label} archived`, 'info');
+    return true;
   });
 }
 
 export async function restoreRecord(id) {
   const record = findDocumentRecord(id);
   const label = record?.docNumber || `record #${id}`;
-  return runRecordAction(`restore-document:${id}`, `Still restoring ${label}...`, async () => {
+  return runRecordAction(id, `Another action for ${label} is already in progress.`, async () => {
     await api.restore(id);
-    await refreshRecords();
-    toast(`${label} restored`, 'success');
+    await refreshAfterCommittedMutation(`${label} restored`);
+    return true;
   });
 }
 
-async function runRecordAction(key, busyMessage, action) {
-  const actionKey = String(key || 'record-action');
+async function runRecordAction(id, busyMessage, action) {
+  const actionKey = recordActionKey(id);
   if (_recordActionsInFlight.has(actionKey)) {
     toast(busyMessage || 'Action already in progress.', 'info');
     return null;
   }
 
   _recordActionsInFlight.add(actionKey);
+  render();
   try {
     return await action();
   } finally {
     _recordActionsInFlight.delete(actionKey);
+    render();
+  }
+}
+
+function recordActionKey(id) {
+  return `document:${Number(id || 0)}`;
+}
+
+async function refreshAfterCommittedMutation(successMessage, successType = 'success') {
+  try {
+    await refreshRecords();
+    toast(successMessage, successType);
+    return true;
+  } catch (error) {
+    console.error('Records refresh after committed action failed', error);
+    toast(`${successMessage}. The change was saved, but the records list could not refresh. Reopen Records to retry.`, 'info', 6500);
+    return false;
   }
 }
 
@@ -340,7 +400,7 @@ export function exportCsv() {
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
   a.href     = url;
-  a.download = `EPATA_Records_${new Date().toISOString().slice(0,10)}.csv`;
+  a.download = `EPATA_Records_${todayStr()}.csv`;
   a.click();
   URL.revokeObjectURL(url);
   toast('CSV exported', 'success');

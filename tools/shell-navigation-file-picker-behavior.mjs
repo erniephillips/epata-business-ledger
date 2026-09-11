@@ -44,15 +44,16 @@ for (const [view, label] of [
   includes(mainShell, `<button class="nav-item" data-view="${view}">${label}</button>`, `embedded invoice ${label} tab`);
 }
 
-includes(mainHtml, '<script src="/js/app.js?v=20260619-ar-prefill"></script>', 'main shell app script entry');
+matches(mainHtml, /<script src="\/js\/app\.js(?:\?[^\"]*)?"><\/script>/, 'main shell app script entry');
 includes(mainShell, "fetch('/invoice-builder/index.html')", 'embedded invoice shell fetch');
 includes(mainShell, "doc.querySelector('#main')", 'embedded invoice workspace extraction');
-includes(mainShell, "await import('/invoice-builder/js/app.js?v=39')", 'embedded invoice app module import');
+matches(mainShell, /await import\('\/invoice-builder\/js\/app\.js(?:\?[^']*)?'\)/, 'embedded invoice app module import');
 includes(mainShell, 'await module.init({ initialView, restoreSnapshot, newType, prefill });', 'embedded invoice app init');
 
-includes(mainShell, "const invoicePages = ['invoiceCenter','estimates','invoices','pricingCalculator','invoiceRecords'];", 'invoice route group');
-includes(mainShell, 'appState.invoiceToolSnapshot = window._invoiceToolSnapshot() || appState.invoiceToolSnapshot;', 'invoice snapshot capture');
-includes(mainShell, 'appState.invoiceToolSnapshot = null;', 'invoice snapshot reset');
+includes(mainShell, "const invoicePages = ['invoiceCenter','estimates','invoices','pricingCalculator','invoiceRecords','invoiceRateCard','invoiceSettings'];", 'invoice route group');
+includes(mainShell, 'const snapshot = window._invoiceToolSnapshot();', 'invoice snapshot capture');
+includes(mainShell, 'persistInvoiceToolSnapshot(null);', 'invoice snapshot reset');
+includes(mainShell, 'window._invoiceToolDispose?.();', 'invoice async/listener disposal on workspace exit');
 includes(mainShell, 'window._invoiceToolShowView(invoiceRouteView(page));', 'invoice tab switch without remount');
 includes(mainShell, "else if (page === 'invoiceCenter') await renderMergedInvoiceTool(renderTarget, 'dashboard', '', appState.invoiceToolSnapshot);", 'invoice dashboard route');
 includes(mainShell, "else if (page === 'estimates') await renderMergedInvoiceTool(renderTarget, 'builder', 'ESTIMATE', appState.invoiceToolSnapshot);", 'estimate route');
@@ -86,9 +87,9 @@ includes(mainShell, 'button.onclick = () => fileInput.click();', 'row proof pick
 includes(mainShell, 'fileInput.onchange = async () => {', 'row proof picker onchange');
 includes(mainShell, 'await uploadProofForField(config, fieldName, fileInput.files[0]);', 'row proof upload handler');
 matches(mainShell, /<input id="docFiles" type="file"[^>]*multiple/, 'document intake file input');
-includes(mainShell, '<button class="primary-button" id="uploadDocsBtn">Upload and Index</button>', 'document intake upload button');
+includes(mainShell, '<button class="primary-button" id="uploadDocsBtn">Upload, Read &amp; File</button>', 'document intake upload button');
 includes(mainShell, "qs('#uploadDocsBtn').onclick = uploadDocuments;", 'document intake upload binding');
-includes(mainShell, "const files = qs('#docFiles').files;", 'document intake reads selected files');
+includes(mainShell, "const files = [...(qs('#docFiles').files || [])];", 'document intake reads a stable snapshot of selected files');
 
 includes(invoiceApp, "if (key === 's')", 'Ctrl+S save shortcut');
 includes(invoiceApp, "if (el('view-settings')?.classList.contains('active')) await saveSettings();", 'Ctrl+S settings save path');

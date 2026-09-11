@@ -659,14 +659,14 @@ try {
         '/invoice-builder/index.html',
         '/js/app.js',
         '/css/site.css',
-        '/invoice-builder/js/app.js?v=39',
-        '/invoice-builder/js/calculator.js?v=5',
-        '/invoice-builder/js/builder.js?v=9',
-        '/invoice-builder/js/api.js?v=6',
-        '/invoice-builder/js/records.js?v=11',
-        '/invoice-builder/js/save-intent.js?v=2',
-        '/invoice-builder/js/document-session.js?v=1',
-        '/invoice-builder/js/validation.js?v=4',
+        '/invoice-builder/js/app.js',
+        '/invoice-builder/js/calculator.js',
+        '/invoice-builder/js/builder.js',
+        '/invoice-builder/js/api.js',
+        '/invoice-builder/js/records.js',
+        '/invoice-builder/js/save-intent.js',
+        '/invoice-builder/js/document-session.js',
+        '/invoice-builder/js/validation.js',
         '/invoice-builder/css/app.css?v=20260609-ai-full-prefill'
     )) {
         $response = Invoke-WebRequest -Uri "$base$path" -UseBasicParsing
@@ -767,36 +767,36 @@ try {
     }
     Assert-Smoke ($mainJs -like '*ai-line-preview*' -and $mainJs -like '*Questions*' -and $mainJs -like '*Warnings*' -and $mainJs -like '*View structured JSON*' -and $mainJs -like '*Nothing saves until you review and click Save*') 'Round 77 AI Estimate review surface does not expose editable draft context before saving.'
 
-    $builderJs = Get-Text '/invoice-builder/js/builder.js?v=9'
+    $builderJs = Get-Text '/invoice-builder/js/builder.js'
     Assert-Smoke ($builderJs -like '*planDocTypeChange*' -and $builderJs -like '*shouldClearDocNumberForDocType*') 'Builder JS does not clear a mismatched doc-number prefix on type change.'
     Assert-Smoke ($builderJs -like '*INVOICE_STATUSES*Partial*') 'Builder JS does not expose Partial invoice status.'
 
-    $invoiceAppJs = Get-Text '/invoice-builder/js/app.js?v=39'
-    Assert-Smoke ($invoiceAppJs -like '*save-intent.js?v=2*') 'Invoice app JS is not using the save-intent guard.'
-    Assert-Smoke ($invoiceAppJs -like '*calculator.js?v=5*') 'Invoice app JS is not using the current calculator module.'
-    Assert-Smoke ($invoiceAppJs -like '*document-session.js?v=1*') 'Invoice app JS is not using the current document session module.'
-    Assert-Smoke ($invoiceAppJs -like '*validation.js?v=4*') 'Invoice app JS is not using the current validation module.'
+    $invoiceAppJs = Get-Text '/invoice-builder/js/app.js'
+    Assert-Smoke ($invoiceAppJs -match "from './save-intent\.js(?:\?[^']*)?'") 'Invoice app JS is not using the save-intent guard.'
+    Assert-Smoke ($invoiceAppJs -match "from './calculator\.js(?:\?[^']*)?'") 'Invoice app JS is not using the calculator module.'
+    Assert-Smoke ($invoiceAppJs -match "from './document-session\.js(?:\?[^']*)?'") 'Invoice app JS is not using the document session module.'
+    Assert-Smoke ($invoiceAppJs -match "from './validation\.js(?:\?[^']*)?'") 'Invoice app JS is not using the validation module.'
     Assert-Smoke ($invoiceAppJs -like '*Finish the current save before starting a different save action*') 'Invoice app JS does not block conflicting in-flight save actions.'
     Assert-Smoke ($invoiceAppJs -like '*original unchanged*') 'Invoice app JS does not clearly tell the user when a type-change save creates a new record.'
 
-    $calculatorJs = Get-Text '/invoice-builder/js/calculator.js?v=5'
+    $calculatorJs = Get-Text '/invoice-builder/js/calculator.js'
     Assert-Smoke ($calculatorJs -like '*calculatePricingFromState*') 'Calculator JS does not expose pure pricing calculation coverage.'
     Assert-Smoke ($calculatorJs -like '*buildCalculatorPushPlan*') 'Calculator JS does not expose calculator-to-builder transfer coverage.'
 
-    $documentSessionJs = Get-Text '/invoice-builder/js/document-session.js?v=1'
+    $documentSessionJs = Get-Text '/invoice-builder/js/document-session.js'
     Assert-Smoke ($documentSessionJs -like '*identityAfterArchivedRecord*') 'Document session JS does not expose archive identity coverage.'
     Assert-Smoke ($documentSessionJs -like '*buildSaveFailureUiState*') 'Document session JS does not expose failed-save UI coverage.'
 
-    $validationJs = Get-Text '/invoice-builder/js/validation.js?v=4'
+    $validationJs = Get-Text '/invoice-builder/js/validation.js'
     Assert-Smoke ($validationJs -like '*validateDocumentState*') 'Validation JS does not expose pure required-field coverage.'
     Assert-Smoke ($validationJs -like '*normalizeNumberValue*') 'Validation JS does not expose pure numeric normalization coverage.'
     Assert-Smoke ($validationJs -like "*paymentMethod: 'Payment method'*") 'Validation JS does not require payment method.'
 
-    $apiJs = Get-Text '/invoice-builder/js/api.js?v=6'
+    $apiJs = Get-Text '/invoice-builder/js/api.js'
     Assert-Smoke ($apiJs -like '*/api/ai/invoice-document-draft/upload*') 'Invoice PDF import endpoint is not wired in API JS.'
 
     $invoiceHtml = Get-Text '/invoice-builder/index.html'
-    Assert-Smoke ($invoiceHtml -like '*./js/app.js?v=39*') 'Standalone invoice builder shell is not loading the current app module.'
+    Assert-Smoke ($invoiceHtml -match '<script type="module" src="\./js/app\.js(?:\?[^\"]*)?"></script>') 'Standalone invoice builder shell is not loading the app module.'
     Assert-Smoke ($invoiceHtml -like '*btnImportPdfDraft*') 'Invoice PDF import button is missing.'
     Assert-Smoke ($invoiceHtml -like '*btnImportPdfDraftBuilder*') 'Builder header Invoice PDF import button is missing.'
     Assert-Smoke ($invoiceHtml -like '*invoicePdfImportFile*') 'Invoice PDF file input is missing.'
@@ -806,7 +806,7 @@ try {
     Assert-Smoke ($invoiceHtml -like '*value="paid">Sort: Paid*') 'Records sort dropdown does not expose Paid sort.'
     Assert-Smoke ($invoiceHtml -like '*value="project">Sort: Project*') 'Records sort dropdown does not expose Project sort.'
 
-    $recordsJs = Get-Text '/invoice-builder/js/records.js?v=11'
+    $recordsJs = Get-Text '/invoice-builder/js/records.js'
     Assert-Smoke ($recordsJs -like '*buildRecordViewModel*') 'Records JS does not expose the behavior model used by local verification.'
     Assert-Smoke ($recordsJs -like '*recordsToCsv*') 'Records JS does not expose filtered/sorted CSV generation.'
 
@@ -989,7 +989,7 @@ try {
     Assert-Smoke ($round26ConfigJson -notlike "*$round26SecretSentinel*") 'Config API exposed the Round 26 secret sentinel.'
     Assert-SmokeNoSecretMaterial 'Config API' $round26ConfigJson
 
-    foreach ($path in @('/', '/index.html', '/js/app.js', '/invoice-builder/', '/invoice-builder/index.html', '/invoice-builder/js/app.js?v=39', '/invoice-builder/js/utils.js')) {
+    foreach ($path in @('/', '/index.html', '/js/app.js', '/invoice-builder/', '/invoice-builder/index.html', '/invoice-builder/js/app.js', '/invoice-builder/js/utils.js')) {
         $content = Get-Text $path
         Assert-Smoke ($content -notlike "*$round26SecretSentinel*") "Static UI $path exposed the Round 26 secret sentinel."
         Assert-SmokeNoSecretMaterial "Static UI $path" $content

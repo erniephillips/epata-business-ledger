@@ -31,6 +31,10 @@ public sealed record TaxSummaryRow(
     decimal MileageRate,
     decimal MileageDeductionEstimate,
     decimal ParkingAndTolls,
+    decimal OrderLossRefunds,
+    decimal OrderLossCosts,
+    decimal OrderLossRecoveries,
+    int OrderLossIncidentCount,
     decimal WorkingNetProfit,
     bool ScheduleSeThresholdReached,
     int MissingProofOrReviewCount);

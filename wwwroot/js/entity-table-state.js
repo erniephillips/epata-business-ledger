@@ -7,15 +7,22 @@
     return JSON.stringify(row ?? {}).toLowerCase();
   }
 
+  function statusBlob(row) {
+    return Object.entries(row ?? {})
+      .filter(([key]) => /status$/i.test(key))
+      .map(([, value]) => normalizeText(value))
+      .filter(Boolean)
+      .join(' ');
+  }
+
   function matchesStatus(row, statusFilter = '') {
     const filter = normalizeText(statusFilter);
     if (!filter) return true;
 
-    const blob = rowBlob(row);
-    const status = normalizeText(row?.status);
-    if (filter === 'needs-review') return row?.needsReview === true || status.includes('review');
-    if (filter === 'open') return /open|sent|unpaid|partial|waiting|lead|quoted|progress/.test(blob);
-    if (filter === 'paid') return /paid|done|completed|fulfilled|refunded/.test(blob);
+    const statuses = statusBlob(row);
+    if (filter === 'needs-review') return row?.needsReview === true || statuses.includes('review');
+    if (filter === 'open') return /open|sent|unpaid|partial|waiting|lead|quoted|progress/.test(statuses);
+    if (filter === 'paid') return /paid|done|completed|fulfilled|refunded/.test(statuses);
     return true;
   }
 

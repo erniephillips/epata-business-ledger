@@ -4,15 +4,16 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>EPATA Estimate & Invoice Builder</title>
-  <link rel="stylesheet" href="./css/app.css?v=20260609-ai-full-prefill" />
-  <script type="module" src="./js/app.js?v=40"></script>
+  <link rel="icon" type="image/png" href="./img/logo.png" />
+  <link rel="stylesheet" href="./css/app.css?v=20260910-mobile-layout" />
+  <script type="module" src="./js/app.js?v=41"></script>
 </head>
 <body>
 <div id="app">
 
   <!-- ════════════ SIDEBAR ════════════ -->
   <nav id="sidebar">
-    <a class="sb-brand" href="#" onclick="showView?.('dashboard');return false">
+    <a class="sb-brand" href="#" onclick="window._invoiceToolShowView?.('dashboard');return false">
       <img class="sb-logo" src="./img/logo.png" alt="EPATA" />
       <div class="sb-brand-text">
         <div class="sb-brand-name">EPATA</div>
@@ -202,24 +203,24 @@
               <div class="calc-group-body">
                 <div class="calc-row">
                   <div class="field">
-                    <label>Grams of filament</label>
+                    <label for="grams">Grams of filament</label>
                     <input id="grams" type="number" min="0" step="0.1" value="0" placeholder="0" />
                     <span class="field-hint">Total consumed, not just the model weight</span>
                   </div>
                   <div class="field">
-                    <label>Rate ($/gram)</label>
+                    <label for="gramRate">Rate ($/gram)</label>
                     <input id="gramRate" type="number" min="0" step="0.001" value="0.05" placeholder="0.05" />
                     <span class="field-hint">Typical PLA/PETG: $0.04–0.06/g</span>
                   </div>
                 </div>
                 <div class="calc-row">
                   <div class="field">
-                    <label>Print hours</label>
+                    <label for="hours">Print hours</label>
                     <input id="hours" type="number" min="0" step="0.25" value="0" placeholder="0" />
                     <span class="field-hint">Wall-clock time from slicer estimate</span>
                   </div>
                   <div class="field">
-                    <label>Rate ($/hour, machine)</label>
+                    <label for="hourRate">Rate ($/hour, machine)</label>
                     <input id="hourRate" type="number" min="0" step="0.25" value="3" placeholder="3" />
                     <span class="field-hint">Covers wear, electricity, depreciation</span>
                   </div>
@@ -233,24 +234,24 @@
               <div class="calc-group-body">
                 <div class="calc-row">
                   <div class="field">
-                    <label>Design hours</label>
+                    <label for="designHours">Design hours</label>
                     <input id="designHours" type="number" min="0" step="0.25" value="0" placeholder="0" />
                     <span class="field-hint">CAD, modeling, or file prep time</span>
                   </div>
                   <div class="field">
-                    <label>Rate ($/hour, design)</label>
+                    <label for="designRate">Rate ($/hour, design)</label>
                     <input id="designRate" type="number" min="0" step="0.5" value="25" placeholder="25" />
                     <span class="field-hint">$25–50/hr depending on complexity</span>
                   </div>
                 </div>
                 <div class="calc-row">
                   <div class="field">
-                    <label>Setup fee ($)</label>
+                    <label for="setupFee">Setup fee ($)</label>
                     <input id="setupFee" type="number" min="0" step="0.5" value="0" placeholder="0" />
                     <span class="field-hint">Slicing, supports, first-layer checks</span>
                   </div>
                   <div class="field">
-                    <label>Post-processing ($)</label>
+                    <label for="postFee">Post-processing ($)</label>
                     <input id="postFee" type="number" min="0" step="0.5" value="0" placeholder="0" />
                     <span class="field-hint">Support removal, sanding, painting</span>
                   </div>
@@ -265,8 +266,8 @@
 
                 <!-- Difficulty cards -->
                 <div class="field">
-                  <label>Material difficulty multiplier</label>
-                  <div class="difficulty-grid" id="difficultyGrid">
+                  <label id="difficultyLabel">Material difficulty multiplier</label>
+                  <div class="difficulty-grid" id="difficultyGrid" role="group" aria-labelledby="difficultyLabel">
                     <button type="button" class="diff-card active" data-val="1" onclick="diffCardClick(this)">
                       <span class="diff-material">PLA / PETG</span>
                       <span class="diff-mult">1.0×</span>
@@ -294,24 +295,24 @@
 
                 <div class="calc-row">
                   <div class="field">
-                    <label>Rush surcharge (%)</label>
+                    <label for="rush">Rush surcharge (%)</label>
                     <input id="rush" type="number" min="0" max="200" step="5" value="0" placeholder="0" />
                     <span class="field-hint">Typical: 25% (2–3 day) or 50% (next-day)</span>
                   </div>
                   <div class="field">
-                    <label>Discount ($)</label>
+                    <label for="discount">Discount ($)</label>
                     <input id="discount" type="number" min="0" step="0.5" value="0" placeholder="0" />
                     <span class="field-hint">Flat dollar off — applied after rush</span>
                   </div>
                 </div>
                 <div class="calc-row">
                   <div class="field">
-                    <label>Tax rate (%)</label>
+                    <label for="taxRate">Tax rate (%)</label>
                     <input id="taxRate" type="number" min="0" max="30" step="0.001" value="0" placeholder="0" />
                     <span class="field-hint">Sales tax on the final amount</span>
                   </div>
                   <div class="field">
-                    <label>Minimum charge ($)</label>
+                    <label for="minimum">Minimum charge ($)</label>
                     <input id="minimum" type="number" min="0" step="0.5" value="15" placeholder="15" />
                     <span class="field-hint">Floor price — never quote less than this</span>
                   </div>
@@ -446,14 +447,14 @@
               <div class="card-body">
                 <div class="form-row-3">
                   <div class="field">
-                    <label>Type</label>
+                    <label for="docType">Type</label>
                     <select id="docType">
                       <option value="ESTIMATE">ESTIMATE</option>
                       <option value="INVOICE">INVOICE</option>
                     </select>
                   </div>
                   <div class="field">
-                    <label>Status</label>
+                    <label for="docStatus">Status</label>
                     <select id="docStatus" class="status-select">
                       <option value="Draft">Draft</option>
                       <option value="Sent">Sent</option>
@@ -462,7 +463,7 @@
                     </select>
                   </div>
                   <div class="field">
-                    <label>Page size</label>
+                    <label for="pageSize">Page size</label>
                     <select id="pageSize">
                       <option value="A4" selected>A4 - matches EPATA sample PDF</option>
                       <option value="LETTER">Letter (US)</option>
@@ -471,9 +472,9 @@
                   </div>
                 </div>
                 <div class="form-row" style="margin-top:14px">
-                  <div class="field"><label>Document number</label><input id="docNumber" type="text" placeholder="EST-2025-0001" /></div>
-                  <div class="field"><label>Document date</label><input id="docDate" type="date" /></div>
-                  <div class="field"><label id="dueDateLabel">Valid Until</label><input id="dueDate" type="date" /></div>
+                  <div class="field"><label for="docNumber">Document number</label><input id="docNumber" type="text" placeholder="EST-2025-0001" /></div>
+                  <div class="field"><label for="docDate">Document date</label><input id="docDate" type="date" /></div>
+                  <div class="field"><label id="dueDateLabel" for="dueDate">Valid Until</label><input id="dueDate" type="date" /></div>
                 </div>
               </div>
             </div>
@@ -485,14 +486,14 @@
               </div>
               <div class="card-body">
                 <div class="form-row">
-                  <div class="field"><label>Customer name</label><input id="customerName" type="text" placeholder="John Smith" /></div>
-                  <div class="field"><label>Prepared for (c/o)</label><input id="preparedFor" type="text" placeholder="Optional contact name" /></div>
+                  <div class="field"><label for="customerName">Customer name</label><input id="customerName" type="text" placeholder="John Smith" /></div>
+                  <div class="field"><label for="preparedFor">Prepared for (c/o)</label><input id="preparedFor" type="text" placeholder="Optional contact name" /></div>
                 </div>
                 <div class="form-row" style="margin-top:14px">
-                  <div class="field"><label>Phone</label><input id="customerPhone" type="tel" inputmode="tel" maxlength="14" pattern="\(\d{3}\) \d{3}-\d{4}" placeholder="(555) 123-4567" title="Use a 10-digit US phone number: (555) 123-4567" /><span class="field-hint">10-digit US format: (555) 123-4567</span></div>
-                  <div class="field"><label>Email</label><input id="customerEmail" type="email" placeholder="customer@email.com" /></div>
+                  <div class="field"><label for="customerPhone">Phone</label><input id="customerPhone" type="tel" inputmode="tel" maxlength="14" pattern="\(\d{3}\) \d{3}-\d{4}" placeholder="(555) 123-4567" title="Use a 10-digit US phone number: (555) 123-4567" /><span class="field-hint">10-digit US format: (555) 123-4567</span></div>
+                  <div class="field"><label for="customerEmail">Email</label><input id="customerEmail" type="email" placeholder="customer@email.com" /></div>
                 </div>
-                <div class="field" style="margin-top:14px"><label>Address</label><input id="customerAddress" type="text" placeholder="123 Main St, City, ST 12345" /></div>
+                <div class="field" style="margin-top:14px"><label for="customerAddress">Address</label><input id="customerAddress" type="text" placeholder="123 Main St, City, ST 12345" /></div>
               </div>
             </div>
 
@@ -503,19 +504,19 @@
               </div>
               <div class="card-body">
                 <div class="form-row">
-                  <div class="field"><label>Project / product</label><input id="projectName" type="text" list="productOptions" placeholder="Custom miniatures — set of 5" /><datalist id="productOptions"></datalist></div>
-                  <div class="field"><label>Material</label><input id="material" type="text" placeholder="PLA, PETG, ABS…" /></div>
+                  <div class="field"><label for="projectName">Project / product</label><input id="projectName" type="text" list="productOptions" placeholder="Custom miniatures — set of 5" /><datalist id="productOptions"></datalist></div>
+                  <div class="field"><label for="material">Material</label><input id="material" type="text" placeholder="PLA, PETG, ABS…" /></div>
                 </div>
                 <div class="form-row" style="margin-top:14px">
-                  <div class="field"><label>Color</label><input id="color" type="text" placeholder="Black" /></div>
-                  <div class="field"><label>Infill</label><input id="infill" type="text" placeholder="20%, 40%…" /></div>
+                  <div class="field"><label for="color">Color</label><input id="color" type="text" placeholder="Black" /></div>
+                  <div class="field"><label for="infill">Infill</label><input id="infill" type="text" placeholder="20%, 40%…" /></div>
                 </div>
                 <div class="field" style="margin-top:14px">
-                  <label>Project description</label>
+                  <label for="projectDescription">Project description</label>
                   <textarea id="projectDescription" placeholder="Brief project description shown on the document…"></textarea>
                 </div>
                 <div class="field" style="margin-top:14px">
-                  <label>Internal notes (not on PDF)</label>
+                  <label for="projectNotes">Internal notes (not on PDF)</label>
                   <textarea id="projectNotes" placeholder="Private notes about the project, customer, or build…"></textarea>
                 </div>
               </div>
@@ -564,11 +565,11 @@
                 </div>
                 <div class="summary-footer">
                   <div class="summary-input-grid">
-                    <div class="field"><label>Discount ($)</label><input id="docDiscount" type="number" min="0" step="0.5" value="0" /></div>
-                    <div class="field"><label>Rush (%)</label><input id="docRushPercent" type="number" min="0" max="200" step="5" value="0" /></div>
-                    <div class="field"><label>Tax rate (%)</label><input id="docTaxRate" type="number" min="0" max="30" step="0.001" value="0" /></div>
-                    <div class="field"><label>Amount paid ($)</label><input id="amountPaid" type="number" min="0" step="0.01" value="0" /></div>
-                    <div class="field"><label>Payment method</label><select id="paymentMethod" required>
+                    <div class="field"><label for="docDiscount">Discount ($)</label><input id="docDiscount" type="number" min="0" step="0.5" value="0" /></div>
+                    <div class="field"><label for="docRushPercent">Rush (%)</label><input id="docRushPercent" type="number" min="0" max="200" step="5" value="0" /></div>
+                    <div class="field"><label for="docTaxRate">Tax rate (%)</label><input id="docTaxRate" type="number" min="0" max="30" step="0.001" value="0" /></div>
+                    <div class="field"><label for="amountPaid">Amount paid ($)</label><input id="amountPaid" type="number" min="0" step="0.01" value="0" /></div>
+                    <div class="field"><label for="paymentMethod">Payment method</label><select id="paymentMethod" required>
                       <option>Unknown / Review</option>
                       <option>Cash</option>
                       <option>Check</option>
@@ -600,21 +601,21 @@
               <div class="card-body">
                 <div class="form-row">
                   <div class="field">
-                    <label>Pricing guide (printed on PDF)</label>
+                    <label for="pricingGuide">Pricing guide (printed on PDF)</label>
                     <textarea id="pricingGuide" placeholder="PLA/PETG – starting at $15&#10;Design – $25/hr&#10;Rush available +25–50%" style="min-height:90px"></textarea>
                   </div>
                   <div class="field">
-                    <label>Terms &amp; notes</label>
+                    <label for="termsNotes">Terms &amp; notes</label>
                     <textarea id="termsNotes" placeholder="Payment due within 7 days of completion.&#10;Quote valid 14 days. 50% deposit for orders over $50." style="min-height:90px"></textarea>
                   </div>
                 </div>
                 <div class="form-row" style="margin-top:14px">
                   <div class="field">
-                    <label>Standard turnaround</label>
+                    <label for="standardTurnaround">Standard turnaround</label>
                     <input id="standardTurnaround" type="text" placeholder="Estimated after design review" />
                   </div>
                   <div class="field">
-                    <label>Rush turnaround</label>
+                    <label for="rushTurnaround">Rush turnaround</label>
                     <input id="rushTurnaround" type="text" placeholder="Subject to current workload" />
                   </div>
                 </div>
@@ -629,7 +630,7 @@
               <div class="quick-actions-title">Quick Actions</div>
               <div class="quick-actions-grid">
                 <button class="btn-ghost btn-sm" onclick="document.getElementById('btnSaveDraft').click()">💾 Save</button>
-                <button class="btn-ghost btn-sm" onclick="document.getElementById('btnSaveNew').click()">⧉ New</button>
+                <button class="btn-ghost btn-sm" onclick="document.getElementById('btnSaveNew').click()">⧉ Save Copy</button>
                 <button class="btn btn-sm" onclick="document.getElementById('btnDownloadPdf').click()">⬇ PDF</button>
                 <button class="btn-ghost btn-sm" onclick="document.getElementById('btnPreviewPdf').click()">👁 Preview</button>
               </div>
@@ -668,8 +669,7 @@
           <button class="btn-ghost btn-sm" id="btnExportDb">⬇ DB Backup</button>
           <button class="btn-ghost btn-sm" id="btnImportPdfDraft">AI Import PDF</button>
           <input type="file" id="invoicePdfImportFile" aria-label="Import invoice or estimate PDF" accept=".pdf,application/pdf" style="display:none" />
-          <button class="btn-ghost btn-sm" onclick="el('importDbFile').click()">⬆ Import DB</button>
-          <input type="file" id="importDbFile" aria-label="Import database backup file" accept=".sqlite,.db" style="display:none" />
+          <button class="btn-ghost btn-sm" type="button" disabled aria-disabled="true" title="Database restore is disabled because replacing the live ledger can orphan open records. Use Download Backup for recovery copies.">Database restore unavailable</button>
           <button class="btn-ghost" onclick="document.querySelector('.nav-item[data-view=builder]').click();document.getElementById('btnNewEstimate').click()">+ New Estimate</button>
           <button class="btn" onclick="document.querySelector('.nav-item[data-view=builder]').click();document.getElementById('btnNewInvoice').click()">+ New Invoice</button>
         </div>
@@ -693,13 +693,13 @@
           </div>
         </section>
         <div class="filters-bar">
-          <input type="search" id="recSearch" placeholder="Search by number, customer, project…" />
-          <select id="recType">
+          <input type="search" id="recSearch" aria-label="Search records" placeholder="Search by number, customer, project…" />
+          <select id="recType" aria-label="Filter records by document type">
             <option value="">All Types</option>
             <option value="ESTIMATE">Estimates</option>
             <option value="INVOICE">Invoices</option>
           </select>
-          <select id="recStatus">
+          <select id="recStatus" aria-label="Filter records by status">
             <option value="">All Statuses</option>
             <option value="Draft">Draft</option>
             <option value="Sent">Sent</option>
@@ -708,7 +708,7 @@
             <option value="Paid">Paid (invoices)</option>
             <option value="Void">Void</option>
           </select>
-          <select id="recSortBy">
+          <select id="recSortBy" aria-label="Sort records">
             <option value="updated">Sort: Last Updated</option>
             <option value="created">Sort: Created</option>
             <option value="number">Sort: Number</option>
@@ -873,26 +873,26 @@
           <div class="card">
             <div class="card-header"><div class="card-title"><span class="icon">📋</span> Copy-Ready Wording</div></div>
             <div class="card-body" style="display:flex;flex-direction:column;gap:10px">
-              <p class="copy-pill"
+              <button type="button" class="copy-pill"
                  onclick="window._copyText(this.dataset.text)"
                  data-text="Custom FDM 3D printing using PLA/PETG. Price covers material consumption, machine time, setup, and basic cleanup. Final weight may vary ±10% from estimate.">
                 Standard print description
-              </p>
-              <p class="copy-pill"
+              </button>
+              <button type="button" class="copy-pill"
                  onclick="window._copyText(this.dataset.text)"
                  data-text="Quote valid for 14 days. Final price may adjust if design changes after approval. 50% deposit required for orders over $50. Timeline is provided after design review and schedule confirmation.">
                 Standard terms
-              </p>
-              <p class="copy-pill"
+              </button>
+              <button type="button" class="copy-pill"
                  onclick="window._copyText(this.dataset.text)"
                  data-text="Rush orders may carry a 25–50% surcharge depending on complexity and queue availability. Expedited service is available upon request and subject to current workload.">
                 Rush order terms
-              </p>
-              <p class="copy-pill"
+              </button>
+              <button type="button" class="copy-pill"
                  onclick="window._copyText(this.dataset.text)"
                  data-text="This estimate was generated using our standard pricing model: $0.05/g filament + $3/hr machine time + any applicable design, post-processing, or difficulty fees. Minimum charge: $15.">
                 Pricing methodology note
-              </p>
+              </button>
             </div>
           </div>
 
@@ -918,15 +918,15 @@
             <div class="card-header"><div class="card-title"><span class="icon">🏢</span> Business Info</div></div>
             <div class="card-body">
               <div class="form-col">
-                <div class="field"><label>Business name</label><input id="businessName" type="text" placeholder="EPATA 3D Prints" /></div>
-                <div class="field"><label>Location / city</label><input id="businessLocation" type="text" placeholder="City, State" /></div>
-                <div class="field"><label>Email</label><input id="businessEmail" type="email" placeholder="hello@epata.com" /></div>
-                <div class="field"><label>Phone</label><input id="businessPhone" type="tel" inputmode="tel" maxlength="14" pattern="\(\d{3}\) \d{3}-\d{4}" placeholder="(555) 123-4567" title="Use a 10-digit US phone number: (555) 123-4567" /></div>
-                <div class="field"><label>Website</label><input id="businessWebsite" type="url" placeholder="https://epata.com" /></div>
-                <div class="field"><label>Etsy shop</label><input id="businessEtsy" type="text" placeholder="etsy.com/shop/EPATA" /></div>
-                <div class="field"><label>Instagram</label><input id="businessInstagram" type="text" placeholder="@epata3d" /></div>
-                <div class="field"><label>Facebook</label><input id="businessFacebook" type="text" placeholder="facebook.com/epata" /></div>
-                <div class="field"><label>Brand color</label><input id="brandColor" type="color" value="#17468f" /></div>
+                <div class="field"><label for="businessName">Business name</label><input id="businessName" type="text" placeholder="EPATA 3D Prints" /></div>
+                <div class="field"><label for="businessLocation">Location / city</label><input id="businessLocation" type="text" placeholder="City, State" /></div>
+                <div class="field"><label for="businessEmail">Email</label><input id="businessEmail" type="email" placeholder="hello@epata.com" /></div>
+                <div class="field"><label for="businessPhone">Phone</label><input id="businessPhone" type="tel" inputmode="tel" maxlength="14" pattern="\(\d{3}\) \d{3}-\d{4}" placeholder="(555) 123-4567" title="Use a 10-digit US phone number: (555) 123-4567" /></div>
+                <div class="field"><label for="businessWebsite">Website</label><input id="businessWebsite" type="url" placeholder="https://epata.com" /></div>
+                <div class="field"><label for="businessEtsy">Etsy shop</label><input id="businessEtsy" type="text" placeholder="etsy.com/shop/EPATA" /></div>
+                <div class="field"><label for="businessInstagram">Instagram</label><input id="businessInstagram" type="text" placeholder="@epata3d" /></div>
+                <div class="field"><label for="businessFacebook">Facebook</label><input id="businessFacebook" type="text" placeholder="facebook.com/epata" /></div>
+                <div class="field"><label for="brandColor">Brand color</label><input id="brandColor" type="color" value="#17468f" /></div>
               </div>
             </div>
           </div>
@@ -937,15 +937,15 @@
               <div class="card-body">
                 <div class="form-col">
                   <div class="field">
-                    <label>$/gram rate</label>
+                    <label for="sCalcGramRate">$/gram rate</label>
                     <input id="sCalcGramRate" type="number" min="0" step="0.001" value="0.05" />
                     <span class="field-hint">Applied when calculator resets or a new doc opens</span>
                   </div>
-                  <div class="field"><label>$/hour (machine)</label><input id="sCalcHourRate" type="number" min="0" step="0.25" value="3" /></div>
-                  <div class="field"><label>$/hour (design)</label><input id="sCalcDesignRate" type="number" min="0" step="0.5" value="25" /></div>
-                  <div class="field"><label>Setup fee ($)</label><input id="sCalcSetupFee" type="number" min="0" step="0.5" value="0" /></div>
-                  <div class="field"><label>Post-processing ($)</label><input id="sCalcPostFee" type="number" min="0" step="0.5" value="0" /></div>
-                  <div class="field"><label>Minimum charge ($)</label><input id="sCalcMinimum" type="number" min="0" step="0.5" value="15" /></div>
+                  <div class="field"><label for="sCalcHourRate">$/hour (machine)</label><input id="sCalcHourRate" type="number" min="0" step="0.25" value="3" /></div>
+                  <div class="field"><label for="sCalcDesignRate">$/hour (design)</label><input id="sCalcDesignRate" type="number" min="0" step="0.5" value="25" /></div>
+                  <div class="field"><label for="sCalcSetupFee">Setup fee ($)</label><input id="sCalcSetupFee" type="number" min="0" step="0.5" value="0" /></div>
+                  <div class="field"><label for="sCalcPostFee">Post-processing ($)</label><input id="sCalcPostFee" type="number" min="0" step="0.5" value="0" /></div>
+                  <div class="field"><label for="sCalcMinimum">Minimum charge ($)</label><input id="sCalcMinimum" type="number" min="0" step="0.5" value="15" /></div>
                 </div>
               </div>
             </div>
@@ -953,10 +953,10 @@
             <div class="card">
               <div class="card-header"><div class="card-title"><span class="icon">🗄</span> Database</div></div>
               <div class="card-body">
-                <p class="text-sm text-muted" style="margin-bottom:12px">Back up your database before major changes. The import will replace everything.</p>
+                <p class="text-sm text-muted" style="margin-bottom:12px">Download a recovery copy before major changes. Restoring a database inside the running app is disabled to protect open ledger records.</p>
                 <div class="flex gap-2">
                   <button class="btn-ghost btn-sm" onclick="window.location.href='/api/database/backup'">⬇ Download Backup</button>
-                  <button class="btn-ghost btn-sm" onclick="el('importDbFile').click()">⬆ Import Database</button>
+                  <button class="btn-ghost btn-sm" type="button" disabled aria-disabled="true" title="Database restore is disabled because replacing the live ledger can orphan open records. Restore only through the documented offline recovery process.">Database restore unavailable</button>
                 </div>
               </div>
             </div>
@@ -989,21 +989,6 @@
 // Shim for onclick references before module loads
 function addLineItem(item) { window._addLineItemDeferred = item; }
 function el(id) { return document.getElementById(id); }
-
-// Difficulty card selector — updates hidden #difficulty input
-document.addEventListener('DOMContentLoaded', () => {
-  document.querySelectorAll('#difficultyGrid .diff-card').forEach(card => {
-    card.addEventListener('click', () => {
-      document.querySelectorAll('#difficultyGrid .diff-card').forEach(c => c.classList.remove('active'));
-      card.classList.add('active');
-      const inp = document.getElementById('difficulty');
-      if (inp) {
-        inp.value = card.dataset.val;
-        inp.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-    });
-  });
-});
 </script>
 </body>
 </html>

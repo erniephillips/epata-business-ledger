@@ -157,7 +157,7 @@ async function renderTextPdf(page, outputPath, text) {
 
 async function renderPreviewDocument(page, data) {
   await page.evaluate(async documentData => {
-    const { renderInvoiceHtml } = await import('/invoice-builder/js/pdf.js?v=5');
+    const { renderInvoiceHtml } = await import('/invoice-builder/js/pdf.js');
     const frame = document.querySelector('#invoicePreviewFrame');
     frame.srcdoc = renderInvoiceHtml(documentData);
   }, data);
@@ -648,20 +648,31 @@ test.describe('final checklist closure browser pass', () => {
     expect(response.status()).toBe(400);
     await expect(page.locator('#uploadResult')).toContainText('larger than the 20 MB');
 
-    response = await uploadDocuments(page, [
+    const batchResponses = [];
+    const captureBatchResponse = candidate => {
+      if (candidate.url().includes('/api/documents/upload') && candidate.request().method() === 'POST') {
+        batchResponses.push(candidate);
+      }
+    };
+    page.on('response', captureBatchResponse);
+    await page.locator('#docFiles').setInputFiles([
       { name: 'playwright-final duplicate.txt', mimeType: 'text/plain', buffer: Buffer.from('duplicate one') },
       { name: 'playwright-final duplicate.txt', mimeType: 'text/plain', buffer: Buffer.from('duplicate two') },
       { name: 'playwright-final spaces and parentheses (copy).md', mimeType: 'text/markdown', buffer: Buffer.from('# spaces') },
       { name: "playwright-final apostrophe's receipt.csv", mimeType: 'text/csv', buffer: Buffer.from('name,total\napostrophe,1') },
       { name: '..\\playwright-final-traversal-style.txt', mimeType: 'text/plain', buffer: Buffer.from('traversal style filename') },
     ]);
-    expect(response.ok()).toBe(true);
-    const result = await response.json();
-    expect(result.count).toBe(5);
-    expect(result.documents).toHaveLength(5);
-    expect(result.documents.every(doc => !String(doc.filePathOrUrl || '').includes('..'))).toBe(true);
+    await page.locator('#uploadDocsBtn').click();
     await expect(page.locator('#uploadResult')).toContainText('Uploaded and indexed 5 documents');
-    await cleanupUploadedDocs(result.documents);
+    await expect.poll(() => batchResponses.length).toBe(5);
+    page.off('response', captureBatchResponse);
+    const batchResults = await Promise.all(batchResponses.map(candidate => candidate.json()));
+    const batchDocuments = batchResults.flatMap(result => result.documents || []);
+    expect(batchResponses.every(candidate => candidate.ok())).toBe(true);
+    expect(batchResults.reduce((sum, result) => sum + Number(result.count || 0), 0)).toBe(5);
+    expect(batchDocuments).toHaveLength(5);
+    expect(batchDocuments.every(doc => !String(doc.filePathOrUrl || '').includes('..'))).toBe(true);
+    await cleanupUploadedDocs(batchDocuments);
 
     expect(failures.filter(failure => !failure.includes('400 (Bad Request)'))).toEqual([]);
   });

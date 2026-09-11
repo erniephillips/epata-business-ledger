@@ -59,19 +59,25 @@ const NUMBER_LIMITS = {
   sCalcMinimum: [0, 1_000_000_000],
 };
 
-let initialized = false;
+let initializedWithoutSignal = false;
+let boundSignal = null;
 
-export function initInputValidation() {
-  if (initialized) return;
-  initialized = true;
-
+export function initInputValidation(signal = null) {
+  // The shell can replace the complete invoice DOM while this module remains
+  // cached. Configure every new set of nodes, but bind delegated listeners only
+  // once per lifecycle signal (or once total for legacy standalone callers).
   document.querySelectorAll('input, textarea').forEach(node => {
     configureNode(node);
     normalizeNode(node);
   });
-  document.addEventListener('input', onInput, true);
-  document.addEventListener('blur', onBlur, true);
-  document.addEventListener('change', onBlur, true);
+
+  if (signal ? boundSignal === signal : initializedWithoutSignal) return;
+  if (signal) boundSignal = signal;
+  else initializedWithoutSignal = true;
+  const options = signal ? { capture: true, signal } : true;
+  document.addEventListener('input', onInput, options);
+  document.addEventListener('blur', onBlur, options);
+  document.addEventListener('change', onBlur, options);
 }
 
 export function validateDocumentInputs() {

@@ -7,6 +7,7 @@ export function emptyActiveRecordIdentity() {
     activeRecordId: null,
     activeRecordType: null,
     activeRecordNumber: null,
+    activeRecordUpdatedAt: null,
   };
 }
 
@@ -15,6 +16,7 @@ export function normalizeActiveRecordIdentity(identity = {}) {
     activeRecordId: identity.activeRecordId || null,
     activeRecordType: identity.activeRecordType || null,
     activeRecordNumber: identity.activeRecordNumber || null,
+    activeRecordUpdatedAt: identity.activeRecordUpdatedAt || null,
   };
 }
 
@@ -24,6 +26,7 @@ export function identityFromDocument(doc = null) {
     activeRecordId: doc.id || null,
     activeRecordType: doc.docType || null,
     activeRecordNumber: doc.docNumber || null,
+    activeRecordUpdatedAt: doc.updatedAt || null,
   });
 }
 

@@ -1,15 +1,20 @@
 // EPATA Invoice Tool - HTML invoice renderer + browser PDF output.
 
-import { money } from './utils.js';
+import { money } from './utils.js?v=5';
 
 const ASSET_ROOT = '/invoice-builder/img/invoice';
 const REVIEW_URL = 'https://share.google/ME4Y7hOEFEg9ZoFRw';
 const AI_USE_DISCLOSURE = 'AI-assisted tools may be used during design, development, or production; all final deliverables are reviewed and approved by EPATA LLC.';
 
-export async function generatePdf(data, preview = false) {
-  const html = renderInvoiceHtml(data, { autoPrint: !preview });
+export function openPdfWindow(preview = false) {
   const win = window.open('', preview ? 'epata_invoice_preview' : 'epata_invoice_print');
   if (!win) throw new Error('Popup blocked. Allow popups for this local app and try again.');
+  return win;
+}
+
+export async function generatePdf(data, preview = false, targetWindow = null) {
+  const html = renderInvoiceHtml(data, { autoPrint: !preview });
+  const win = targetWindow || openPdfWindow(preview);
 
   win.document.open();
   win.document.write(html);
@@ -866,10 +871,14 @@ function normalizeData(input) {
   d.businessWebsite = d.businessWebsite || 'erniephillipsportfolio.com';
   d.businessEtsy = d.businessEtsy || 'etsy.com/shop/EPATA3dPrints';
   d.businessMakerWorld = d.businessMakerWorld || 'makerworld.com/en/@epata.llc';
-  d.standardTurnaround = d.standardTurnaround || 'Estimated timeline provided after design review and schedule confirmation';
-  d.rushTurnaround = d.rushTurnaround || 'Expedited service available upon request, subject to current workload';
-  d.pricingGuide = d.pricingGuide || `Print-Only Jobs
-- $15 minimum, or $10 setup + $0.10/g + $2/hour
+  d.standardTurnaround = Object.prototype.hasOwnProperty.call(input, 'standardTurnaround')
+    ? String(d.standardTurnaround ?? '')
+    : 'Estimated timeline provided after design review and schedule confirmation';
+  d.rushTurnaround = Object.prototype.hasOwnProperty.call(input, 'rushTurnaround')
+    ? String(d.rushTurnaround ?? '')
+    : 'Expedited service available upon request, subject to current workload';
+  d.pricingGuide = d.pricingGuide ?? `Print-Only Jobs
+- $15 minimum, or setup + material + machine time
 Basic Modeling
 - $25/hour (1 hour minimum)
 Revisions
@@ -883,11 +892,16 @@ Material Notes
   // and swap saved text that still matches a known default of the WRONG type.
   const ideal = pickDefaultTerms(d.docType, d.status);
   const current = String(d.termsNotes || '').trim();
+  const hasExplicitTerms = Object.prototype.hasOwnProperty.call(input, 'termsNotes');
   const KNOWN_DEFAULTS = new Set(
     [ESTIMATE_DEFAULT_TERMS, INVOICE_DEFAULT_TERMS, INVOICE_PAID_TERMS, ESTIMATE_ACCEPTED_TERMS]
       .map(s => s.trim())
   );
-  d.termsNotes = (!current || KNOWN_DEFAULTS.has(current)) ? ideal : d.termsNotes;
+  d.termsNotes = !hasExplicitTerms
+    ? ideal
+    : !current
+      ? ''
+      : KNOWN_DEFAULTS.has(current) ? ideal : d.termsNotes;
   return d;
 }
 

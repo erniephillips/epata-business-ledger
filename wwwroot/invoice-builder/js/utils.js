@@ -43,10 +43,13 @@ export function escapeHtml(v) {
 }
 
 // ── Dates ─────────────────────────────────────────────
-export function todayStr(offsetDays = 0) {
-  const d = new Date();
+export function todayStr(offsetDays = 0, now = new Date()) {
+  const d = new Date(now);
   d.setDate(d.getDate() + Number(offsetDays || 0));
-  return d.toISOString().slice(0, 10);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 export function fmtDate(iso) {

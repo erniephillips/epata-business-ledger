@@ -42,9 +42,11 @@ mustMatch(
 );
 mustMatch(
   builderHtml,
-  /id="importDbFile"[^>]*aria-label="Import database backup file"/,
-  'Standalone builder database import file input should be labelled.'
+  /<button[^>]*disabled[^>]*aria-disabled="true"[^>]*title="[^"]*Database restore is disabled[^"]*"[^>]*>Database restore unavailable<\/button>/,
+  'Standalone builder should explain why live database restore is unavailable.'
 );
+mustMatch(builderHtml, /id="btnExportDb"[^>]*>[^<]*DB Backup<\/button>/, 'Standalone builder should expose a real database backup download.');
+mustInclude(builderHtml, 'Database restore unavailable', 'Standalone builder should expose the disabled restore safety control.');
 mustMatch(builderHtml, /data-view="builder"[\s\S]*?<span>Builder<\/span>/, 'Invoice builder tab should have visible text.');
 mustMatch(builderHtml, /data-view="records"[\s\S]*?<span>Records<\/span>/, 'Invoice records tab should have visible text.');
 

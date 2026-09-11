@@ -20,7 +20,7 @@ const asObject = value => JSON.parse(JSON.stringify(value));
 const fixedNow = new Date('2026-06-19T15:45:00.000Z');
 
 const cards = asArray(quickAddCards());
-assert.equal(cards.length, 16);
+assert.equal(cards.length, 17);
 assert.deepEqual(cards.map(card => card.title), [
   'Estimate Sent (External)',
   'New Estimate PDF',
@@ -31,6 +31,7 @@ assert.deepEqual(cards.map(card => card.title), [
   'Open Invoice / AR',
   'Bill / AP',
   'Paid Expense',
+  'Damaged / Lost Order',
   'Equipment / Asset Purchase',
   'Customer / Vendor Contact',
   'Product / Costing Row',
@@ -48,6 +49,7 @@ assert.deepEqual(modalTargets, [
   { action: 'modal', config: 'receivables', kind: 'invoice' },
   { action: 'modal', config: 'bills', kind: 'bill' },
   { action: 'modal', config: 'expenses', kind: 'expense' },
+  { action: 'modal', config: 'orderLosses', kind: 'orderLoss' },
   { action: 'modal', config: 'assets', kind: 'assetPurchase' },
   { action: 'modal', config: 'parties', kind: 'partyContact' },
   { action: 'modal', config: 'products', kind: 'productCosting' },
@@ -104,6 +106,14 @@ assert.equal(expense.taxBucket, 'Review');
 assert.equal(expense.deductibleStatus, 'Review');
 assert.equal(expense.needsReview, true);
 
+const orderLoss = asObject(quickAddPreset('orderLoss', fixedNow));
+assert.equal(orderLoss.incidentDate, '2026-06-19');
+assert.equal(orderLoss.platform, 'Other');
+assert.equal(orderLoss.incidentType, 'Damaged in transit');
+assert.equal(orderLoss.resolution, 'Replacement / reship');
+assert.equal(orderLoss.countInTaxReports, true);
+assert.equal(orderLoss.needsReview, true);
+
 const asset = asObject(quickAddPreset('assetPurchase', fixedNow));
 assert.equal(asset.purchaseDate, '2026-06-19');
 assert.equal(asset.inServiceDate, '2026-06-19');
@@ -157,7 +167,7 @@ const cloned = quickAddCards();
 cloned[0].title = 'Changed';
 assert.equal(quickAddCards()[0].title, 'Estimate Sent (External)', 'quickAddCards should return a defensive copy.');
 
-const requiredCreateConfigs = ['sales', 'expenses', 'customerJobs', 'products', 'actions', 'auditDocs', 'receivables', 'parties'];
+const requiredCreateConfigs = ['sales', 'expenses', 'orderLosses', 'customerJobs', 'products', 'actions', 'auditDocs', 'receivables', 'parties'];
 for (const config of requiredCreateConfigs) {
   assert.ok(
     modalTargets.some(target => target.config === config),
@@ -176,8 +186,8 @@ assert.ok(appSource.includes('EpataQuickAdd?.quickAddCards'), 'Quick Add page sh
 assert.ok(appSource.includes('EpataQuickAdd?.quickAddPreset'), 'quickOpen should use shared preset behavior.');
 assert.ok(appSource.includes('EpataQuickAdd?.applyQuickAddOverrides'), 'quickOpen should merge overrides through the helper.');
 assert.ok(appSource.includes('modalSaveGuard: window.EpataModalSaveState?.createModalSaveGuard'), 'Quick Add modal saves should use the shared duplicate-click save guard.');
-assert.ok(appSource.includes('if (guard ? !guard.tryStart() : appState.modalSaveInFlight) return;'), 'Quick Add modal saves should ignore accidental double-click submissions.');
-assert.ok(appSource.includes('appState.modalSaveGuard?.reset?.();'), 'Opening a new Quick Add modal should reset the duplicate-click save guard.');
+assert.ok(appSource.includes('if (guard ? !guard.tryStart() : session.saveInFlight)'), 'Quick Add modal saves should ignore accidental double-click submissions.');
+assert.ok(appSource.includes('saveGuard: window.EpataModalSaveState?.createModalSaveGuard?.()'), 'Each Quick Add modal instance should receive an independent duplicate-click guard.');
 assert.ok(appSource.includes("qsa('.quick-card[data-page]')"), 'Quick Add page cards should route to pages.');
 assert.ok(appSource.includes("qsa('.quick-card[data-config]')"), 'Quick Add modal cards should route to modals.');
 assert.ok(appSource.includes('data-config="${escapeAttr(config)}"'), 'Quick Add modal card config should be attribute-escaped.');

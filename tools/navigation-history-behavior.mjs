@@ -69,8 +69,8 @@ assert.ok(appSource.includes('popBackTarget'), 'Back button should pop history t
 assert.ok(appSource.includes('pageFromStateOrHash'), 'Initial load and popstate should parse routes through the helper.');
 assert.ok(appSource.includes('historyAfterPop'), 'Browser back/forward should keep app page history in sync.');
 assert.ok(appSource.includes("window.addEventListener('popstate'"), 'Browser popstate handling is missing.');
-assert.ok(appSource.includes('async function goBack()'), 'App Back button handler is missing.');
-assert.ok(appSource.includes("qs('#appBackBtn').onclick = goBack"), 'App Back button is not wired.');
+assert.ok(appSource.includes("async function goBack(fallbackPage = 'dashboard')"), 'App Back button handler is missing.');
+assert.ok(appSource.includes("qs('#appBackBtn').onclick = () => goBack()"), 'App Back button is not wired without leaking the click event into the fallback-page argument.');
 
 console.log(JSON.stringify({
   NavigationHistoryBehavior: 'pass',

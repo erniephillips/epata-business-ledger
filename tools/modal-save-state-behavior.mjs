@@ -57,12 +57,15 @@ assert.ok(indexSource.includes('/js/modal-save-state.js?v=1'), 'Main shell shoul
 assert.ok(appSource.includes('EpataModalSaveState?.modalSaveOutcome({ ok: true })'), 'saveModal should use an explicit success close outcome.');
 assert.ok(appSource.includes('EpataModalSaveState?.modalSaveOutcome({ ok: false, error: err })'), 'saveModal should use an explicit failed-save outcome.');
 assert.ok(appSource.includes('EpataModalSaveState?.createModalSaveGuard'), 'saveModal should create a shared in-flight guard.');
-assert.ok(appSource.includes('if (guard ? !guard.tryStart() : appState.modalSaveInFlight) return;'), 'saveModal should ignore duplicate clicks while a save is in flight.');
-assert.ok(appSource.includes("saveButton.textContent = 'Saving...'"), 'saveModal should show an in-flight saving state.');
-assert.ok(appSource.includes('saveButton.disabled = true'), 'saveModal should disable the save button while saving.');
+assert.ok(appSource.includes('if (guard ? !guard.tryStart() : session.saveInFlight) {'), 'saveModal should ignore duplicate clicks in the current modal session while a save is in flight.');
+assert.ok(appSource.includes("session.saveInFlight ? 'Saving...'"), 'saveModal should show an in-flight saving state.');
+assert.ok(appSource.includes('saveButton.disabled = proofBusy || session.saveInFlight'), 'saveModal should disable the save button while uploading proof or saving.');
 assert.ok(appSource.includes('guard?.finish?.();'), 'saveModal should release the in-flight guard after success or failure.');
-assert.ok(appSource.includes('if (outcome.closeModal) closeModal();'), 'saveModal should close only when the save outcome allows it.');
-assert.ok(appSource.includes('if (outcome.refreshPage) await showPage(appState.currentPage);'), 'saveModal should refresh only when the save outcome allows it.');
+assert.ok(appSource.includes('if (outcome.closeModal && stillCurrent) closeModal('), 'saveModal should close only the modal session that produced the successful outcome.');
+assert.ok(appSource.includes('if (outcome.refreshPage && stillCurrent && appState.currentPage === session.originPage)'), 'saveModal should refresh only the unchanged originating page.');
+assert.ok(appSource.includes("await showPage(session.originPage, { replace: true })"), 'saveModal refresh should replace the current route instead of adding a duplicate history entry.');
+assert.ok(appSource.includes("invoiceForm.dataset.updatedAt = doc.updatedAt || '';"), 'The main-shell invoice editor should retain the exact revision returned when the record was loaded.');
+assert.ok(appSource.includes("? { 'X-EPATA-Updated-At': form.dataset.updatedAt }"), 'The main-shell invoice editor should send that exact loaded revision on update.');
 
 console.log(JSON.stringify({
   ModalSaveStateBehavior: 'pass',

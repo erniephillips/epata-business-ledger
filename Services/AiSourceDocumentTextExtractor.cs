@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
 using UglyToad.PdfPig;
+using UglyToad.PdfPig.DocumentLayoutAnalysis.TextExtractor;
 
 namespace EPATA.BusinessLedger.Services;
 
@@ -17,43 +18,62 @@ public sealed class AiSourceDocumentTextExtractor
 
     public async Task<AiSourceDocumentExtraction> ExtractAsync(IFormFile file, CancellationToken cancellationToken)
     {
-        var extension = Path.GetExtension(file.FileName).ToLowerInvariant();
+        await using var stream = file.OpenReadStream();
+        return await ExtractAsync(stream, file.FileName, file.ContentType, cancellationToken);
+    }
+
+    public async Task<AiSourceDocumentExtraction> ExtractAsync(
+        string path,
+        string? contentType,
+        CancellationToken cancellationToken)
+    {
+        await using var stream = File.OpenRead(path);
+        return await ExtractAsync(stream, Path.GetFileName(path), contentType, cancellationToken);
+    }
+
+    private static async Task<AiSourceDocumentExtraction> ExtractAsync(
+        Stream stream,
+        string fileName,
+        string? contentType,
+        CancellationToken cancellationToken)
+    {
+        var extension = Path.GetExtension(fileName).ToLowerInvariant();
         string text;
         string? warning = null;
 
-        if (file.ContentType.StartsWith("text/", StringComparison.OrdinalIgnoreCase)
+        if (contentType?.StartsWith("text/", StringComparison.OrdinalIgnoreCase) == true
             || extension is ".txt" or ".md" or ".eml" or ".csv" or ".json")
         {
-            using var reader = new StreamReader(file.OpenReadStream(), detectEncodingFromByteOrderMarks: true);
+            using var reader = new StreamReader(stream, detectEncodingFromByteOrderMarks: true, leaveOpen: true);
             text = await ReadAtMostAsync(reader, MaxExtractedCharactersPerFile + 1, cancellationToken);
         }
         else if (extension == ".docx")
         {
             await using var memory = new MemoryStream();
-            await file.CopyToAsync(memory, cancellationToken);
+            await stream.CopyToAsync(memory, cancellationToken);
             memory.Position = 0;
             text = ExtractDocx(memory);
         }
         else if (extension == ".pdf")
         {
             await using var memory = new MemoryStream();
-            await file.CopyToAsync(memory, cancellationToken);
+            await stream.CopyToAsync(memory, cancellationToken);
             text = ExtractPdf(memory.ToArray());
             if (string.IsNullOrWhiteSpace(text))
             {
-                warning = $"{file.FileName} did not contain readable embedded PDF text. A scanned/image-only PDF needs OCR or a configured vision-capable AI model.";
+                warning = $"{fileName} did not contain readable embedded PDF text. A scanned/image-only PDF needs OCR or a configured vision-capable AI model.";
             }
         }
         else
         {
-            return new AiSourceDocumentExtraction(string.Empty, $"{file.FileName} was skipped because its file type is not supported.");
+            return new AiSourceDocumentExtraction(string.Empty, $"{fileName} was skipped because its file type is not supported.");
         }
 
         text = Clean(text);
         if (text.Length > MaxExtractedCharactersPerFile)
         {
             text = text[..MaxExtractedCharactersPerFile];
-            warning = $"{file.FileName} was read, but its extracted text was shortened to {MaxExtractedCharactersPerFile:N0} characters.";
+            warning = $"{fileName} was read, but its extracted text was shortened to {MaxExtractedCharactersPerFile:N0} characters.";
         }
 
         return new AiSourceDocumentExtraction(text, warning);
@@ -95,7 +115,7 @@ public sealed class AiSourceDocumentTextExtractor
         {
             using var document = PdfDocument.Open(bytes);
             var pages = document.GetPages()
-                .Select(page => string.Join(" ", page.GetWords().Select(word => word.Text)))
+                .Select(page => ContentOrderTextExtractor.GetText(page))
                 .Where(page => !string.IsNullOrWhiteSpace(page))
                 .ToList();
             if (pages.Count > 0)

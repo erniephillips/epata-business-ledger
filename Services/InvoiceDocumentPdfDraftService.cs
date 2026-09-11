@@ -14,7 +14,8 @@ public sealed class InvoiceDocumentPdfDraftService(AppDbContext db)
         string sourceText,
         string? sourceName,
         IReadOnlyCollection<string>? sourceWarnings,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? requestedDocType = null)
     {
         if (string.IsNullOrWhiteSpace(sourceText))
         {
@@ -23,29 +24,37 @@ public sealed class InvoiceDocumentPdfDraftService(AppDbContext db)
 
         var flat = Clean(sourceText);
         var docNumber = NormalizeDocumentNumber(FirstMatch(flat, @"(?i)\b(?<value>(?:INV|EST)[-\s]\d{4}-\d{4})\b"));
-        var docType = GuessDocumentType(flat, docNumber);
+        var detectedDocType = GuessDocumentType(flat, docNumber);
+        var requestedType = NormalizeRequestedDocumentType(requestedDocType);
+        var docType = docNumber is null ? requestedType ?? detectedDocType : detectedDocType;
         var docDate = FormatDate(FirstMatch(flat, @"(?i)(?<!Due\s)\bDate\s*[:#-]?\s*(?<value>[A-Z][a-z]+ \d{1,2}, \d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{4})"));
         var dueDate = FormatDate(FirstMatch(flat, @"(?i)\b(?:Due Date|Valid Until|Due)\s*[:#-]?\s*(?<value>[A-Z][a-z]+ \d{1,2}, \d{4}|\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{4})"));
         var contactStops = new[] { "Bill To", "Project Details", "Project Name", "Job Name", "Pricing Summary", "Line Items", "Breakdown" };
         var detailStops = new[] { "Description", "Project Description", "Job Description", "Details", "Material", "Filament", "Color", "Colour", "Infill", "Fill", "Pricing Summary", "Line Items", "Breakdown" };
         var projectNameStops = new[] { "Description", "Details", "Material", "Filament", "Color", "Colour", "Infill", "Fill", "Pricing Summary", "Line Items", "Breakdown" };
-        var preparedFor = ExtractFieldAny(flat, ["Prepared For", "Prepared For:"], contactStops);
-        var billTo = ExtractFieldAny(flat, ["Bill To:", "Bill To", "Client:", "Customer:", "Client", "Customer"], ["Project Details", "Project Name", "Job Name", "Pricing Summary", "Line Items", "Breakdown"]);
+        var preparedFor = RemoveTrailingDocumentStatus(ExtractFieldAny(flat, ["Prepared For", "Prepared For:"], contactStops));
+        var billTo = ExtractEpataBillToBlock(flat)
+            ?? ExtractFieldAny(flat, ["Bill To:", "Client:", "Customer:"], ["Project Details", "Project Name", "Job Name", "Pricing Summary", "Line Items", "Breakdown"]);
         var projectName = ExtractFieldAny(flat, ["Project Name", "Project Title"], projectNameStops)
             ?? ExtractFieldAny(flat, ["Job Name"], ["Job Description", .. projectNameStops]);
         var projectDescription = ExtractFieldAny(flat, ["Project Description", "Job Description", "Description", "Details"], ["Material", "Filament", "Color", "Colour", "Infill", "Fill", "Pricing Summary", "Line Items", "Breakdown"]);
         var material = ExtractFieldAny(flat, ["Material", "Filament"], ["Color", "Colour", "Infill", "Fill", "Pricing Summary", "Line Items", "Breakdown"]);
         var color = ExtractFieldAny(flat, ["Color", "Colour"], ["Infill", "Fill", "Pricing Summary", "Line Items", "Breakdown"]);
-        var infill = ExtractFieldAny(flat, ["Infill", "Fill"], ["Pricing Summary", "Line Items", "Breakdown"]);
-        var pricingGuide = ExtractFieldAny(flat, ["Pricing Guide", "Pricing Notes", "Pricing"], ["Terms & Notes", "Terms and Notes", "Terms", "Notes", "Payment Status", "Approval", "Accepted", "Voided"]);
+        var infill = ExtractFieldAny(flat, ["Infill", "Fill"], ["Subtotal", "Discount", "Rush Fee", "Sales Tax", "Tax", "Estimated Total", "Estimate Total", "Invoice Total", "Pricing Summary", "Line Items", "Estimate Breakdown", "Invoice Breakdown", "Breakdown"]);
+        var pricingGuide = ExtractEpataPricingGuide(flat)
+            ?? ExtractFieldAny(flat, ["Pricing Guide", "Pricing Notes", "Pricing"], ["Terms & Notes", "Terms and Notes", "Terms", "Notes", "Payment Status", "Approval", "Accepted", "Voided"]);
         var termStops = new[] { "Payment Status", "Status", "Approval", "Accepted", "Voided", "Thank You!" };
-        var termsNotes = ExtractFieldAny(flat, ["Terms & Notes", "Terms and Notes", "Customer Notes", "Terms:", "Notes:"], termStops)
+        var termsNotes = ExtractEpataTerms(flat)
+            ?? ExtractFieldAny(flat, ["Terms & Notes", "Terms and Notes", "Customer Notes", "Terms:", "Notes:"], termStops)
             ?? ExtractFieldAfterLastPattern(flat, @"\bNotes\b", termStops);
         termsNotes = RemoveAfter(termsNotes, "AI-assisted tools may be used");
 
         var customerEmail = FirstMatch(billTo ?? flat, @"(?i)\b(?<value>[\w.+-]+@[\w.-]+\.[a-z]{2,})\b");
         var customerPhone = FormatUsPhone(FirstMatch(billTo ?? flat, @"(?<!\d)(?<value>(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})(?!\d)"));
-        var customerName = FirstNonBlank(preparedFor, ExtractCustomerName(billTo, customerEmail, customerPhone));
+        var customerName = FirstNonBlank(
+            ExtractBillToOrganization(billTo, preparedFor, customerEmail, customerPhone),
+            preparedFor,
+            ExtractCustomerName(billTo, customerEmail, customerPhone));
         var customerAddress = ExtractCustomerAddress(billTo, customerName, customerEmail, customerPhone);
 
         var lineItems = ExtractLineItems(flat);
@@ -62,6 +71,15 @@ public sealed class InvoiceDocumentPdfDraftService(AppDbContext db)
         var total = invoiceTotal > 0 ? invoiceTotal : estimatedTotal > 0 ? estimatedTotal : subtotal - discount + (subtotal * rushPercent / 100m) + taxAmount;
         var amountPaid = docType == "INVOICE" ? FirstMoneyAny(flat, "Amount Paid", "Paid", "Payment Received") : 0;
         var status = GuessStatus(flat, docType, amountPaid, total);
+        if (!string.Equals(detectedDocType, docType, StringComparison.OrdinalIgnoreCase))
+        {
+            status = "Draft";
+            amountPaid = 0;
+        }
+
+        var standardTurnaround = ExtractBetweenPatterns(flat, @"(?i)\bStandard\s*:\s*", @"(?i)\s+Rush\s*:");
+        var rushTurnaround = ExtractBetweenPatterns(flat, @"(?i)\bRush\s*:\s*", @"(?i)\s+(?:FOLLOW\s*&\s*CONNECT|Thank\s+You!|$)");
+        var sourceStatusNote = FirstMatch(flat, @"(?i)(?<value>(?:Estimate|Invoice)\s+sent\s*-\s*[^.]+\.?)");
 
         if (lineItems.Count == 0 && total > 0)
         {
@@ -76,6 +94,12 @@ public sealed class InvoiceDocumentPdfDraftService(AppDbContext db)
         }
 
         var warnings = new List<string>(sourceWarnings ?? []);
+        if (requestedType is not null
+            && !string.Equals(requestedType, docType, StringComparison.OrdinalIgnoreCase)
+            && docNumber is not null)
+        {
+            warnings.Add($"The selected destination was {requestedType}, but the PDF identifies itself as {docType} {docNumber}. The source identity was kept so an estimate is not silently posted as an invoice (or vice versa).");
+        }
         if (string.IsNullOrWhiteSpace(docNumber))
         {
             warnings.Add("No EPATA document number was found. The builder will use the next available number unless you enter one.");
@@ -83,7 +107,7 @@ public sealed class InvoiceDocumentPdfDraftService(AppDbContext db)
         else
         {
             var duplicate = await db.InvoiceDocuments.AsNoTracking()
-                .Where(document => !document.IsArchived && document.DocNumber == docNumber)
+                .Where(document => !document.IsArchived && document.DocNumber == docNumber && document.DocType == docType)
                 .Select(document => new { document.Id, document.DocType, document.CustomerName, document.ProjectName })
                 .FirstOrDefaultAsync(cancellationToken);
             if (duplicate is not null)
@@ -128,17 +152,18 @@ public sealed class InvoiceDocumentPdfDraftService(AppDbContext db)
                 ProjectDescription = projectDescription,
                 ProjectNotes = string.Join(Environment.NewLine + Environment.NewLine, new[]
                 {
+                    sourceStatusNote,
                     $"PDF IMPORT ASSISTANCE: Draft mapped from {sourceName ?? "uploaded PDF"}. Review every recovered field before saving.",
                     "LOCAL RULES RECEIPT: Fixed local text-mapping rules prepared this draft. No database record was created by the import."
-                }),
+                }.Where(value => !string.IsNullOrWhiteSpace(value))),
                 PageSize = "A4",
                 DocDate = docDate ?? DateTime.Today.ToString("yyyy-MM-dd"),
                 DueDate = dueDate ?? DateTime.Today.AddDays(docType == "INVOICE" ? 7 : 14).ToString("yyyy-MM-dd"),
                 PaymentMethod = "Unknown / Review",
                 PricingGuide = pricingGuide,
                 TermsNotes = termsNotes,
-                StandardTurnaround = "Recovered from PDF; review before sending",
-                RushTurnaround = "Recovered from PDF; review before sending",
+                StandardTurnaround = standardTurnaround ?? "Recovered from PDF; review before sending",
+                RushTurnaround = rushTurnaround ?? "Recovered from PDF; review before sending",
                 DocTaxRate = Math.Clamp(taxRate, 0, 30),
                 DocRushPercent = Math.Clamp(rushPercent, 0, 200),
                 DocDiscount = Math.Max(0, discount),
@@ -176,6 +201,60 @@ public sealed class InvoiceDocumentPdfDraftService(AppDbContext db)
         if (docNumber?.StartsWith("INV-", StringComparison.OrdinalIgnoreCase) == true) return "INVOICE";
         if (docNumber?.StartsWith("EST-", StringComparison.OrdinalIgnoreCase) == true) return "ESTIMATE";
         return Regex.IsMatch(flat, @"(?i)\bINVOICE\b") ? "INVOICE" : "ESTIMATE";
+    }
+
+    private static string? NormalizeRequestedDocumentType(string? value)
+    {
+        if (value?.Equals("Invoice", StringComparison.OrdinalIgnoreCase) == true
+            || value?.Equals("INVOICE", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            return "INVOICE";
+        }
+
+        if (value?.Equals("Estimate", StringComparison.OrdinalIgnoreCase) == true
+            || value?.Equals("ESTIMATE", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            return "ESTIMATE";
+        }
+
+        return null;
+    }
+
+    private static string? RemoveTrailingDocumentStatus(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return value;
+        var cleaned = Regex.Replace(value, @"(?i)\s+(?:DRAFT|SENT|PAID|PARTIAL|ACCEPTED|VOID|VOIDED)\s*$", string.Empty).Trim();
+        return string.IsNullOrWhiteSpace(cleaned) ? null : cleaned;
+    }
+
+    private static string? ExtractEpataBillToBlock(string flat)
+    {
+        var match = Regex.Match(
+            flat,
+            @"(?is)\bBILL\s+TO\s+PROJECT\s+DETAILS\s+PRICING\s+SUMMARY\s+(?<value>.+?)(?=\s+Project\s+Name\s*:)");
+        return match.Success ? Clean(match.Groups["value"].Value) : null;
+    }
+
+    private static string? ExtractEpataPricingGuide(string flat)
+    {
+        var match = Regex.Match(
+            flat,
+            @"(?is)\bPRICING\s+GUIDE\s*\(FOR\s+REFERENCE\)\s+TERMS\s*&\s*NOTES\s+APPROVAL\s+(?<value>.+?)(?=\s+Material\s+Notes\b)");
+        return match.Success ? Clean(match.Groups["value"].Value) : null;
+    }
+
+    private static string? ExtractEpataTerms(string flat)
+    {
+        var match = Regex.Match(
+            flat,
+            @"(?is)\bMaterial\s+Notes\s+(?<value>.+?)(?=\s+AI-assisted\s+tools\b|\s+(?:Estimate|Invoice)\s+sent\b|\s+Thank\s+You!|$)");
+        return match.Success ? Clean(match.Groups["value"].Value) : null;
+    }
+
+    private static string? ExtractBetweenPatterns(string input, string startPattern, string endPattern)
+    {
+        var match = Regex.Match(input, $@"(?s){startPattern}(?<value>.+?)(?={endPattern})");
+        return match.Success ? Clean(match.Groups["value"].Value) : null;
     }
 
     private static string GuessStatus(string flat, string docType, decimal amountPaid, decimal total)
@@ -230,9 +309,22 @@ public sealed class InvoiceDocumentPdfDraftService(AppDbContext db)
             return (parts[0], string.Join(" - ", parts.Skip(1)));
         }
 
-        return text.Length <= 100
-            ? (text, string.Empty)
-            : (text[..100].Trim(), text[100..].Trim());
+        var calculation = Regex.Match(
+            text,
+            @"(?i)^(?<description>.+?)\s+(?<details>(?:Measure|One\b|Flat\b|Estimated\b|Brim|Slicing|Layout|Includes?\b|Prepare|Create|Print|Model|Design|Cleanup|Packaging)\b.+)$");
+        if (calculation.Success
+            && calculation.Groups["description"].Value.Length >= 3
+            && calculation.Groups["description"].Value.Length <= 100)
+        {
+            return (calculation.Groups["description"].Value.Trim(), calculation.Groups["details"].Value.Trim());
+        }
+
+        if (text.Length <= 100) return (text, string.Empty);
+
+        var splitAt = text.LastIndexOf(' ', 100);
+        if (splitAt < 60) splitAt = 100;
+        var detailsStart = splitAt < text.Length && text[splitAt] == ' ' ? splitAt + 1 : splitAt;
+        return (text[..splitAt].Trim(), text[detailsStart..].Trim());
     }
 
     private static string? ExtractCustomerName(string? billTo, string? email, string? phone)
@@ -249,6 +341,30 @@ public sealed class InvoiceDocumentPdfDraftService(AppDbContext db)
         return FirstMeaningfulChunk(value);
     }
 
+    private static string? ExtractBillToOrganization(
+        string? billTo,
+        string? preparedFor,
+        string? email,
+        string? phone)
+    {
+        if (string.IsNullOrWhiteSpace(billTo)) return null;
+        var value = billTo;
+        foreach (var part in new[] { preparedFor, email, phone })
+        {
+            if (!string.IsNullOrWhiteSpace(part)) value = value.Replace(part, string.Empty, StringComparison.OrdinalIgnoreCase);
+        }
+
+        value = Regex.Replace(value, @"(?<!\d)(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}(?!\d)", string.Empty);
+        value = Clean(value);
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        if (Regex.IsMatch(value, @"(?i)\b(?:LLC|Inc\.?|Corporation|Corp\.?|Company|Co\.?|LLP|LP|Ltd\.?)\b"))
+        {
+            return Trim(value, 160);
+        }
+
+        return null;
+    }
+
     private static string? ExtractCustomerAddress(string? billTo, string? customerName, string? email, string? phone)
     {
         if (string.IsNullOrWhiteSpace(billTo)) return null;
@@ -258,7 +374,10 @@ public sealed class InvoiceDocumentPdfDraftService(AppDbContext db)
             if (!string.IsNullOrWhiteSpace(part)) value = value.Replace(part, "", StringComparison.OrdinalIgnoreCase);
         }
         value = Regex.Replace(value, @"(?<!\d)(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}(?!\d)", "");
-        return string.IsNullOrWhiteSpace(value) ? null : Trim(Clean(value), 240);
+        value = Clean(value);
+        var looksLikePostalAddress = Regex.IsMatch(value, @"(?i)\b\d{1,6}\s+[A-Za-z0-9.'-]+")
+            || Regex.IsMatch(value, @"\b[A-Z]{2}\s+\d{5}(?:-\d{4})?\b");
+        return string.IsNullOrWhiteSpace(value) || !looksLikePostalAddress ? null : Trim(value, 240);
     }
 
     private static string? ExtractField(string? input, string label, params string[] stopLabels)

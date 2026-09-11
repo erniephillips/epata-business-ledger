@@ -76,6 +76,8 @@ Open **AI Operations** for the product, production, cleanup, writing, and ledger
 - **Explicit save:** **Save Paid Sale + Link Proof** creates the Sale, customer contact, optional Job, and linked Audit Docs together.
 - **Writes:** nothing until explicit confirmation. It never creates an estimate, invoice, or AR row.
 - **Important:** missing marketplace fees, shipping-label cost, and COGS remain review warnings instead of being invented.
+- **Smart Document Intake:** dropping several readable Etsy order PDFs into Document Intake processes each file separately. A confidently recognized one-order receipt is checked by local AI when available, reconciled with deterministic rules, then automatically saved or linked by order number. This is separate from the review-first AI Operations form above.
+- **Refund guardrail:** an Etsy receipt with an explicit `$0.00` order total and refunded cost is saved as a net-zero `Refunded` Sale. It cannot be normalized back into positive paid revenue.
 
 #### Product Importer
 
@@ -155,9 +157,9 @@ Local rules stay on this computer and use deterministic patterns. They are not a
 ### Document Intake suggestions
 
 - **Use it when:** a proof file arrives before you know where it belongs.
-- **Reads:** the uploaded file name, the related-area fields you entered, and extracted text preview when available.
-- **Does:** suggests the likely ledger and prefill values.
-- **Writes:** only the Audit Doc created by the upload. It does not post the suggested Sale, Expense, Bill, or other record.
+- **Reads:** the uploaded file name, the related-area fields you entered, and readable document text extracted with the same PDF/DOCX parser used by AI Operations.
+- **Etsy order exception:** each confidently recognized, single-order Etsy PDF automatically creates or links a populated Sale, Customer Job, Customer, and Audit Doc. Platform + order number prevents duplicate Sales, and unknown fees/label cost/COGS stay in Needs Review.
+- **Other documents:** suggests the likely ledger and prefill values but writes only the Audit Doc created by the upload. Expenses, Bills, Assets, and other records are not auto-posted.
 
 ### Tax Prep calculation audit
 

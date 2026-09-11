@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text.Json;
 
 namespace EPATA.BusinessLedger.Services;
@@ -9,30 +10,34 @@ public class InvoiceAppImportService(HttpClient httpClient, IConfiguration confi
         PropertyNameCaseInsensitive = true
     };
 
-    public async Task<List<InvoiceAppDocument>> ReadDocumentsAsync(string? baseUrl = null)
+    public async Task<List<InvoiceAppDocument>> ReadDocumentsAsync(
+        string? baseUrl = null,
+        CancellationToken cancellationToken = default)
     {
-        var root = (baseUrl ?? configuration["App:InvoiceAppUrl"] ?? "http://localhost:5057/").TrimEnd('/');
-        using var response = await httpClient.GetAsync($"{root}/api/documents");
+        var root = ResolveRoot(baseUrl);
+        using var response = await httpClient.GetAsync($"{root}/api/documents", cancellationToken);
         response.EnsureSuccessStatusCode();
-        var body = await response.Content.ReadAsStringAsync();
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
         var docs = JsonSerializer.Deserialize<List<InvoiceAppDocument>>(body, JsonOptions);
 
         return docs ?? [];
     }
 
-    public async Task<List<InvoiceAppFullDocument>> ReadFullDocumentsAsync(string? baseUrl = null)
+    public async Task<List<InvoiceAppFullDocument>> ReadFullDocumentsAsync(
+        string? baseUrl = null,
+        CancellationToken cancellationToken = default)
     {
-        var root = (baseUrl ?? configuration["App:InvoiceAppUrl"] ?? "http://localhost:5057/").TrimEnd('/');
-        var summaries = await ReadDocumentsAsync(root);
+        var root = ResolveRoot(baseUrl);
+        var summaries = await ReadDocumentsAsync(root, cancellationToken);
         var full = new List<InvoiceAppFullDocument>();
 
         foreach (var summary in summaries)
         {
             try
             {
-                using var response = await httpClient.GetAsync($"{root}/api/documents/{summary.Id}");
+                using var response = await httpClient.GetAsync($"{root}/api/documents/{summary.Id}", cancellationToken);
                 response.EnsureSuccessStatusCode();
-                var body = await response.Content.ReadAsStringAsync();
+                var body = await response.Content.ReadAsStringAsync(cancellationToken);
                 var doc = JsonSerializer.Deserialize<InvoiceAppFullDocument>(body, JsonOptions);
                 if (doc is not null)
                 {
@@ -40,7 +45,7 @@ public class InvoiceAppImportService(HttpClient httpClient, IConfiguration confi
                     continue;
                 }
             }
-            catch
+            catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
             {
                 // Fall back to the list row if an older invoice app cannot return details.
             }
@@ -97,9 +102,11 @@ public class InvoiceAppImportService(HttpClient httpClient, IConfiguration confi
         return full;
     }
 
-    public async Task<object> TryReadInvoiceAppAsync(string? baseUrl = null)
+    public async Task<object> TryReadInvoiceAppAsync(
+        string? baseUrl = null,
+        CancellationToken cancellationToken = default)
     {
-        var root = (baseUrl ?? configuration["App:InvoiceAppUrl"] ?? "http://localhost:5057/").TrimEnd('/');
+        var root = ResolveRoot(baseUrl);
         var candidates = new[]
         {
             $"{root}/api/documents",
@@ -113,8 +120,8 @@ public class InvoiceAppImportService(HttpClient httpClient, IConfiguration confi
         {
             try
             {
-                using var response = await httpClient.GetAsync(url);
-                var body = await response.Content.ReadAsStringAsync();
+                using var response = await httpClient.GetAsync(url, cancellationToken);
+                var body = await response.Content.ReadAsStringAsync(cancellationToken);
                 attempts.Add(new { url, ok = response.IsSuccessStatusCode, status = (int)response.StatusCode, preview = body.Length > 800 ? body[..800] : body });
 
                 if (response.IsSuccessStatusCode && !string.IsNullOrWhiteSpace(body))
@@ -132,7 +139,7 @@ public class InvoiceAppImportService(HttpClient httpClient, IConfiguration confi
                     };
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
             {
                 attempts.Add(new { url, ok = false, error = ex.Message });
             }
@@ -145,6 +152,26 @@ public class InvoiceAppImportService(HttpClient httpClient, IConfiguration confi
             attempts
         };
     }
+
+    private string ResolveRoot(string? baseUrl)
+    {
+        var value = (baseUrl ?? configuration["App:InvoiceAppUrl"] ?? "http://localhost:5057/").Trim();
+        if (!Uri.TryCreate(value, UriKind.Absolute, out var uri)
+            || !uri.Scheme.Equals(Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
+            || !string.IsNullOrEmpty(uri.UserInfo)
+            || !string.IsNullOrEmpty(uri.Query)
+            || !string.IsNullOrEmpty(uri.Fragment)
+            || !IsLoopbackHost(uri.Host))
+        {
+            throw new InvalidOperationException("The legacy invoice app URL must be a loopback HTTP URL such as http://localhost:5057.");
+        }
+
+        return value.TrimEnd('/');
+    }
+
+    private static bool IsLoopbackHost(string host) =>
+        host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+        || IPAddress.TryParse(host.Trim('[', ']'), out var address) && IPAddress.IsLoopback(address);
 }
 
 public sealed record InvoiceAppDocument(

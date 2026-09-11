@@ -84,7 +84,7 @@ assert.equal(blankPrefill.paymentMethod, 'Unknown / Review');
 assert.equal(blankPrefill.lineItems[0].description, 'Customer invoice');
 
 assert.match(indexSource, /\/js\/invoice-prefill\.js\?v=1/);
-assert.match(indexSource, /\/js\/app\.js\?v=20260619-ar-prefill/);
+assert.match(indexSource, /\/js\/app\.js\?v=[^"']+/, 'Main shell should load a cache-versioned app.js asset.');
 assert.match(appSource, /startReceivablePdfInvoice/);
 assert.match(appSource, /EpataInvoicePrefill\?\.invoicePrefillFromReceivable/);
 assert.match(appSource, /startCustomerDocument\(name, type\)/);

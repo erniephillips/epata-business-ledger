@@ -6,8 +6,9 @@ using Microsoft.EntityFrameworkCore;
 
 namespace EPATA.BusinessLedger.Services;
 
-public sealed class TaxPlanningService(AppDbContext db)
+public sealed class TaxPlanningService(AppDbContext db, TurboTaxReportService turboTaxReport)
 {
+    private static readonly SemaphoreSlim GenerateObligationsGate = new(1, 1);
     private const string FederalEstimatedUrl = "https://www.irs.gov/businesses/small-businesses-self-employed/estimated-taxes";
     private const string FederalSelfEmployedUrl = "https://www.irs.gov/businesses/small-businesses-self-employed/self-employed-individuals-tax-center";
     private const string NjEstimatedUrl = "https://www.nj.gov/treasury/taxation/njit20.shtml";
@@ -66,6 +67,9 @@ public sealed class TaxPlanningService(AppDbContext db)
         var rewards = await db.MakerWorldRewards.AsNoTracking().Where(x => !x.IsArchived && x.RewardDate.HasValue && x.RewardDate.Value.Year == year).ToListAsync();
         var mileage = await db.MileageLogs.AsNoTracking().Where(x => !x.IsArchived && x.TripDate.HasValue && x.TripDate.Value.Year == year).ToListAsync();
         var obligations = await db.TaxObligations.AsNoTracking().Where(x => !x.IsArchived && x.TaxYear == year).ToListAsync();
+        var orderLosses = await db.OrderLossIncidents.AsNoTracking()
+            .Where(x => !x.IsArchived && x.CountInTaxReports && x.IncidentDate.HasValue && x.IncidentDate.Value.Year == year)
+            .ToListAsync();
 
         var gross = reportableSales.Sum(MoneyRules.SaleGrossReceipts);
         var marketplaceTax = reportableSales.Where(x => SalesTaxReviewBucket(x).StartsWith("Marketplace", StringComparison.OrdinalIgnoreCase)).Sum(MoneyRules.SaleSalesTaxMemo);
@@ -78,12 +82,19 @@ public sealed class TaxPlanningService(AppDbContext db)
         var expensedAssets = assets.Sum(MoneyRules.FullyExpensedAssetAmount);
         var rewardIncome = rewards.Sum(MoneyRules.MakerWorldIncomeAmount);
         var miles = mileage.Sum(x => x.BusinessMiles ?? 0);
-        var mileageRate = profile.BusinessMileageRate ?? 0;
-        var mileageDeduction = miles * mileageRate;
+        var mileageDeduction = mileage.Sum(x => (x.BusinessMiles ?? 0) * MileageRateFor(x.TripDate ?? new DateTime(year, 1, 1), year, profile.BusinessMileageRate));
+        var mileageRate = miles > 0
+            ? mileageDeduction / miles
+            : year == 2026
+                ? 0.725m
+                : profile.BusinessMileageRate ?? 0;
         var parkingTolls = mileage.Sum(x => x.ParkingAndTolls ?? 0);
         var platformCosts = reportableSales.Sum(x => (x.PlatformFees ?? 0) + (x.ShippingLabelCost ?? 0));
         var estimatedCogs = reportableSales.Sum(x => x.EstimatedCogs ?? 0);
-        var workingProfit = gross + rewardIncome - platformCosts - estimatedCogs - operating - materials - expensedAssets - mileageDeduction - parkingTolls;
+        var orderLossRefunds = orderLosses.Sum(x => x.CustomerRefund ?? 0);
+        var orderLossCosts = orderLosses.Sum(x => (x.ReplacementCogs ?? 0) + (x.AdditionalShippingCost ?? 0) + (x.OtherCost ?? 0));
+        var orderLossRecoveries = orderLosses.Sum(x => x.ReimbursementReceived ?? 0);
+        var workingProfit = gross + rewardIncome + orderLossRecoveries - orderLossRefunds - orderLossCosts - platformCosts - estimatedCogs - operating - materials - expensedAssets - mileageDeduction - parkingTolls;
         var missingProof = reportableSales.Count(x => x.NeedsReview || string.IsNullOrWhiteSpace(x.SourceProof))
             + expenses.Count(x => x.NeedsReview || string.IsNullOrWhiteSpace(x.ReceiptProof))
             + bills.Count(x => x.TaxDeductible
@@ -93,6 +104,7 @@ public sealed class TaxPlanningService(AppDbContext db)
                     || MoneyRules.BillDeductionBucket(x).Equals("Review", StringComparison.OrdinalIgnoreCase)))
             + assets.Count(x => x.NeedsReview || string.IsNullOrWhiteSpace(x.SourceProof))
             + mileage.Count(x => x.NeedsReview)
+            + orderLosses.Count(x => x.NeedsReview || string.IsNullOrWhiteSpace(x.SourceProof))
             + obligations.Count(x => x.NeedsReview && !x.Status.Equals("Filed / Paid", StringComparison.OrdinalIgnoreCase) && !x.Status.Equals("Not Required", StringComparison.OrdinalIgnoreCase));
 
         return new(
@@ -113,29 +125,51 @@ public sealed class TaxPlanningService(AppDbContext db)
             mileageRate,
             mileageDeduction,
             parkingTolls,
+            orderLossRefunds,
+            orderLossCosts,
+            orderLossRecoveries,
+            orderLosses.Count,
             workingProfit,
             workingProfit >= 400,
             missingProof);
     }
 
-    public async Task<List<TaxObligation>> GenerateObligationsAsync(int year)
+    private static decimal MileageRateFor(DateTime tripDate, int year, decimal? configuredRate)
     {
-        var profile = await GetProfileAsync();
-        var templates = ObligationTemplates(year, profile);
-        var existing = await db.TaxObligations.Where(x => !x.IsArchived && x.TaxYear == year).ToListAsync();
-        foreach (var template in templates)
-        {
-            if (existing.Any(x => x.Title == template.Title && x.Period == template.Period)) continue;
-            db.TaxObligations.Add(template);
-        }
+        if (year == 2026)
+            return tripDate < new DateTime(2026, 7, 1) ? 0.725m : 0.76m;
 
-        await db.SaveChangesAsync();
-        return await db.TaxObligations.AsNoTracking()
-            .Where(x => !x.IsArchived && x.TaxYear == year)
-            .OrderBy(x => x.DueDate == null)
-            .ThenBy(x => x.DueDate)
-            .ThenBy(x => x.Title)
-            .ToListAsync();
+        return configuredRate ?? 0;
+    }
+
+    public async Task<List<TaxObligation>> GenerateObligationsAsync(int year, CancellationToken cancellationToken = default)
+    {
+        await GenerateObligationsGate.WaitAsync(cancellationToken);
+        try
+        {
+            var profile = await GetProfileAsync();
+            var templates = ObligationTemplates(year, profile);
+            var existing = await db.TaxObligations
+                .Where(x => !x.IsArchived && x.TaxYear == year)
+                .ToListAsync(cancellationToken);
+            foreach (var template in templates)
+            {
+                if (existing.Any(x => x.Title == template.Title && x.Period == template.Period)) continue;
+                db.TaxObligations.Add(template);
+            }
+
+            await db.SaveChangesAsync(cancellationToken);
+            return await db.TaxObligations.AsNoTracking()
+                .Where(x => !x.IsArchived && x.TaxYear == year)
+                .OrderBy(x => x.DueDate == null)
+                .ThenBy(x => x.DueDate)
+                .ThenBy(x => x.Title)
+                .ToListAsync(cancellationToken);
+        }
+        finally
+        {
+            GenerateObligationsGate.Release();
+        }
     }
 
     public async Task<List<NjSalesTaxReviewRow>> BuildNjSalesTaxReviewAsync(int year, int? quarter = null)
@@ -183,16 +217,26 @@ public sealed class TaxPlanningService(AppDbContext db)
         var rewards = await db.MakerWorldRewards.AsNoTracking().Where(x => !x.IsArchived && x.RewardDate.HasValue && x.RewardDate.Value.Year == year).OrderBy(x => x.RewardDate).ToListAsync();
         var docs = await db.AuditDocuments.AsNoTracking().Where(x => !x.IsArchived).OrderBy(x => x.DocumentDate).ToListAsync();
         var njSalesTax = await BuildNjSalesTaxReviewAsync(year);
+        var orderLosses = await db.OrderLossIncidents.AsNoTracking().Where(x => !x.IsArchived && x.IncidentDate.HasValue && x.IncidentDate.Value.Year == year).OrderBy(x => x.IncidentDate).ToListAsync();
+        var turboTax = await turboTaxReport.BuildReportAsync(year);
+        var turboTaxHtml = await turboTaxReport.BuildPrintableHtmlAsync(year);
 
         using var stream = new MemoryStream();
         using (var zip = new ZipArchive(stream, ZipArchiveMode.Create, true))
         {
             AddText(zip, "README.txt", TaxPackageReadme(year));
             AddText(zip, "tax-summary.csv", CsvExportService.ToCsv(new[] { summary }));
+            AddText(zip, "turbotax-interview-answers.csv", CsvExportService.ToCsv(turboTax.InterviewAnswers));
+            AddText(zip, "schedule-c-line-by-line.csv", CsvExportService.ToCsv(turboTax.ScheduleCLines));
+            AddText(zip, "schedule-c-income-detail.csv", CsvExportService.ToCsv(turboTax.IncomeDetails));
+            AddText(zip, "schedule-c-expense-detail.csv", CsvExportService.ToCsv(turboTax.ExpenseDetails));
+            AddText(zip, "tax-readiness-issues.csv", CsvExportService.ToCsv(turboTax.ReadinessIssues));
+            AddText(zip, "PRINT-TURBOTAX-WORKBOOK.html", turboTaxHtml);
             AddText(zip, "tax-obligations.csv", CsvExportService.ToCsv(obligations));
             AddText(zip, "sales.csv", CsvExportService.ToCsv(sales));
             AddText(zip, "nj-sales-tax-review.csv", CsvExportService.ToCsv(njSalesTax));
             AddText(zip, "expenses.csv", CsvExportService.ToCsv(expenses));
+            AddText(zip, "order-loss-incidents.csv", CsvExportService.ToCsv(orderLosses));
             AddText(zip, "bills.csv", CsvExportService.ToCsv(bills));
             AddText(zip, "assets.csv", CsvExportService.ToCsv(assets));
             AddText(zip, "mileage.csv", CsvExportService.ToCsv(mileage));
@@ -294,7 +338,9 @@ public sealed class TaxPlanningService(AppDbContext db)
 
         This package is a recordkeeping and accountant-handoff aid. It is not a completed tax return and is not tax advice.
 
-        Start with tax-summary.csv and tax-obligations.csv.
+        Start with PRINT-TURBOTAX-WORKBOOK.html, tax-readiness-issues.csv, and schedule-c-line-by-line.csv.
+        The printable workbook contains the TurboTax interview answers, Schedule C lines, and itemized supporting rows.
+        Clear every BLOCKER before using the totals for tax-software entry.
         Review expenses.csv and bills.csv for paid purchases, payment method/account, proof references, and tax categories.
         Review every row marked NeedsReview or Review Applicability.
         Confirm NJ sales-tax treatment in nj-sales-tax-review.csv.

@@ -160,6 +160,19 @@ public sealed class AiMarketplaceOrderSaveResult
     public List<AuditDocument> AuditDocuments { get; set; } = [];
 }
 
+public sealed class AiMarketplaceOrderAutoImportResult
+{
+    public bool Recognized { get; set; }
+    public string Action { get; set; } = "IndexedOnly";
+    public string Message { get; set; } = string.Empty;
+    public bool UsedAi { get; set; }
+    public Sale? Sale { get; set; }
+    public CustomerJob? Job { get; set; }
+    public Party? Customer { get; set; }
+    public AuditDocument? AuditDocument { get; set; }
+    public List<string> Warnings { get; set; } = [];
+}
+
 public sealed class AiListingDraft
 {
     public string Platform { get; set; } = "General";

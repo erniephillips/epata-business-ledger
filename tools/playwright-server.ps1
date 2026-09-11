@@ -8,8 +8,10 @@ $ProgressPreference = 'SilentlyContinue'
 $root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $dbPath = Join-Path $root 'Data\playwright-browser-tests.db'
 
-foreach ($path in @($dbPath, "$dbPath-shm", "$dbPath-wal")) {
-    Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+if ($env:EPATA_PLAYWRIGHT_PRESERVE_DB -ne '1') {
+    foreach ($path in @($dbPath, "$dbPath-shm", "$dbPath-wal")) {
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    }
 }
 
 $env:ASPNETCORE_ENVIRONMENT = 'Test'

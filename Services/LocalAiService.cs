@@ -9,6 +9,8 @@ namespace EPATA.BusinessLedger.Services;
 
 public sealed class LocalAiService(AppDbContext db, HttpClient httpClient)
 {
+    private static readonly SemaphoreSlim LifecycleGate = new(1, 1);
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         PropertyNameCaseInsensitive = true
@@ -29,20 +31,28 @@ public sealed class LocalAiService(AppDbContext db, HttpClient httpClient)
 
     public async Task<LocalAiSettings> SaveSettingsAsync(SaveLocalAiSettingsRequest request, CancellationToken cancellationToken = default)
     {
-        var settings = new LocalAiSettings(
-            NormalizeBaseUrl(request.BaseUrl),
-            NormalizeModelPath(request.ModelPath),
-            NormalizeIdentifier(request.ModelIdentifier),
-            Math.Clamp(request.ContextLength <= 0 ? DefaultContextLength : request.ContextLength, 2048, 131072),
-            Math.Clamp(request.IdleUnloadSeconds <= 0 ? DefaultIdleUnloadSeconds : request.IdleUnloadSeconds, 60, 86400));
+        await LifecycleGate.WaitAsync(cancellationToken);
+        try
+        {
+            var settings = new LocalAiSettings(
+                NormalizeBaseUrl(request.BaseUrl),
+                NormalizeModelPath(request.ModelPath),
+                NormalizeIdentifier(request.ModelIdentifier),
+                Math.Clamp(request.ContextLength <= 0 ? DefaultContextLength : request.ContextLength, 2048, 131072),
+                Math.Clamp(request.IdleUnloadSeconds <= 0 ? DefaultIdleUnloadSeconds : request.IdleUnloadSeconds, 60, 86400));
 
-        await UpsertAsync("LocalAi:BaseUrl", settings.BaseUrl, cancellationToken);
-        await UpsertAsync("LocalAi:ModelPath", settings.ModelPath ?? string.Empty, cancellationToken);
-        await UpsertAsync("LocalAi:ModelIdentifier", settings.ModelIdentifier, cancellationToken);
-        await UpsertAsync("LocalAi:ContextLength", settings.ContextLength.ToString(), cancellationToken);
-        await UpsertAsync("LocalAi:IdleUnloadSeconds", settings.IdleUnloadSeconds.ToString(), cancellationToken);
-        await db.SaveChangesAsync(cancellationToken);
-        return settings;
+            await UpsertAsync("LocalAi:BaseUrl", settings.BaseUrl, cancellationToken);
+            await UpsertAsync("LocalAi:ModelPath", settings.ModelPath ?? string.Empty, cancellationToken);
+            await UpsertAsync("LocalAi:ModelIdentifier", settings.ModelIdentifier, cancellationToken);
+            await UpsertAsync("LocalAi:ContextLength", settings.ContextLength.ToString(), cancellationToken);
+            await UpsertAsync("LocalAi:IdleUnloadSeconds", settings.IdleUnloadSeconds.ToString(), cancellationToken);
+            await db.SaveChangesAsync(cancellationToken);
+            return settings;
+        }
+        finally
+        {
+            LifecycleGate.Release();
+        }
     }
 
     public async Task<LocalAiStatus> GetStatusAsync(bool includeAvailableModels = true, CancellationToken cancellationToken = default)
@@ -92,7 +102,15 @@ public sealed class LocalAiService(AppDbContext db, HttpClient httpClient)
                 ? $"Local AI is ready using {settings.ModelIdentifier}."
                 : "LM Studio server is on. Select and load the app's model before using model-assisted features.";
         }
-        catch
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is HttpRequestException
+            or JsonException
+            or InvalidOperationException
+            or IOException
+            or TaskCanceledException)
         {
             status.State = "Off";
             status.Message = status.LmsInstalled
@@ -112,79 +130,100 @@ public sealed class LocalAiService(AppDbContext db, HttpClient httpClient)
 
     public async Task<LocalAiActionResult> StartAsync(CancellationToken cancellationToken = default)
     {
-        var settings = await GetSettingsAsync(cancellationToken);
-        var lmsPath = FindLmsPath();
-        var studioPath = FindLmStudioPath();
-        if (lmsPath is null || studioPath is null)
+        await LifecycleGate.WaitAsync(cancellationToken);
+        try
         {
-            var missing = await GetStatusAsync(cancellationToken: cancellationToken);
-            return new(false, "LM Studio and its lms command-line tool must be installed before the app can start local AI.", missing);
-        }
+            var settings = await GetSettingsAsync(cancellationToken);
+            var lmsPath = FindLmsPath();
+            var studioPath = FindLmStudioPath();
+            if (lmsPath is null || studioPath is null)
+            {
+                var missing = await GetStatusAsync(cancellationToken: cancellationToken);
+                return new(false, "LM Studio and its lms command-line tool must be installed before the app can start local AI.", missing);
+            }
 
-        if (!(await GetStatusAsync(false, cancellationToken)).ServerOnline)
+            var initialStatus = await GetStatusAsync(false, cancellationToken);
+            if (initialStatus.ModelReady)
+            {
+                return new(true, "Local AI server and selected model are already ready.", initialStatus);
+            }
+
+            if (!initialStatus.ServerOnline)
+            {
+                StartLmStudio(studioPath);
+                await Task.Delay(TimeSpan.FromSeconds(4), cancellationToken);
+                var port = new Uri(settings.BaseUrl).Port;
+                var server = await RunProcessAsync(lmsPath, ["server", "start", "--port", port.ToString(), "--bind", "127.0.0.1"], TimeSpan.FromSeconds(75), cancellationToken);
+                if (!server.Success)
+                {
+                    var failed = await GetStatusAsync(cancellationToken: cancellationToken);
+                    return new(false, $"LM Studio opened, but the local server did not start. {server.Message}", failed);
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(settings.ModelPath))
+            {
+                var current = await GetStatusAsync(false, cancellationToken);
+                if (!current.LoadedModels.Contains(settings.ModelIdentifier, StringComparer.OrdinalIgnoreCase))
+                {
+                    var modelKey = await ResolveModelKeyAsync(lmsPath, settings.ModelPath, cancellationToken);
+                    if (string.IsNullOrWhiteSpace(modelKey))
+                    {
+                        var unresolved = await GetStatusAsync(cancellationToken: cancellationToken);
+                        return new(false, "The selected GGUF file is present, but LM Studio did not report a matching language-model key.", unresolved);
+                    }
+                    var load = await RunProcessAsync(lmsPath,
+                        ["load", modelKey, "--identifier", settings.ModelIdentifier, "--context-length", settings.ContextLength.ToString(), "--ttl", settings.IdleUnloadSeconds.ToString(), "--yes"],
+                        TimeSpan.FromMinutes(5),
+                        cancellationToken);
+                    if (!load.Success)
+                    {
+                        var loadFailed = await GetStatusAsync(cancellationToken: cancellationToken);
+                        return new(false, $"The server started, but the selected model did not load. {load.Message}", loadFailed);
+                    }
+                }
+            }
+
+            var status = await WaitForReadyStatusAsync(!string.IsNullOrWhiteSpace(settings.ModelPath), cancellationToken);
+            var message = status.ModelReady
+                ? "Local AI server and selected model are ready."
+                : "Local AI server is on. Choose a downloaded model and click Start again to load it.";
+            return new(status.ServerOnline, message, status);
+        }
+        finally
         {
-            StartLmStudio(studioPath);
-            await Task.Delay(TimeSpan.FromSeconds(4), cancellationToken);
-            var port = new Uri(settings.BaseUrl).Port;
-            var server = await RunProcessAsync(lmsPath, ["server", "start", "--port", port.ToString(), "--bind", "127.0.0.1"], TimeSpan.FromSeconds(75), cancellationToken);
-            if (!server.Success)
-            {
-                var failed = await GetStatusAsync(cancellationToken: cancellationToken);
-                return new(false, $"LM Studio opened, but the local server did not start. {server.Message}", failed);
-            }
+            LifecycleGate.Release();
         }
-
-        if (!string.IsNullOrWhiteSpace(settings.ModelPath))
-        {
-            var modelKey = await ResolveModelKeyAsync(lmsPath, settings.ModelPath, cancellationToken);
-            if (string.IsNullOrWhiteSpace(modelKey))
-            {
-                var unresolved = await GetStatusAsync(cancellationToken: cancellationToken);
-                return new(false, "The selected GGUF file is present, but LM Studio did not report a matching language-model key.", unresolved);
-            }
-            var current = await GetStatusAsync(false, cancellationToken);
-            if (current.LoadedModels.Contains(settings.ModelIdentifier, StringComparer.OrdinalIgnoreCase))
-            {
-                await RunProcessAsync(lmsPath, ["unload", settings.ModelIdentifier], TimeSpan.FromSeconds(30), cancellationToken);
-            }
-            var load = await RunProcessAsync(lmsPath,
-                ["load", modelKey, "--identifier", settings.ModelIdentifier, "--context-length", settings.ContextLength.ToString(), "--ttl", settings.IdleUnloadSeconds.ToString(), "--yes"],
-                TimeSpan.FromMinutes(5),
-                cancellationToken);
-            if (!load.Success)
-            {
-                var loadFailed = await GetStatusAsync(cancellationToken: cancellationToken);
-                return new(false, $"The server started, but the selected model did not load. {load.Message}", loadFailed);
-            }
-        }
-
-        var status = await WaitForReadyStatusAsync(!string.IsNullOrWhiteSpace(settings.ModelPath), cancellationToken);
-        var message = status.ModelReady
-            ? "Local AI server and selected model are ready."
-            : "Local AI server is on. Choose a downloaded model and click Start again to load it.";
-        return new(status.ServerOnline, message, status);
     }
 
     public async Task<LocalAiActionResult> StopAsync(CancellationToken cancellationToken = default)
     {
-        var current = await GetStatusAsync(false, cancellationToken);
-        if (!current.ServerOnline)
+        await LifecycleGate.WaitAsync(cancellationToken);
+        try
         {
-            return new(true, "Local AI is already off.", await GetStatusAsync(cancellationToken: cancellationToken));
-        }
+            var current = await GetStatusAsync(false, cancellationToken);
+            if (!current.ServerOnline)
+            {
+                return new(true, "Local AI is already off.", await GetStatusAsync(cancellationToken: cancellationToken));
+            }
 
-        var lmsPath = FindLmsPath();
-        if (lmsPath is null)
+            var lmsPath = FindLmsPath();
+            if (lmsPath is null)
+            {
+                var missing = await GetStatusAsync(cancellationToken: cancellationToken);
+                return new(false, "The lms command-line tool was not found.", missing);
+            }
+
+            await RunProcessAsync(lmsPath, ["unload", "--all"], TimeSpan.FromSeconds(30), cancellationToken);
+            var stopped = await RunProcessAsync(lmsPath, ["server", "stop"], TimeSpan.FromSeconds(30), cancellationToken);
+            await Task.Delay(700, cancellationToken);
+            return new(stopped.Success, stopped.Success ? "Local AI server and loaded models were stopped." : stopped.Message,
+                await GetStatusAsync(cancellationToken: cancellationToken));
+        }
+        finally
         {
-            var missing = await GetStatusAsync(cancellationToken: cancellationToken);
-            return new(false, "The lms command-line tool was not found.", missing);
+            LifecycleGate.Release();
         }
-
-        await RunProcessAsync(lmsPath, ["unload", "--all"], TimeSpan.FromSeconds(30), cancellationToken);
-        var stopped = await RunProcessAsync(lmsPath, ["server", "stop"], TimeSpan.FromSeconds(30), cancellationToken);
-        await Task.Delay(700, cancellationToken);
-        return new(stopped.Success, stopped.Success ? "Local AI server and loaded models were stopped." : stopped.Message,
-            await GetStatusAsync(cancellationToken: cancellationToken));
     }
 
     public async Task<LocalAiConnection?> GetReadyConnectionAsync(CancellationToken cancellationToken = default)
@@ -442,6 +481,11 @@ public sealed class LocalAiService(AppDbContext db, HttpClient httpClient)
         {
             try { process.Kill(entireProcessTree: true); } catch { }
             return (false, $"Command timed out after {timeout.TotalSeconds:0} seconds.", string.Empty);
+        }
+        catch (OperationCanceledException)
+        {
+            try { process.Kill(entireProcessTree: true); } catch { }
+            throw;
         }
         var output = string.Join(" ", new[] { await stdout, await stderr }.Where(x => !string.IsNullOrWhiteSpace(x))).Trim();
         var cleaned = System.Text.RegularExpressions.Regex.Replace(output, @"\x1B\[[0-?]*[ -/]*[@-~]", string.Empty);

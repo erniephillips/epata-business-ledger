@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 const mainApp = await readFile(new URL('../wwwroot/js/app.js', import.meta.url), 'utf8');
 const builderApp = await readFile(new URL('../wwwroot/invoice-builder/js/app.js', import.meta.url), 'utf8');
 const recordsApp = await readFile(new URL('../wwwroot/invoice-builder/js/records.js', import.meta.url), 'utf8');
+const builderIndex = await readFile(new URL('../wwwroot/invoice-builder/index.html', import.meta.url), 'utf8');
 const modalSave = await readFile(new URL('../wwwroot/js/modal-save-state.js', import.meta.url), 'utf8');
 const invoiceSaveIntent = await readFile(new URL('../wwwroot/invoice-builder/js/save-intent.js', import.meta.url), 'utf8');
 
@@ -13,8 +14,8 @@ function mustInclude(source, text, label) {
 
 mustInclude(modalSave, 'tryStart()', 'Generic modal save helper should expose a tryStart in-flight guard.');
 mustInclude(mainApp, 'modalSaveGuard: window.EpataModalSaveState?.createModalSaveGuard', 'Main app should create a modal save guard.');
-mustInclude(mainApp, 'if (guard ? !guard.tryStart() : appState.modalSaveInFlight) return;', 'Generic modal save should ignore duplicate submits.');
-mustInclude(mainApp, "saveButton.textContent = 'Saving...'", 'Generic modal save should show an in-flight label.');
+mustInclude(mainApp, 'if (guard ? !guard.tryStart() : session.saveInFlight)', 'Generic modal save should ignore duplicate submits per modal instance.');
+mustInclude(mainApp, "session.saveInFlight ? 'Saving...'", 'Generic modal save should show an in-flight label.');
 mustInclude(mainApp, 'guard?.finish?.();', 'Generic modal save should release the guard in finally.');
 
 mustInclude(mainApp, 'asyncActionKeys: new Set()', 'Main app should track non-modal in-flight actions.');
@@ -47,8 +48,8 @@ for (const pair of [
 }
 mustInclude(mainApp, 'appState.localAiActionInFlight', 'Local AI start/stop should track in-flight action state.');
 mustInclude(mainApp, 'Local AI ${appState.localAiActionInFlight} is already in progress.', 'Local AI start/stop should reject duplicate rapid clicks.');
-mustInclude(mainApp, "button.textContent = 'Saving paid order...'", 'Marketplace order save should show in-flight state.');
-mustInclude(mainApp, "button.textContent = 'Save Paid Sale + Link Proof'", 'Marketplace order save should restore its label on failure.');
+mustInclude(mainApp, "runExclusiveAction('marketplace-order-save'", 'Marketplace order save should use the shared cross-render rapid-submit guard.');
+mustInclude(mainApp, "{ button, busyText: 'Saving paid order...' }", 'Marketplace order save should show in-flight state and restore its original label in finally.');
 
 mustInclude(builderApp, 'let saveInFlight    = null;', 'Standalone builder should track save in-flight state.');
 mustInclude(builderApp, 'if (saveInFlight)', 'Standalone builder should check existing save before starting another.');
@@ -59,14 +60,15 @@ mustInclude(invoiceSaveIntent, 'canReuseInFlightSave', 'Save intent helper shoul
 mustInclude(builderApp, 'const actionInFlight = new Set();', 'Standalone builder should track non-save in-flight actions.');
 mustInclude(builderApp, 'async function runExclusiveToolAction', 'Standalone builder should expose a tool action guard.');
 mustInclude(builderApp, "runExclusiveToolAction('pdf-draft-import'", 'Standalone PDF draft import should be guarded.');
-mustInclude(builderApp, "runExclusiveToolAction('database-import'", 'Standalone DB import should be guarded.');
+mustInclude(builderIndex, 'Database restore unavailable', 'Standalone destructive DB restore should remain unavailable during live sessions.');
 
 mustInclude(recordsApp, 'const _recordActionsInFlight = new Set();', 'Standalone records should track in-flight actions.');
 mustInclude(recordsApp, 'async function runRecordAction', 'Standalone records should expose a record action guard.');
-mustInclude(recordsApp, '`duplicate-document:${id}`', 'Standalone duplicate should be keyed by id.');
-mustInclude(recordsApp, '`convert-document:${id}`', 'Standalone convert should be keyed by id.');
-mustInclude(recordsApp, '`archive-document:${id}`', 'Standalone archive should be keyed by id.');
-mustInclude(recordsApp, '`restore-document:${id}`', 'Standalone restore should be keyed by id.');
+mustInclude(recordsApp, 'function recordActionKey(id)', 'Standalone record actions should share a record-level conflict key.');
+mustInclude(recordsApp, 'return `document:${Number(id || 0)}`;', 'Standalone record actions should be keyed by record id.');
+mustInclude(recordsApp, "return runRecordAction(id, 'Another action for this record is already in progress.'", 'Standalone duplicate should use the record-level guard.');
+mustInclude(recordsApp, "return runRecordAction(id, 'Another action for this estimate is already in progress.'", 'Standalone conversion should use the record-level guard.');
+mustInclude(recordsApp, 'return runRecordAction(id, `Another action for ${label} is already in progress.`', 'Standalone archive and restore should use the record-level guard.');
 
 console.log(JSON.stringify({
   RapidSubmitBehavior: 'pass',

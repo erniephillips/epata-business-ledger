@@ -1243,6 +1243,9 @@ table.li-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 
 /* Copy pills */
 .copy-pill {
+  width: 100%;
+  font-family: inherit;
+  text-align: left;
   background: #f8fafc;
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -1871,11 +1874,15 @@ select.status-select { font-weight: 600; }
   }
   .ai-assistant-status { grid-template-columns: 1fr; }
   .ai-assistant-grid {
-    grid-template-columns: 1fr;
-    overflow: auto;
+    display: block;
+    overflow-x: hidden;
+    overflow-y: auto;
   }
   .ai-assistant-source,
-  .ai-assistant-work { overflow: visible; }
+  .ai-assistant-work {
+    min-height: auto;
+    overflow: visible;
+  }
   .ai-assistant-source {
     border-right: 0;
     border-bottom: 1px solid var(--line);
@@ -1935,6 +1942,29 @@ select.status-select { font-weight: 600; }
     width: auto;
     min-width: 46px;
   }
+  /* The merged ledger shell reuses nav-item buttons in a compact tab rail.
+     A wrapped grid keeps every destination visible and prevents labels from
+     shrinking into each other or leaving a clipped partial button. */
+  .invoice-tool-merged .merged-tabs .nav-item {
+    width: 100%;
+    min-width: 0;
+    justify-content: center;
+  }
+  .invoice-tool-merged .merged-tabs {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    overflow-x: visible;
+  }
+  /* Builder commands are primary actions, not a data table.  Two tidy columns
+     are clearer on a phone than hiding part of the next command off-screen. */
+  .invoice-tool-merged .view-actions {
+    flex-wrap: wrap;
+    overflow-x: visible;
+  }
+  .invoice-tool-merged .view-actions > * {
+    flex: 1 1 calc(50% - 4px);
+    justify-content: center;
+  }
   .difficulty-grid {
     grid-template-columns: 1fr;
   }
@@ -1962,6 +1992,12 @@ select.status-select { font-weight: 600; }
   .ai-chat-message.assistant {
     margin-left: 0;
     margin-right: 0;
+  }
+}
+
+@media (max-width: 360px) {
+  .invoice-tool-merged .merged-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

@@ -6,6 +6,8 @@ public class InvoiceDocument
 {
     public int Id { get; set; }
 
+    public int? SourceEstimateId { get; set; }
+
     [MaxLength(80)]
     public string? DocNumber { get; set; }
 

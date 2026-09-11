@@ -53,23 +53,28 @@ if ($LASTEXITCODE -ne 0) {
   exit $LASTEXITCODE
 }
 
+$stageExePath = Join-Path $stageDir "EPATA.BusinessLedger.exe"
+if (-not (Test-Path -LiteralPath $stageExePath)) {
+  throw "Publish completed but no executable was found in the staging folder: $stageExePath"
+}
+
 Set-Content -LiteralPath (Join-Path $stageRoot "latest-stage.txt") -Value $stageDir -Encoding UTF8
 
 try {
   Copy-Item -Path (Join-Path $stageDir "*") -Destination $publishDir -Recurse -Force
 } catch {
-  Write-Warning "Published build succeeded, but Windows/OneDrive blocked copying EPATA.BusinessLedger.exe into $publishDir."
-  Write-Warning "The staged executable remains available at $(Join-Path $stageDir 'EPATA.BusinessLedger.exe')."
+  throw "Published build succeeded, but Windows/OneDrive blocked copying it into $publishDir. Stop the running EPATA app and publish again. The staged executable remains at $stageExePath. $($_.Exception.Message)"
 }
 
-if (Test-Path -LiteralPath $exePath) {
-  Write-Host "Published to $publishDir"
-  Write-Host "Run $exePath"
-} else {
-  $stageExePath = Join-Path $stageDir "EPATA.BusinessLedger.exe"
-  if (-not (Test-Path -LiteralPath $stageExePath)) {
-    throw "Publish completed but no executable was found in $publishDir or $stageDir."
-  }
-  Write-Host "Published to staging folder $stageDir"
-  Write-Host "Run $stageExePath"
+if (-not (Test-Path -LiteralPath $exePath)) {
+  throw "The staged build was created, but the canonical executable is missing: $exePath"
 }
+
+$stageHash = (Get-FileHash -LiteralPath $stageExePath -Algorithm SHA256).Hash
+$publishedHash = (Get-FileHash -LiteralPath $exePath -Algorithm SHA256).Hash
+if (-not $stageHash.Equals($publishedHash, [System.StringComparison]::OrdinalIgnoreCase)) {
+  throw "The canonical executable does not match the staged build. Stop the running EPATA app and publish again. Staged: $stageExePath. Canonical: $exePath."
+}
+
+Write-Host "Published to $publishDir"
+Write-Host "Run $exePath"

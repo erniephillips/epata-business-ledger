@@ -2,7 +2,7 @@
 //  EPATA Invoice Tool — Pricing Calculator
 // ═══════════════════════════════════════════════════════
 
-import { el, money, plainMoney } from './utils.js';
+import { el, money, plainMoney } from './utils.js?v=5';
 
 const INPUT_IDS = [
   'grams','hours','designHours','setupFee','postFee',
@@ -19,24 +19,18 @@ const CALCULATOR_LINE_DESCRIPTIONS = [
   'Material / difficulty surcharge',
   'Minimum charge adjustment',
 ];
+const initializedCalculatorRoots = new WeakSet();
 
 export function initCalculator() {
+  const root = el('view-calculator');
+  if (root && initializedCalculatorRoots.has(root)) return;
+  if (root) initializedCalculatorRoots.add(root);
   const run = () => calculate();
   INPUT_IDS.forEach(id => {
     const node = el(id);
     if (!node) return;
     node.addEventListener('input', run);
     node.addEventListener('change', run);
-  });
-
-  // Wire difficulty preset cards (ABS, Nylon, Exotic, PLA)
-  document.querySelectorAll('#difficultyGrid .diff-card').forEach(btn => {
-    btn.addEventListener('click', () => {
-      document.querySelectorAll('#difficultyGrid .diff-card').forEach(b => b.classList.remove('active'));
-      btn.classList.add('active');
-      const hidden = el('difficulty');
-      if (hidden) { hidden.value = btn.dataset.val; hidden.dispatchEvent(new Event('change')); }
-    });
   });
 
   syncDifficultyButtons();
@@ -282,8 +276,14 @@ export function pushToBuilder(calc, lineItemsFn, addLineItemFn, context = {}) {
 
   Array.from(tbody.querySelectorAll('tr')).forEach(row => {
     const desc = row.querySelector('.item-desc')?.value?.trim() || '';
+    const details = row.querySelector('.item-details')?.value?.trim() || '';
+    const quantityText = row.querySelector('.item-qty')?.value?.trim() || '';
+    const rateText = row.querySelector('.item-rate')?.value?.trim() || '';
     const isSelectedProductRow = productName && desc.toLowerCase() === productName.toLowerCase();
-    if (row.dataset.source === 'calculator' || calcDescriptions.has(desc) || isSelectedProductRow) {
+    const isPristinePlaceholder = !desc && !details &&
+      (!quantityText || Number(quantityText) === 1) &&
+      (!rateText || Number(rateText) === 0);
+    if (row.dataset.source === 'calculator' || calcDescriptions.has(desc) || isSelectedProductRow || isPristinePlaceholder) {
       row.remove();
     }
   });

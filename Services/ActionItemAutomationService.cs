@@ -11,6 +11,7 @@ public sealed class ActionItemAutomationService(
     AiOperationsService operations)
 {
     private const string AutomationKeyPrefix = "AUTOMATION KEY:";
+    private static readonly SemaphoreSlim SyncGate = new(1, 1);
 
     public async Task<ActionItemAutomationPreview> PreviewAsync(CancellationToken cancellationToken = default)
     {
@@ -34,22 +35,30 @@ public sealed class ActionItemAutomationService(
 
     public async Task<ActionItemAutomationSyncResult> SyncAsync(CancellationToken cancellationToken = default)
     {
-        var preview = await PreviewAsync(cancellationToken);
-        var created = preview.Candidates
-            .Where(candidate => !candidate.AlreadyOpen)
-            .Select(ToActionItem)
-            .ToList();
-
-        db.ActionItems.AddRange(created);
-        await db.SaveChangesAsync(cancellationToken);
-
-        return new ActionItemAutomationSyncResult
+        await SyncGate.WaitAsync(cancellationToken);
+        try
         {
-            Receipt = Receipt(),
-            CreatedCount = created.Count,
-            SkippedExistingCount = preview.AlreadyOpenCount,
-            Created = created
-        };
+            var preview = await PreviewAsync(cancellationToken);
+            var created = preview.Candidates
+                .Where(candidate => !candidate.AlreadyOpen)
+                .Select(ToActionItem)
+                .ToList();
+
+            db.ActionItems.AddRange(created);
+            await db.SaveChangesAsync(cancellationToken);
+
+            return new ActionItemAutomationSyncResult
+            {
+                Receipt = Receipt(),
+                CreatedCount = created.Count,
+                SkippedExistingCount = preview.AlreadyOpenCount,
+                Created = created
+            };
+        }
+        finally
+        {
+            SyncGate.Release();
+        }
     }
 
     private async Task<(List<ActionItemAutomationCandidate> Candidates, int ReviewCount, int ReconciliationCount)> BuildCandidatesAsync(

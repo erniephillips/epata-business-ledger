@@ -2,7 +2,7 @@
 //  EPATA Invoice Tool — Document Builder
 // ═══════════════════════════════════════════════════════
 
-import { el, val, money, textVal, setVal, todayStr, escapeHtml } from './utils.js';
+import { el, val, money, textVal, setVal, todayStr, escapeHtml } from './utils.js?v=5';
 
 const FORM_FIELD_IDS = [
   'docType','pageSize','docNumber','docDate','dueDate',
@@ -16,6 +16,7 @@ const FORM_FIELD_IDS = [
 ];
 
 const UNPAID_INVOICE_STATUSES = new Set(['Draft', 'Sent']);
+const initializedBuilderRoots = new WeakSet();
 
 const DEFAULT_PRICING_GUIDE = `Print-Only Jobs
 - $15 minimum, or setup + material + machine time
@@ -48,8 +49,9 @@ export function statusOptionsForDocType(type) {
 }
 
 export function remapStatusForDocType(type, current) {
-  if (type === 'INVOICE' && current === 'Accepted') return 'Paid';
-  if (type === 'ESTIMATE' && (current === 'Paid' || current === 'Partial')) return 'Accepted';
+  // Changing document type must never invent a payment or acceptance event.
+  if (type === 'INVOICE' && current === 'Accepted') return 'Draft';
+  if (type === 'ESTIMATE' && (current === 'Paid' || current === 'Partial')) return 'Draft';
   return statusOptionsForDocType(type).some(([value]) => value === current) ? current : 'Draft';
 }
 
@@ -84,6 +86,9 @@ export function planDocTypeChange(type, current = {}) {
 }
 
 export function initBuilder() {
+  const root = el('view-builder');
+  if (root && initializedBuilderRoots.has(root)) return;
+  if (root) initializedBuilderRoots.add(root);
   FORM_FIELD_IDS.forEach(id => {
     const node = el(id);
     if (!node) return;
@@ -113,16 +118,16 @@ export function buildLineItemRowHtml(item = {}) {
   return `
     <td class="li-num"></td>
     <td class="li-desc">
-      <textarea class="item-desc" placeholder="Description…" oninput="window._builderUpdate()">${escapeHtml(item.desc ?? item.description ?? '')}</textarea>
+      <textarea class="item-desc" aria-label="Line item description" placeholder="Description…" oninput="window._builderUpdate()">${escapeHtml(item.desc ?? item.description ?? '')}</textarea>
     </td>
     <td class="li-details">
-      <textarea class="item-details" placeholder="Details / notes…" oninput="window._builderUpdate()">${escapeHtml(item.details ?? '')}</textarea>
+      <textarea class="item-details" aria-label="Line item details" placeholder="Details / notes…" oninput="window._builderUpdate()">${escapeHtml(item.details ?? '')}</textarea>
     </td>
     <td class="li-qty">
-      <input class="item-qty" type="number" min="0" step="0.01" value="${item.qty ?? 1}" oninput="window._builderUpdate()" />
+      <input class="item-qty" aria-label="Line item quantity" type="number" min="0" step="0.01" value="${escapeHtml(item.qty ?? 1)}" oninput="window._builderUpdate()" />
     </td>
     <td class="li-rate">
-      <input class="item-rate" type="number" min="0" step="0.01" value="${item.rate ?? 0}" oninput="window._builderUpdate()" />
+      <input class="item-rate" aria-label="Line item rate" type="number" min="0" step="0.01" value="${escapeHtml(item.rate ?? 0)}" oninput="window._builderUpdate()" />
     </td>
     <td class="li-amount num">$0.00</td>
     <td class="li-del">
@@ -158,7 +163,7 @@ function renumber() {
 }
 
 export function getLineItems() {
-  return Array.from(document.querySelectorAll('#lineItemsBody tr')).map((row, i) => {
+  const items = Array.from(document.querySelectorAll('#lineItemsBody tr')).map(row => {
     const desc    = row.querySelector('.item-desc')?.value?.trim()    ?? '';
     const details = row.querySelector('.item-details')?.value?.trim() ?? '';
     const qty     = clamp(row.querySelector('.item-qty')?.value);
@@ -169,8 +174,9 @@ export function getLineItems() {
     const amtCell = row.querySelector('.li-amount');
     if (amtCell) amtCell.textContent = money(amount);
 
-    return { sortOrder: i, description: desc, details, quantity: qty, rate, amount };
+    return { description: desc, details, quantity: qty, rate, amount };
   }).filter(li => li.description || li.details || li.quantity || li.rate);
+  return items.map((item, index) => ({ ...item, sortOrder: index + 1 }));
 }
 
 function clamp(v) {
@@ -231,6 +237,10 @@ export function updateTotals() {
   const isUnpaid = isInvoice && isUnpaidInvoiceStatus(closedStatus);
 
   if (isPaid) setVal('amountPaid', totals.total.toFixed(2));
+  else if (isInvoice && closedStatus === 'Partial') {
+    const enteredPaid = Number(el('amountPaid')?.value || 0);
+    if (enteredPaid < 0 || enteredPaid > totals.total) setVal('amountPaid', normalizePaidInput(totals.amountPaid));
+  }
   else if (!isInvoice || isVoid || isUnpaid) setVal('amountPaid', '0');
 
   setText('bSubtotal',  money(totals.subtotal));

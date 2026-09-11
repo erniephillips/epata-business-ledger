@@ -21,6 +21,9 @@ public class AuditDocument : AuditableEntity
     [MaxLength(400)]
     public string? FilePathOrUrl { get; set; }
 
+    [MaxLength(64)]
+    public string? UploadFingerprint { get; set; }
+
     public bool NeedsReview { get; set; }
     public string? Notes { get; set; }
 }

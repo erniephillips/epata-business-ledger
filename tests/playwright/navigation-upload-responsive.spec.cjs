@@ -53,7 +53,7 @@ test.describe('navigation, upload controls, and responsive browser checks', () =
     test.skip(testInfo.project.name !== 'chromium-desktop', 'This spec sets its own desktop/laptop/mobile viewports.');
   });
 
-  test('document intake and standalone invoice import buttons expose real file inputs', async ({ page }) => {
+  test('document intake, invoice PDF import, and safe database backup controls are wired', async ({ page }) => {
     const failures = collectBrowserFailures(page);
 
     await page.goto('/');
@@ -62,6 +62,43 @@ test.describe('navigation, upload controls, and responsive browser checks', () =
     await expect(page.locator('#docFiles')).toHaveAttribute('type', 'file');
     await expect(page.locator('#docFiles')).toHaveAttribute('multiple', '');
     await expect(page.locator('#uploadDocsBtn')).toBeVisible();
+    await expect(page.locator('#relatedTypeTrigger')).toContainText('Smart intake');
+    await expect(page.locator('#relatedTypeTrigger')).toContainText('Recommended for Etsy PDFs');
+    await page.locator('#relatedTypeTrigger').click();
+    await expect(page.locator('.descriptive-select-divider')).toContainText(['Automatic routing', 'Money coming in', 'Money going out', 'Work, people & records']);
+    const saleChoice = page.locator('[data-related-area="Sale"]');
+    await expect(saleChoice).toContainText('A customer already paid you');
+    const saleChoiceStyles = await saleChoice.evaluate(element => {
+      const style = getComputedStyle(element);
+      const title = element.querySelector('strong').getBoundingClientRect();
+      const description = element.querySelector('small').getBoundingClientRect();
+      const menuElement = element.closest('.descriptive-select-menu');
+      const menu = menuElement.getBoundingClientRect();
+      const uploadButton = document.querySelector('#uploadDocsBtn').getBoundingClientRect();
+      return {
+        alignItems: style.alignItems,
+        borderRadius: style.borderRadius,
+        justifyContent: style.justifyContent,
+        justifyItems: style.justifyItems,
+        textAlign: style.textAlign,
+        copyAligned: Math.abs(title.left - description.left) < 1,
+        menuPosition: getComputedStyle(menuElement).position,
+        menuClearsUploadButton: menu.bottom <= uploadButton.top,
+      };
+    });
+    expect(saleChoiceStyles).toEqual({
+      alignItems: 'start',
+      borderRadius: '0px',
+      justifyContent: 'stretch',
+      justifyItems: 'start',
+      textAlign: 'left',
+      copyAligned: true,
+      menuPosition: 'static',
+      menuClearsUploadButton: true,
+    });
+    await saleChoice.click();
+    await expect(page.locator('#relatedType')).toHaveValue('Sale');
+    await expect(page.locator('#relatedTypeTrigger')).toContainText('including a completed Etsy order');
     await page.locator('#uploadDocsBtn').click();
     await expect(page.locator('#toast-container')).toContainText('Choose a file first.');
 
@@ -71,7 +108,12 @@ test.describe('navigation, upload controls, and responsive browser checks', () =
     await page.locator('button.nav-item[data-view="records"]').click();
     await expect(page.locator('#view-records')).toBeVisible();
     await expect(page.locator('#invoicePdfImportFile')).toHaveAttribute('accept', /pdf/i);
-    await expect(page.locator('#importDbFile')).toHaveAttribute('accept', /sqlite|db/i);
+    await expect(page.locator('#importDbFile')).toHaveCount(0);
+
+    const restoreUnavailable = page.locator('#view-records').getByRole('button', { name: 'Database restore unavailable' });
+    await expect(restoreUnavailable).toBeDisabled();
+    await expect(restoreUnavailable).toHaveAttribute('aria-disabled', 'true');
+    await expect(restoreUnavailable).toHaveAttribute('title', /disabled.*replacing the live ledger.*Download Backup/i);
 
     await page.locator('#invoicePdfImportFile').evaluate(input => {
       input.dataset.clickedByVisibleButton = 'false';
@@ -82,14 +124,102 @@ test.describe('navigation, upload controls, and responsive browser checks', () =
     await page.locator('#btnImportPdfDraft').click();
     await expect(page.locator('#invoicePdfImportFile')).toHaveAttribute('data-clicked-by-visible-button', 'true');
 
-    await page.locator('#importDbFile').evaluate(input => {
-      input.dataset.clickedByVisibleButton = 'false';
-      input.click = function markClicked() {
-        this.dataset.clickedByVisibleButton = 'true';
-      };
+    const backupDownload = page.waitForEvent('download');
+    await page.locator('#btnExportDb').click();
+    const download = await backupDownload;
+    expect(download.suggestedFilename()).toMatch(/\.(db|sqlite|zip)$/i);
+
+    expect(failures).toEqual([]);
+  });
+
+  test('document intake upload results survive Open Job and Open Proof back navigation', async ({ page }) => {
+    const failures = collectBrowserFailures(page);
+    const orderNumber = 'PW-INTAKE-RESTORE-001';
+    const auditDocument = {
+      id: 91001,
+      documentDate: '2026-09-10T00:00:00',
+      documentType: 'Etsy Order',
+      relatedRecordType: 'Sale',
+      relatedRecordNumber: orderNumber,
+      fileName: 'playwright-intake-restore.txt',
+      filePathOrUrl: 'UploadedDocs/playwright-intake-restore.txt',
+      needsReview: false,
+      notes: 'Synthetic browser-only intake result.',
+    };
+    const uploadResult = {
+      count: 1,
+      documents: [auditDocument],
+      suggestions: [],
+      marketplaceImports: [{
+        recognized: true,
+        action: 'Created',
+        message: `Created and linked Etsy order ${orderNumber}.`,
+        usedAi: false,
+        sale: {
+          id: 92001,
+          platform: 'Etsy',
+          orderNumber,
+          customerName: 'Playwright Intake Customer',
+          productName: 'Playwright Intake Fixture',
+          customerPaid: 24.50,
+          needsReview: true,
+        },
+        job: {
+          id: 93001,
+          relatedOrderNumber: orderNumber,
+          jobName: 'Playwright Intake Fixture',
+        },
+        customer: {
+          id: 94001,
+          name: 'Playwright Intake Customer',
+        },
+        auditDocument,
+        warnings: [],
+      }],
+      marketplaceCreated: 1,
+      marketplaceLinked: 0,
+      marketplaceNeedsReview: 0,
+    };
+
+    await page.route('**/api/documents/upload', route => route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(uploadResult),
+    }));
+
+    await page.goto('/');
+    await page.locator('button.nav-button[data-page="documentIntake"]').click();
+    await expectReady(page);
+    await page.locator('#docFiles').setInputFiles({
+      name: auditDocument.fileName,
+      mimeType: 'text/plain',
+      buffer: Buffer.from('Synthetic browser fixture; the upload API response is mocked.'),
     });
-    await page.getByRole('button', { name: /import db/i }).click();
-    await expect(page.locator('#importDbFile')).toHaveAttribute('data-clicked-by-visible-button', 'true');
+    await page.locator('#uploadDocsBtn').click();
+
+    const restoredResult = page.locator('#uploadResult');
+    const marketplaceCard = () => page.locator('#uploadResult .assistant-suggestion-card').filter({ hasText: orderNumber });
+    await expect(restoredResult).toContainText('Uploaded and indexed 1 document');
+    await expect(marketplaceCard()).toContainText(orderNumber);
+    await expect(marketplaceCard()).toContainText('Playwright Intake Fixture');
+    await expect(page.locator('#docFiles')).toHaveValue('');
+
+    for (const destination of [
+      { buttonName: /^Open Jobs?$/, heading: 'Customer Jobs', back: 'app' },
+      { buttonName: /^Open Proof$/, heading: 'Audit Docs / Proof Index', back: 'browser' },
+    ]) {
+      await marketplaceCard().getByRole('button', { name: destination.buttonName }).click();
+      await expectReady(page);
+      await expect(page.locator('#app h2').first()).toContainText(destination.heading);
+      await expect(page.locator('#appBackBtn')).toBeVisible();
+      if (destination.back === 'browser') await page.goBack();
+      else await page.locator('#appBackBtn').click();
+      await expectReady(page);
+      await expect(page.locator('#app h2').first()).toContainText('Document Intake');
+      await expect(restoredResult).toContainText('Uploaded and indexed 1 document');
+      await expect(marketplaceCard()).toContainText(orderNumber);
+      await expect(marketplaceCard()).toContainText('Playwright Intake Fixture');
+    }
 
     expect(failures).toEqual([]);
   });

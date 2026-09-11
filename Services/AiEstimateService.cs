@@ -576,7 +576,7 @@ public sealed class AiEstimateService(HttpClient httpClient, IConfiguration conf
             {
                 parts.Add(await FetchSourcePageTextAsync(uri, cancellationToken));
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
             {
                 warnings.Add($"Could not read source page {uri}: {Trim(ex.Message, 180)}");
                 parts.Add($"""

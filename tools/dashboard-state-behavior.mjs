@@ -130,7 +130,7 @@ assert.ok(appSource.includes('EpataDashboardState?.createDashboardRenderer'), 'D
 for (const key of ['grossReceipts', 'estimatedNet', 'openReceivables', 'openPayables', 'customerPaid', 'salesTaxMemo', 'knownCosts', 'needsReview']) {
   assert.ok(appSource.includes(`'${key}'`), `Dashboard should pass ${key} into a breakdown-enabled KPI/control.`);
 }
-assert.ok(appSource.includes("openDashboardBreakdown('${escapeAttr(breakdownKey)}')"), 'KPI buttons should call openDashboardBreakdown with the escaped key.');
+assert.ok(appSource.includes('openDashboardBreakdown(${jsStringAttr(breakdownKey)})'), 'KPI buttons should call openDashboardBreakdown with an attribute-safe JavaScript string.');
 assert.ok(appSource.includes('role="img" aria-label="Revenue and net trend chart"'), 'Line chart should expose an accessible rendered chart surface.');
 assert.ok(appSource.includes("emptyState('No chart data yet.'"), 'Line chart should handle no-row chart data.');
 assert.ok(appSource.includes("emptyState('No money mix yet.'"), 'Donut chart should handle all-zero money mix data.');

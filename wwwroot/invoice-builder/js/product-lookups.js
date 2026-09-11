@@ -1,4 +1,4 @@
-import { escapeHtml, money } from './utils.js?v=4';
+import { escapeHtml, money } from './utils.js?v=5';
 
 export function buildProductOptionsHtml(products = []) {
   return products.map(product => {

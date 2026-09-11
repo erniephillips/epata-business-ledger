@@ -39,7 +39,7 @@ const indexSource = await readFile(new URL('../wwwroot/index.html', import.meta.
 
 const expectedGroups = [
   ['Command', ['dashboard', 'quickAdd', 'estimates', 'invoices', 'pricingCalculator', 'invoiceRecords', 'jobTimeline', 'aiEstimate', 'aiOperations', 'documentIntake']],
-  ['Books', ['sales', 'receivables', 'bills', 'expenses', 'accounts']],
+  ['Books', ['sales', 'receivables', 'bills', 'expenses', 'orderLosses', 'accounts']],
   ['Operations', ['customerJobs', 'communications', 'printerQueue', 'customers', 'vendors', 'products', 'assets', 'makerworld']],
   ['Control', ['aiReview', 'localAi', 'auditDocs', 'actions', 'taxPrep', 'taxObligations', 'mileage', 'importExport', 'admin', 'ledgerMap', 'workflowGuide', 'help']],
 ];

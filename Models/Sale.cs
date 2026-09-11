@@ -1,9 +1,15 @@
 using System.ComponentModel.DataAnnotations;
+using System.Text.Json.Serialization;
 
 namespace EPATA.BusinessLedger.Models;
 
 public class Sale : AuditableEntity
 {
+    public int? SourceReceivableInvoiceId { get; set; }
+
+    [JsonIgnore]
+    public ReceivableInvoice? SourceReceivableInvoice { get; set; }
+
     public DateTime? SaleDate { get; set; }
 
     [MaxLength(80)]

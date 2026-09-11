@@ -6,39 +6,54 @@
 import { api }                                    from './api.js?v=6';
 import { el, toast, money, setVal, textVal,
          fmtDateTime, statusBadge, typeBadge,
-         debounce, escapeHtml, todayStr }         from './utils.js?v=4';
+         debounce, escapeHtml, todayStr }         from './utils.js?v=5';
 import { initCalculator, calculate, getCalcState,
          restoreCalcState, pushToBuilder, buildDefaultCalculatorState,
-         applyConfigDefaults, syncDifficultyButtons } from './calculator.js?v=5';
+         syncDifficultyButtons } from './calculator.js?v=6';
 import { initBuilder, addLineItem, removeLineItem,
          getLineItems, updateTotals, captureState,
          restoreState, getFormData, newDocument,
-         remapStatusForDocType } from './builder.js?v=12';
+         remapStatusForDocType } from './builder.js?v=13';
 import { initRecords, refreshRecords, loadRecord,
          duplicateRecord, deleteRecord, exportCsv,
          getRecords, convertEstimateToInvoice,
-         restoreRecord }                          from './records.js?v=12';
-import { buildSaveRequestPlan, canReuseInFlightSave, getSaveIntent } from './save-intent.js?v=2';
+         restoreRecord, isRecordActionInFlight }  from './records.js?v=13';
+import { buildSaveRequestPlan, canReuseInFlightSave, getSaveIntent } from './save-intent.js?v=3';
 import { activeRecordBarText, buildSaveFailureUiState,
          emptyActiveRecordIdentity, identityAfterArchivedRecord,
-         identityFromDocument, normalizeActiveRecordIdentity } from './document-session.js?v=1';
-import { generatePdf, renderInvoiceHtml }         from './pdf.js?v=5';
+         identityFromDocument, normalizeActiveRecordIdentity } from './document-session.js?v=2';
+import { generatePdf, openPdfWindow, renderInvoiceHtml } from './pdf.js?v=6';
 import { buildProductOptionsHtml, buildSelectedProductPatch,
          findProductByName }                      from './product-lookups.js?v=1';
 import { initInputValidation, normalizeDocumentInputs, normalizeSettingsInputs,
          validateCalculatorInputs, validateDocumentInputs,
-         validateSettingsInputs } from './validation.js?v=4';
+         validateSettingsInputs } from './validation.js?v=5';
 
 // ── State ─────────────────────────────────────────────
 let activeRecordId  = null;
 let activeRecordType = null;
 let activeRecordNumber = null;
+let activeRecordUpdatedAt = null;
 let apiReady        = false;
 let appConfig       = {};
 let autoSaveTimer   = null;
+let autoSaveClearTimer = null;
 let saveInFlight    = null;
 let saveInFlightIntent = null;
+let saveInFlightSessionVersion = null;
+let saveInFlightEditRevision = null;
+let queuedSaveRequest = null;
+let settingsSaveInFlight = null;
+let settingsSaveInFlightBody = null;
+let queuedSettingsSaveBody = null;
 let documentSessionVersion = 0;
+let documentEditRevision = 0;
+let lastSavedEditRevision = 0;
+let documentIntentVersion = 0;
+let suppressEditTracking = 0;
+let initVersion = 0;
+let initAbortController = null;
+let aiAssistantOperationVersion = 0;
 let productLookups  = [];
 const actionInFlight = new Set();
 const AUTOSAVE_MS   = 30_000;
@@ -68,8 +83,14 @@ async function runExclusiveToolAction(key, busyMessage, action) {
 
 // ── Init ──────────────────────────────────────────────
 export async function init(initialView = 'dashboard') {
+  const thisInitVersion = ++initVersion;
+  initAbortController?.abort();
+  initAbortController = new AbortController();
+  const { signal } = initAbortController;
   const options = typeof initialView === 'object' && initialView !== null ? initialView : {};
   if (typeof initialView === 'object' && initialView !== null) initialView = options.initialView || 'dashboard';
+  const startupDocType = requestedStartupDocumentType(options);
+  if (startupDocType) setVal('docType', startupDocType);
 
   // Expose global handlers for inline onclick attributes
   window._builderUpdate  = () => { updateTotals(); refreshInvoicePreview(); scheduleAutoSave(); };
@@ -83,6 +104,8 @@ export async function init(initialView = 'dashboard') {
   window._invoiceToolSnapshot = createDocumentSnapshot;
   window._invoiceToolShowView = showView;
   window._invoiceToolIsSaving = () => !!saveInFlight;
+  window._invoiceToolIsDirty = isDocumentDirty;
+  window._invoiceToolDispose = dispose;
 
   // Override the shim — expose addLineItem globally for onclick handlers
   window.addLineItem     = addLineItemAndRefresh;
@@ -90,26 +113,24 @@ export async function init(initialView = 'dashboard') {
 
   // Nav
   document.querySelectorAll('.nav-item[data-view]').forEach(btn =>
-    btn.addEventListener('click', () => showView(btn.dataset.view)));
+    btn.addEventListener('click', () => showView(btn.dataset.view), { signal }));
 
   // Buttons
   on('btnNewEstimate',  () => startNew('ESTIMATE'));
   on('btnNewInvoice',   () => startNew('INVOICE'));
-  on('btnSaveDraft',    () => saveRecord(false));
-  on('btnSaveNew',      () => saveRecord(true));
+  on('btnSaveDraft',    () => void saveRecord(false).catch(() => {}), signal);
+  on('btnSaveNew',      () => void saveRecord(true).catch(() => {}), signal);
   on('btnDownloadPdf',  () => onGeneratePdf(false));
   on('btnPreviewPdf',   () => onGeneratePdf(true));
   on('btnPushToBuilder',     () => onPushToBuilder());
   on('btnPushToBuilderCard', () => onPushToBuilder());
   on('btnExportDb',     () => { window.location.href = api.backupUrl(); });
-  on('btnImportDb',     () => el('importDbFile')?.click());
   on('btnExportCsv',    () => exportCsv());
-  on('importDbFile',    (e) => onImportDb(e));
   on('btnImportPdfDraft', () => el('invoicePdfImportFile')?.click());
   on('invoicePdfImportFile', (e) => onImportPdfDraft(e));
   on('btnSaveSettings', () => saveSettings());
   document.querySelectorAll('[data-ai-assistant-open]').forEach(button =>
-    button.addEventListener('click', () => openAiAssistantModal()));
+    button.addEventListener('click', () => openAiAssistantModal(), { signal }));
 
   // Records init
   initRecords({ onLoad: onDocumentLoaded, onNew: startNew });
@@ -117,11 +138,21 @@ export async function init(initialView = 'dashboard') {
   // Builder & calculator init
   initBuilder();
   initCalculator();
-  initInputValidation();
-  wireLiveCalculationUpdates();
+  initInputValidation(signal);
+  wireLiveCalculationUpdates(signal);
+
+  // The builder is interactive as soon as it is rendered. Establish a complete
+  // draft before the first await so an immediate Ctrl+S always has valid dates
+  // and a line item, and so late startup work never has to recreate the form.
+  const startupDocument = initializeStartupDocument(options, startupDocType);
+  // Establish the requested route before the first awaited startup call.  If this
+  // is deferred until the end of initialization, a quick user navigation can be
+  // overwritten by the late startup continuation (for example Builder snapping
+  // back to Dashboard once config/records finish loading).
+  showView(initialView, { notify: false });
   const builderView = el('view-builder');
-  builderView?.addEventListener('input', debounce(refreshInvoicePreview, 150));
-  builderView?.addEventListener('change', debounce(refreshInvoicePreview, 150));
+  builderView?.addEventListener('input', debounce(refreshInvoicePreview, 150), { signal });
+  builderView?.addEventListener('change', debounce(refreshInvoicePreview, 150), { signal });
 
   // Keyboard shortcuts
   document.addEventListener('keydown', async (e) => {
@@ -146,16 +177,24 @@ export async function init(initialView = 'dashboard') {
       e.stopPropagation();
       startNew('ESTIMATE');
     }
-  });
+  }, { signal });
+
+  window.addEventListener('beforeunload', event => {
+    if (!isDocumentDirty()) return;
+    event.preventDefault();
+    event.returnValue = '';
+  }, { signal });
 
   // Connect to server. Only health decides whether saving is available;
   // config/latest/dashboard failures should not make Ctrl+S think the app is offline.
   setDbStatus('Connecting…', 'loading');
   try {
     await api.health();
+    if (!isCurrentInit(thisInitVersion)) return;
     apiReady = true;
     setDbStatus('Ready', 'ready');
   } catch (err) {
+    if (!isCurrentInit(thisInitVersion)) return;
     apiReady = false;
     setDbStatus('Server offline', 'error');
     toast('Cannot connect to server. Is the app running?', 'error', 6000);
@@ -163,13 +202,22 @@ export async function init(initialView = 'dashboard') {
   }
 
   if (apiReady) {
+    // Resolve the server-assigned display number in parallel with the slower
+    // settings/records startup path. The merge is guarded by document session
+    // and current field value, so typing, opening another record, or saving the
+    // draft wins over this late response.
+    const startupNumberPromise = hydrateStartupDocumentNumber(startupDocument, thisInitVersion);
+
     // Load config
     try {
       appConfig = await api.getConfig();
+      if (!isCurrentInit(thisInitVersion)) return;
       applyConfigToSettings(appConfig);
-      applyConfigDefaults(appConfig);
+      mergeStartupCalculatorDefaults(startupDocument, appConfig);
       await loadProductLookups();
+      if (!isCurrentInit(thisInitVersion)) return;
     } catch (err) {
+      if (!isCurrentInit(thisInitVersion)) return;
       toast('Settings could not load. Saving still works.', 'error', 5000);
       console.error(err);
     }
@@ -177,29 +225,45 @@ export async function init(initialView = 'dashboard') {
     // Load records
     try {
       await refreshRecords();
+      if (!isCurrentInit(thisInitVersion)) return;
     } catch (err) {
+      if (!isCurrentInit(thisInitVersion)) return;
       toast('Records could not load. Saving still works.', 'error', 5000);
       console.error(err);
     }
 
-    if (options.restoreSnapshot) {
-      restoreDocumentSnapshot(options.restoreSnapshot);
-      setDbStatus(`Ready — ${activeRecordId ? 'editing' : 'draft'} ${textVal('docNumber') || 'document'}`, 'ready');
-    } else {
-      const startType = options.newType || 'ESTIMATE';
-      const num = await api.nextNumber(startType).then(r => r.number).catch(() => '');
-      clearActiveRecordIdentity();
-      startCleanDocument(startType, num);
-      applyDocumentPrefill(options.prefill);
-      setDbStatus(`Ready — new ${startType === 'INVOICE' ? 'invoice' : 'estimate'}`, 'ready');
+    await startupNumberPromise;
+    if (!isCurrentInit(thisInitVersion)) return;
+
+    if (isStartupDocumentCurrent(startupDocument) && !startupDocumentWasSaved(startupDocument)) {
+      setDbStatus(activeRecordId
+        ? `Ready — editing ${textVal('docNumber') || 'document'}`
+        : `Ready — new ${textVal('docType') === 'INVOICE' ? 'invoice' : 'estimate'}`, 'ready');
     }
 
     // Refresh dashboard stats
     await loadDashboardStats().catch(err => console.error('Dashboard stats error', err));
+    if (!isCurrentInit(thisInitVersion)) return;
   }
 
   refreshInvoicePreview();
-  showView(initialView);
+  if (isStartupDocumentCurrent(startupDocument)) {
+    notifyInvoiceViewChanged(currentInvoiceView() || initialView);
+  }
+}
+
+export function dispose() {
+  // The merged shell removes this DOM when navigating away. Invalidate every
+  // startup continuation first so a late health/config/records response cannot
+  // write into the next page, then remove all signal-bound global/DOM handlers.
+  initVersion += 1;
+  initAbortController?.abort();
+  initAbortController = null;
+  documentIntentVersion += 1;
+  aiAssistantOperationVersion += 1;
+  cancelPendingAutoSave();
+  el('aiAssistantModal')?.classList.add('hidden');
+  document.body.classList.remove('ai-assistant-open');
 }
 
 // ── Difficulty card global (called from inline onclick in index.html) ──
@@ -207,19 +271,180 @@ window.diffCardClick = function(btn) {
   document.querySelectorAll('#difficultyGrid .diff-card').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   const hidden = el('difficulty');
-  if (hidden) { hidden.value = btn.dataset.val; hidden.dispatchEvent(new Event('change')); }
+  if (hidden) { hidden.value = btn.dataset.val; hidden.dispatchEvent(new Event('change', { bubbles: true })); }
 };
 
 // ── View routing ──────────────────────────────────────
-export function showView(name) {
+export function showView(name, { notify = true } = {}) {
   document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
   document.querySelectorAll('.nav-item[data-view]').forEach(b => b.classList.remove('active'));
   el(`view-${name}`)?.classList.add('active');
   document.querySelector(`.nav-item[data-view="${name}"]`)?.classList.add('active');
-  if (name === 'dashboard') loadDashboardStats();
-  if (name === 'records')   refreshRecords();
+  if (name === 'dashboard') void loadDashboardStats();
+  if (name === 'records') {
+    void refreshRecords().catch(error => {
+      console.error('Records refresh failed', error);
+      toast('Records could not refresh. Try opening Records again.', 'error', 4200);
+    });
+  }
   if (name === 'builder')   refreshInvoicePreview();
+  if (notify) notifyInvoiceViewChanged(name);
   window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function notifyInvoiceViewChanged(view) {
+  window.dispatchEvent(new CustomEvent('epata:invoice-view-changed', {
+    detail: { view, docType: textVal('docType') || null },
+  }));
+}
+
+function currentInvoiceView() {
+  return document.querySelector('.view.active')?.id?.replace(/^view-/, '') || '';
+}
+
+function requestedStartupDocumentType(options = {}) {
+  const requested = options.newType
+    || options.prefill?.docType
+    || options.restoreSnapshot?.formData?.docType
+    || options.restoreSnapshot?.legacy?.formValues?.docType;
+  const normalized = String(requested || '').trim().toUpperCase();
+  return normalized === 'INVOICE' || normalized === 'ESTIMATE' ? normalized : '';
+}
+
+function initializeStartupDocument(options = {}, startupDocType = '') {
+  let restored = false;
+  if (options.restoreSnapshot) {
+    restored = restoreDocumentSnapshot(options.restoreSnapshot);
+    if (startupDocType && textVal('docType') !== startupDocType) {
+      setValAndNotify('docType', startupDocType, ['change']);
+    }
+  }
+
+  if (!restored) {
+    const type = startupDocType || 'ESTIMATE';
+    clearActiveRecordIdentity();
+    startCleanDocument(type, '');
+    applyDocumentPrefill(options.prefill);
+    updateActiveBar();
+  }
+
+  // Old snapshots can predate required dates. Repair those before exposing the
+  // form, but keep the repair dirty so it is not mistaken for persisted data.
+  const repairedDates = ensureStartupDocumentDates();
+  if (restored && repairedDates) markDocumentEdited();
+
+  const protectedCalculatorFields = new Set();
+  if (restored) {
+    Object.keys(getCalcState()).forEach(id => protectedCalculatorFields.add(id));
+  } else if (options.prefill) {
+    const prefillKeysByField = {
+      gramRate: 'calcGramRate',
+      hourRate: 'calcHourRate',
+      designRate: 'calcDesignRate',
+      setupFee: 'calcSetupFee',
+      postFee: 'calcPostFee',
+      minimum: 'calcMinimum',
+    };
+    Object.entries(prefillKeysByField).forEach(([field, prefillKey]) => {
+      if (Object.prototype.hasOwnProperty.call(options.prefill, prefillKey)) {
+        protectedCalculatorFields.add(field);
+      }
+    });
+  }
+
+  return {
+    sessionVersion: documentSessionVersion,
+    docType: textVal('docType') || startupDocType || 'ESTIMATE',
+    initialDocNumber: textVal('docNumber'),
+    initialActiveRecordId: activeRecordId,
+    needsNumber: !activeRecordId && !textVal('docNumber'),
+    calcBaseline: getCalcState(),
+    protectedCalculatorFields,
+    allowConfigDefaults: !restored,
+  };
+}
+
+function ensureStartupDocumentDates() {
+  const type = textVal('docType') || 'ESTIMATE';
+  let repaired = false;
+  suppressEditTracking += 1;
+  try {
+    if (!textVal('docDate')) {
+      setVal('docDate', todayStr(0));
+      repaired = true;
+    }
+    if (!textVal('dueDate')) {
+      setVal('dueDate', todayStr(type === 'INVOICE' ? 7 : 14));
+      repaired = true;
+    }
+  } finally {
+    suppressEditTracking = Math.max(0, suppressEditTracking - 1);
+  }
+  return repaired;
+}
+
+async function hydrateStartupDocumentNumber(startupDocument, thisInitVersion) {
+  if (!startupDocument?.needsNumber) return '';
+
+  let number = '';
+  try {
+    number = String((await api.nextNumber(startupDocument.docType))?.number || '').trim();
+  } catch (error) {
+    console.error('Next document number could not load during startup', error);
+    return '';
+  }
+
+  if (!number || !isCurrentInit(thisInitVersion) || !isStartupDocumentCurrent(startupDocument)) return '';
+  if (activeRecordId || textVal('docNumber') !== startupDocument.initialDocNumber) return '';
+
+  suppressEditTracking += 1;
+  try {
+    setVal('docNumber', number);
+  } finally {
+    suppressEditTracking = Math.max(0, suppressEditTracking - 1);
+  }
+  updateActiveBar();
+  refreshInvoicePreview();
+  return number;
+}
+
+function mergeStartupCalculatorDefaults(startupDocument, config = {}) {
+  if (!startupDocument?.allowConfigDefaults || !isStartupDocumentCurrent(startupDocument) || activeRecordId) return false;
+
+  const configKeysByField = {
+    gramRate: 'calcGramRate',
+    hourRate: 'calcHourRate',
+    designRate: 'calcDesignRate',
+    setupFee: 'calcSetupFee',
+    postFee: 'calcPostFee',
+    minimum: 'calcMinimum',
+  };
+  const current = getCalcState();
+  let changed = false;
+  Object.entries(configKeysByField).forEach(([field, configKey]) => {
+    if (startupDocument.protectedCalculatorFields.has(field) || config[configKey] == null) return;
+    if (String(current[field] ?? '') !== String(startupDocument.calcBaseline[field] ?? '')) return;
+    current[field] = config[configKey];
+    changed = true;
+  });
+  if (!changed) return false;
+
+  suppressEditTracking += 1;
+  try {
+    restoreCalcState(current);
+  } finally {
+    suppressEditTracking = Math.max(0, suppressEditTracking - 1);
+  }
+  refreshInvoicePreview();
+  return true;
+}
+
+function isStartupDocumentCurrent(startupDocument) {
+  return !!startupDocument && startupDocument.sessionVersion === documentSessionVersion;
+}
+
+function startupDocumentWasSaved(startupDocument) {
+  return !startupDocument?.initialActiveRecordId && !!activeRecordId;
 }
 
 // ── Dashboard ─────────────────────────────────────────
@@ -235,7 +460,7 @@ async function loadDashboardStats() {
     setText('statPaid',      s.paidCount);
 
     // Recent records table
-    const rows = getRecords().slice(0, 8);
+    const rows = getRecords().filter(record => !record.isArchived).slice(0, 8);
     const tbody = el('dashRecentBody');
     if (tbody) {
       tbody.innerHTML = rows.length ? rows.map(r => `
@@ -243,7 +468,7 @@ async function loadDashboardStats() {
           <td class="doc-number"><button class="record-link" type="button" onclick="${r.sourceKind === 'receivable' ? `window.openLedgerEntityRecord && window.openLedgerEntityRecord('receivables', ${r.sourceId || r.id})` : `window._loadRecord(${r.id})`}">${escapeHtml(r.docNumber || '—')}</button></td>
           <td>${typeBadge(r.docType)}</td>
           <td>${statusBadge(r.status||'Draft')}</td>
-          <td>${r.customerName||'—'}</td>
+          <td>${escapeHtml(r.customerName || '—')}</td>
           <td class="num">${money(r.total)}</td>
           <td class="muted">${fmtDateTime(r.updatedAt)}</td>
         </tr>`).join('')
@@ -258,8 +483,10 @@ async function loadDashboardStats() {
 function onDocumentLoaded(doc) {
   markDocumentSessionChanged();
   cancelPendingAutoSave();
-  // Restore form fields
-  restoreState({
+  suppressEditTracking += 1;
+  try {
+    // Restore form fields
+    restoreState({
     formValues: {
       docType:  doc.docType,
       docStatus: doc.status,
@@ -292,10 +519,10 @@ function onDocumentLoaded(doc) {
       desc: li.description, details: li.details,
       qty: li.quantity, rate: li.rate,
     })),
-  });
+    });
 
-  // Restore calculator
-  restoreCalcState({
+    // Restore calculator
+    restoreCalcState({
     grams: doc.calcGrams, hours: doc.calcHours,
     designHours: doc.calcDesignHours, setupFee: doc.calcSetupFee,
     postFee: doc.calcPostFee, gramRate: doc.calcGramRate,
@@ -303,33 +530,49 @@ function onDocumentLoaded(doc) {
     minimum: doc.calcMinimum, difficulty: doc.calcDifficulty,
     rush: doc.calcRush, discount: doc.calcDiscount,
     taxRate: doc.calcTaxRate,
-  });
-  normalizeDocumentInputs();
-  syncDifficultyButtons();
+    });
+    normalizeDocumentInputs();
+    syncDifficultyButtons();
+  } finally {
+    suppressEditTracking = Math.max(0, suppressEditTracking - 1);
+  }
 
   setActiveRecordIdentity(doc);
+  markDocumentClean();
   updateActiveBar();
   refreshInvoicePreview();
 }
 
 async function startNew(type = 'ESTIMATE') {
+  const intentVersion = beginDocumentReplacementIntent(`start a new ${type === 'INVOICE' ? 'invoice' : 'estimate'}`);
+  if (intentVersion === null) return null;
   const num = apiReady ? await api.nextNumber(type).then(r => r.number).catch(() => '') : '';
+  if (!isLatestDocumentIntent(intentVersion)) return null;
   startCleanDocument(type, num);
   clearActiveRecordIdentity();
   updateActiveBar();
   refreshInvoicePreview();
   showView('builder');
+  return true;
 }
 
 function startCleanDocument(type = 'ESTIMATE', number = '') {
   markDocumentSessionChanged();
   cancelPendingAutoSave();
-  newDocument(type, number);
-  restoreCalcState(defaultCalcState());
+  suppressEditTracking += 1;
+  try {
+    newDocument(type, number);
+    restoreCalcState(defaultCalcState());
+  } finally {
+    suppressEditTracking = Math.max(0, suppressEditTracking - 1);
+  }
+  markDocumentClean();
 }
 
 function applyDocumentPrefill(prefill = null) {
   if (!prefill) return;
+  suppressEditTracking += 1;
+  try {
   const calcFields = {
     grams: prefill.calcGrams ?? 0,
     hours: prefill.calcHours ?? 0,
@@ -379,9 +622,11 @@ function applyDocumentPrefill(prefill = null) {
   if (fields.docType) {
     setValAndNotify('docType', fields.docType, ['change']);
   }
+  const explicitBlankFields = new Set(['pricingGuide', 'termsNotes', 'standardTurnaround', 'rushTurnaround']);
   Object.entries(fields).forEach(([id, value]) => {
     if (id === 'docType' || id === 'docStatus') return;
-    if (value !== null && value !== undefined && value !== '') setValAndNotify(id, value);
+    const shouldApplyBlank = explicitBlankFields.has(id) && Object.prototype.hasOwnProperty.call(prefill, id);
+    if (value !== null && value !== undefined && (value !== '' || shouldApplyBlank)) setValAndNotify(id, value);
   });
   if (fields.docStatus) {
     const docType = fields.docType || textVal('docType') || 'ESTIMATE';
@@ -402,6 +647,10 @@ function applyDocumentPrefill(prefill = null) {
   syncDifficultyButtons();
   updateTotals();
   showAssistanceDraftIndicator(prefill);
+  } finally {
+    suppressEditTracking = Math.max(0, suppressEditTracking - 1);
+  }
+  markDocumentEdited();
 }
 
 function setValAndNotify(id, value, eventNames = ['input', 'change']) {
@@ -430,6 +679,8 @@ function createDocumentSnapshot() {
       activeRecordId,
       activeRecordType,
       activeRecordNumber,
+      activeRecordUpdatedAt,
+      isDirty: isDocumentDirty(),
       formData: getFormData(),
       calcState: getCalcState(),
       legacy: captureState(),
@@ -444,6 +695,8 @@ function restoreDocumentSnapshot(snapshot) {
   markDocumentSessionChanged();
   cancelPendingAutoSave();
   const doc = snapshot.formData || {};
+  suppressEditTracking += 1;
+  try {
   restoreState({
     formValues: {
       docType: doc.docType,
@@ -483,18 +736,29 @@ function restoreDocumentSnapshot(snapshot) {
   restoreCalcState(snapshot.calcState || {});
   normalizeDocumentInputs();
   syncDifficultyButtons();
+  } finally {
+    suppressEditTracking = Math.max(0, suppressEditTracking - 1);
+  }
   applyActiveRecordIdentity({
     activeRecordId: snapshot.activeRecordId || null,
     activeRecordType: snapshot.activeRecordType || doc.docType || null,
     activeRecordNumber: snapshot.activeRecordNumber || doc.docNumber || null,
+    activeRecordUpdatedAt: snapshot.activeRecordUpdatedAt || doc.updatedAt || null,
   });
+  if (snapshot.isDirty) markDocumentEdited();
+  else markDocumentClean();
   updateActiveBar();
   refreshInvoicePreview();
   return true;
 }
 
 function getActiveRecordIdentity() {
-  return normalizeActiveRecordIdentity({ activeRecordId, activeRecordType, activeRecordNumber });
+  return normalizeActiveRecordIdentity({
+    activeRecordId,
+    activeRecordType,
+    activeRecordNumber,
+    activeRecordUpdatedAt,
+  });
 }
 
 function applyActiveRecordIdentity(identity) {
@@ -502,6 +766,7 @@ function applyActiveRecordIdentity(identity) {
   activeRecordId = normalized.activeRecordId;
   activeRecordType = normalized.activeRecordType;
   activeRecordNumber = normalized.activeRecordNumber;
+  activeRecordUpdatedAt = normalized.activeRecordUpdatedAt;
 }
 
 function setActiveRecordIdentity(doc) {
@@ -522,111 +787,174 @@ async function saveRecord(forceNew = false) {
     return null;
   }
 
-  if (saveInFlight) {
-    const requestedIntent = getSaveIntent(forceNew, {
-      activeRecordId,
-      activeRecordType,
-      requestedDocType: textVal('docType') || 'ESTIMATE',
-    });
-    if (canReuseInFlightSave(saveInFlightIntent, requestedIntent)) {
-      toast(`Still saving ${textVal('docNumber') || 'document'}...`, 'info', 1600, { key: 'invoice-save-status' });
-      return saveInFlight;
-    }
-    toast('Finish the current save before starting a different save action.', 'error', 3200);
+  if (activeRecordId && isRecordActionInFlight(activeRecordId)) {
+    toast('Wait for the current record action to finish before saving.', 'info', 2600);
     return null;
   }
 
-  saveInFlightIntent = getSaveIntent(forceNew, {
+  const requestedIntent = getSaveIntent(forceNew, {
     activeRecordId,
     activeRecordType,
     requestedDocType: textVal('docType') || 'ESTIMATE',
   });
-  saveInFlight = doSaveRecord(forceNew, documentSessionVersion);
+
+  if (saveInFlight) {
+    const sameSession = saveInFlightSessionVersion === documentSessionVersion;
+    if (sameSession && !canReuseInFlightSave(saveInFlightIntent, requestedIntent)) {
+      toast('Finish the current save before starting a different save action.', 'error', 3200);
+      return null;
+    }
+
+    if (sameSession && documentEditRevision <= Number(saveInFlightEditRevision ?? -1) && !queuedSaveRequest) {
+      toast(`Still saving ${textVal('docNumber') || 'document'}...`, 'info', 1600, { key: 'invoice-save-status' });
+      return saveInFlight;
+    }
+
+    queuedSaveRequest = createSaveRequest(sameSession ? false : forceNew, { rebaseIdentity: sameSession });
+    toast('Saving the latest edits next…', 'info', 1800, { key: 'invoice-save-status' });
+    return saveInFlight;
+  }
+
+  const firstRequest = createSaveRequest(forceNew);
+  saveInFlight = runSaveQueue(firstRequest);
   try {
     return await saveInFlight;
   } finally {
     saveInFlight = null;
     saveInFlightIntent = null;
+    saveInFlightSessionVersion = null;
+    saveInFlightEditRevision = null;
+    queuedSaveRequest = null;
   }
 }
 
-async function doSaveRecord(forceNew = false, saveSessionVersion = documentSessionVersion) {
+function createSaveRequest(forceNew = false, { rebaseIdentity = false } = {}) {
+  const formData = getFormData();
+  const calcState = getCalcState();
+  const legacy = captureState();
+  const numberOr = (value, fallback = 0) => {
+    const parsed = Number.parseFloat(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  };
+  const body = {
+    ...formData,
+    calcGrams:       numberOr(calcState.grams),
+    calcHours:       numberOr(calcState.hours),
+    calcDesignHours: numberOr(calcState.designHours),
+    calcSetupFee:    numberOr(calcState.setupFee),
+    calcPostFee:     numberOr(calcState.postFee),
+    calcGramRate:    numberOr(calcState.gramRate, 0.05),
+    calcHourRate:    numberOr(calcState.hourRate, 3),
+    calcDesignRate:  numberOr(calcState.designRate, 25),
+    calcMinimum:     numberOr(calcState.minimum, 15),
+    calcDifficulty:  numberOr(calcState.difficulty, 1),
+    calcRush:        numberOr(calcState.rush),
+    calcDiscount:    numberOr(calcState.discount),
+    calcTaxRate:     numberOr(formData.docTaxRate, numberOr(calcState.taxRate)),
+    json: JSON.stringify(legacy),
+  };
+  return {
+    forceNew: !!forceNew,
+    sessionVersion: documentSessionVersion,
+    editRevision: documentEditRevision,
+    identity: getActiveRecordIdentity(),
+    requestedDocType: body.docType,
+    body,
+    rebaseIdentity,
+  };
+}
+
+async function runSaveQueue(firstRequest) {
+  let request = firstRequest;
+  let lastResult = null;
+  while (request) {
+    saveInFlightSessionVersion = request.sessionVersion;
+    saveInFlightEditRevision = request.editRevision;
+    const identity = request.rebaseIdentity && request.sessionVersion === documentSessionVersion
+      ? getActiveRecordIdentity()
+      : request.identity;
+    saveInFlightIntent = getSaveIntent(request.forceNew, {
+      ...identity,
+      requestedDocType: request.requestedDocType,
+    });
+    lastResult = await doSaveRecord(request, identity);
+    request = queuedSaveRequest;
+    queuedSaveRequest = null;
+  }
+  return lastResult;
+}
+
+async function doSaveRecord(request, identity) {
+  const { forceNew, sessionVersion: saveSessionVersion, editRevision: saveEditRevision, body } = request;
   setAutoSaveStatus('saving');
+  let result;
+  let savePlan;
   try {
     if (!await ensureApiReady()) {
       throw new Error('The invoice API is not responding. Close any old EPATA.BusinessLedger process and reopen the rebuilt app.');
     }
-    const formData = getFormData();
-    const calcState = getCalcState();
-    const legacy = captureState();
-
-    const body = {
-      ...formData,
-      calcGrams:       parseFloat(calcState.grams)       || 0,
-      calcHours:       parseFloat(calcState.hours)       || 0,
-      calcDesignHours: parseFloat(calcState.designHours) || 0,
-      calcSetupFee:    parseFloat(calcState.setupFee)    || 0,
-      calcPostFee:     parseFloat(calcState.postFee)     || 0,
-      calcGramRate:    parseFloat(calcState.gramRate)    || 0.05,
-      calcHourRate:    parseFloat(calcState.hourRate)    || 3,
-      calcDesignRate:  parseFloat(calcState.designRate)  || 25,
-      calcMinimum:     parseFloat(calcState.minimum)     || 15,
-      calcDifficulty:  parseFloat(calcState.difficulty)  || 1,
-      calcRush:        parseFloat(calcState.rush)        || 0,
-      calcDiscount:    parseFloat(calcState.discount)    || 0,
-      calcTaxRate:     parseFloat(formData.docTaxRate)   || parseFloat(calcState.taxRate) || 0,
-      json: JSON.stringify(legacy),
-    };
 
     const preliminaryPlan = buildSaveRequestPlan(forceNew, {
-      activeRecordId,
-      activeRecordType,
-      activeRecordNumber,
+      ...identity,
       requestedDocType: body.docType,
       body,
     });
-    const needsNewNumber = preliminaryPlan.intent.forceNew || preliminaryPlan.intent.typeChanged;
-    const nextNumber = needsNewNumber ? await api.nextNumber(body.docType).then(r => r.number).catch(() => '') : '';
-    const savePlan = buildSaveRequestPlan(forceNew, {
-      activeRecordId,
-      activeRecordType,
-      activeRecordNumber,
+    const needsNewNumber = preliminaryPlan.intent.forceNew ||
+      preliminaryPlan.intent.typeChanged ||
+      (preliminaryPlan.action === 'create' && !String(body.docNumber || '').trim());
+    let nextNumber = '';
+    if (needsNewNumber) {
+      const response = await api.nextNumber(body.docType);
+      nextNumber = String(response?.number || '').trim();
+      if (!nextNumber) throw new Error('A new document number could not be reserved. Nothing was saved.');
+    }
+    savePlan = buildSaveRequestPlan(forceNew, {
+      ...identity,
       requestedDocType: body.docType,
       body,
       nextNumber,
     });
     const saveBody = savePlan.body;
 
-    let result;
     if (savePlan.action === 'update') {
-      result = await api.update(savePlan.updateId, saveBody);
-      toast(`Saved ${result.docNumber || saveBody.docNumber || 'document'}`, 'success', 3000, { key: 'invoice-save-status' });
+      result = await api.update(savePlan.updateId, saveBody, identity.activeRecordUpdatedAt);
     } else {
       result = await api.create(saveBody);
-      toast(savePlan.intent.typeChanged
-        ? `Created new ${result.docType === 'INVOICE' ? 'invoice' : 'estimate'} ${result.docNumber}; original unchanged`
-        : `Created ${result.docNumber || saveBody.docNumber || 'document'}`, 'success', 3000, { key: 'invoice-save-status' });
     }
 
     const stillActiveSession = saveSessionVersion === documentSessionVersion;
+    const hasNewerEdits = stillActiveSession && documentEditRevision > saveEditRevision;
+    const hasQueuedNewerSave = hasNewerEdits && queuedSaveRequest?.sessionVersion === saveSessionVersion;
+    const savedLabel = result?.docNumber || saveBody.docNumber || 'document';
     if (stillActiveSession) {
       if (result?.docNumber) setVal('docNumber', result.docNumber);
       if (result?.docType) setVal('docType', result.docType);
       if (result) setActiveRecordIdentity(result);
+      if (!hasNewerEdits) markDocumentClean(saveEditRevision);
       updateActiveBar();
       refreshInvoicePreview();
     } else {
-      toast(`Saved ${result.docNumber || saveBody.docNumber || 'document'} in the background; current record unchanged`, 'success', 3000);
+      toast(`Saved ${savedLabel} in the background; current record unchanged`, 'success', 3000);
     }
-    await refreshRecords();
-    if (stillActiveSession) {
+
+    if (stillActiveSession && hasNewerEdits) {
+      toast(hasQueuedNewerSave
+        ? `Saved earlier changes to ${savedLabel}; saving newer edits next…`
+        : `Saved earlier changes to ${savedLabel}; newer edits are still unsaved.`, 'info', 3200, { key: 'invoice-save-status' });
+      if (!hasQueuedNewerSave) {
+        setAutoSaveStatus('');
+        setDbStatus(`Ready — unsaved changes after ${savedLabel}`, 'ready');
+      }
+    } else if (stillActiveSession) {
+      toast(savePlan.intent.typeChanged
+        ? `Created new ${result.docType === 'INVOICE' ? 'invoice' : 'estimate'} ${savedLabel}; original unchanged`
+        : `${savePlan.action === 'update' ? 'Saved' : 'Created'} ${savedLabel}`, 'success', 3000, { key: 'invoice-save-status' });
       setAutoSaveStatus('saved');
-      setDbStatus(`Ready — saved ${result.docNumber || saveBody.docNumber || 'document'}`, 'ready');
+      setDbStatus(`Ready — saved ${savedLabel}`, 'ready');
     } else {
       setDbStatus('Ready', 'ready');
     }
     apiReady = true;
-    return result;
   } catch (err) {
     const failureState = buildSaveFailureUiState({
       identity: getActiveRecordIdentity(),
@@ -643,11 +971,60 @@ async function doSaveRecord(forceNew = false, saveSessionVersion = documentSessi
     }
     throw err;
   }
+
+  try {
+    await refreshRecords();
+  } catch (refreshError) {
+    const savedLabel = result?.docNumber || savePlan?.body?.docNumber || 'document';
+    console.error('Records refresh after save failed', refreshError);
+    toast(`${savedLabel} was saved, but the records list could not refresh. Reopen Records to retry.`, 'info', 6000);
+  }
+  return result;
 }
 
 function markDocumentSessionChanged() {
   documentSessionVersion += 1;
+  documentIntentVersion += 1;
+  documentEditRevision = 0;
+  lastSavedEditRevision = 0;
   return documentSessionVersion;
+}
+
+function markDocumentEdited() {
+  if (suppressEditTracking > 0) return documentEditRevision;
+  documentEditRevision += 1;
+  documentIntentVersion += 1;
+  updateActiveBar();
+  return documentEditRevision;
+}
+
+function markDocumentClean(savedRevision = documentEditRevision) {
+  if (savedRevision === documentEditRevision) lastSavedEditRevision = savedRevision;
+  updateActiveBar();
+}
+
+function isDocumentDirty() {
+  return documentEditRevision !== lastSavedEditRevision;
+}
+
+function beginDocumentReplacementIntent(actionLabel) {
+  const saveCoversCurrentRevision = !!saveInFlight &&
+    saveInFlightSessionVersion === documentSessionVersion &&
+    Number(saveInFlightEditRevision ?? -1) >= documentEditRevision;
+  if (isDocumentDirty() && !saveCoversCurrentRevision) {
+    const action = String(actionLabel || 'continue');
+    if (!confirm(`You have unsaved changes. Discard them and ${action}?`)) return null;
+  }
+  documentIntentVersion += 1;
+  return documentIntentVersion;
+}
+
+function isLatestDocumentIntent(version) {
+  return Number(version) === documentIntentVersion;
+}
+
+function isCurrentInit(version) {
+  return Number(version) === initVersion && !initAbortController?.signal.aborted;
 }
 
 async function ensureApiReady() {
@@ -666,27 +1043,36 @@ async function ensureApiReady() {
 }
 
 
-function wireLiveCalculationUpdates() {
+function wireLiveCalculationUpdates(signal) {
   const builderView = el('view-builder');
   if (builderView) {
     const handler = (e) => {
       if (!e.target?.matches?.('input, select, textarea')) return;
+      markDocumentEdited();
       updateTotals();
       scheduleAutoSave();
     };
-    builderView.addEventListener('input', handler);
-    builderView.addEventListener('change', handler);
+    builderView.addEventListener('input', handler, { signal });
+    builderView.addEventListener('change', handler, { signal });
   }
+
+  const calculatorView = el('view-calculator');
+  const calculatorEditHandler = event => {
+    if (event.target?.matches?.('input, select, textarea')) markDocumentEdited();
+  };
+  calculatorView?.addEventListener('input', calculatorEditHandler, { signal });
+  calculatorView?.addEventListener('change', calculatorEditHandler, { signal });
 
   document.addEventListener('epata:totals-updated', () => {
     // Keeps summary values, database payloads, and generated PDFs using the same live totals.
-  });
+  }, { signal });
 
-  el('projectName')?.addEventListener('change', applySelectedProduct);
+  el('projectName')?.addEventListener('change', applySelectedProduct, { signal });
 }
 
 function addLineItemAndRefresh(item = {}) {
   addLineItem(item);
+  markDocumentEdited();
   updateTotals();
   refreshInvoicePreview();
   scheduleAutoSave();
@@ -694,6 +1080,7 @@ function addLineItemAndRefresh(item = {}) {
 
 function removeLineItemAndRefresh(btn) {
   removeLineItem(btn);
+  markDocumentEdited();
   updateTotals();
   refreshInvoicePreview();
   scheduleAutoSave();
@@ -744,30 +1131,51 @@ function scheduleAutoSave() {
 
 function cancelPendingAutoSave() {
   clearTimeout(autoSaveTimer);
+  clearTimeout(autoSaveClearTimer);
   autoSaveTimer = null;
+  autoSaveClearTimer = null;
   setAutoSaveStatus('');
 }
 
 function setAutoSaveStatus(state) {
+  clearTimeout(autoSaveClearTimer);
+  autoSaveClearTimer = null;
   const ind = el('autosaveIndicator');
   if (!ind) return;
   ind.className = `autosave-indicator ${state}`;
   ind.innerHTML = `<span class="autosave-dot"></span>${
     state === 'saving' ? 'Saving…' : state === 'saved' ? 'Saved' : ''}`;
-  if (state === 'saved') setTimeout(() => { ind.innerHTML = ''; ind.className = 'autosave-indicator'; }, 2500);
+  if (state === 'saved') {
+    autoSaveClearTimer = setTimeout(() => {
+      autoSaveClearTimer = null;
+      ind.innerHTML = '';
+      ind.className = 'autosave-indicator';
+    }, 2500);
+  }
 }
 
 // ── PDF ───────────────────────────────────────────────
 async function onGeneratePdf(preview = false) {
+  let pdfWindow = null;
   try {
+    // Reserve the window synchronously while the click still carries browser
+    // user activation. Opening it only after an awaited save is popup-blocked.
+    pdfWindow = openPdfWindow(preview);
     // Preview is read-only. Download saves first so the exported PDF is tracked.
-    if (!preview && apiReady && !await saveRecord(false)) return;
+    if (!preview) {
+      const saved = await saveRecord(false).catch(() => null);
+      if (!saved) {
+        pdfWindow.close();
+        return;
+      }
+    }
 
     const formData = getFormData();
     const data = { ...formData, ...appConfig, brandColor: appConfig.brandColor || '#17468f' };
     refreshInvoicePreview();
-    await generatePdf(data, preview);
+    await generatePdf(data, preview, pdfWindow);
   } catch (e) {
+    pdfWindow?.close?.();
     toast('PDF error: ' + e.message, 'error');
   }
 }
@@ -791,6 +1199,7 @@ function onPushToBuilder() {
       ? [selectedProduct.sku, selectedProduct.category, selectedProduct.material, selectedProduct.color].filter(Boolean).join(' · ')
       : ''
   });
+  markDocumentEdited();
   updateTotals();
   refreshInvoicePreview();
   scheduleAutoSave();
@@ -818,24 +1227,45 @@ function resizePreviewFrame(frame) {
 
 // ── Records ───────────────────────────────────────────
 async function onLoadRecord(id) {
+  const intentVersion = beginDocumentReplacementIntent('open the selected record');
+  if (intentVersion === null) return null;
   try {
-    await loadRecord(id, (newId) => {
-      applyActiveRecordIdentity({ ...getActiveRecordIdentity(), activeRecordId: newId });
-    });
-    updateActiveBar();
+    const doc = await loadRecord(id);
+    if (!doc) return null;
+    if (!isLatestDocumentIntent(intentVersion)) {
+      toast('The record finished loading, but your newer action was kept.', 'info', 2800);
+      return null;
+    }
+    onDocumentLoaded(doc);
     showView('builder');
+    return doc;
   } catch (e) {
     toast('Could not load record: ' + e.message, 'error');
+    return null;
   }
 }
 
 async function onDuplicateRecord(id) {
+  if (saveInFlight && Number(activeRecordId) === Number(id)) {
+    toast('Wait for the active document to finish saving before duplicating it.', 'info', 2800);
+    return null;
+  }
   try { await duplicateRecord(id); } catch (e) { toast('Duplicate failed: ' + e.message, 'error'); }
 }
 
 async function onConvertEstimate(id) {
+  if (saveInFlight && Number(activeRecordId) === Number(id)) {
+    toast('Wait for the active estimate to finish saving before converting it.', 'info', 2800);
+    return null;
+  }
+  const intentVersion = beginDocumentReplacementIntent('open the converted invoice');
+  if (intentVersion === null) return null;
   try {
     const doc = await convertEstimateToInvoice(id);
+    if (!doc || !isLatestDocumentIntent(intentVersion)) {
+      if (doc) toast('The invoice was created, but your newer document action was kept.', 'info', 4200);
+      return null;
+    }
     if (!doc?.id || doc.docType !== 'INVOICE') {
       throw new Error('The server did not return the new invoice record.');
     }
@@ -847,16 +1277,38 @@ async function onConvertEstimate(id) {
 }
 
 async function onDeleteRecord(id) {
+  if (saveInFlight && Number(activeRecordId) === Number(id)) {
+    toast('Wait for the active document to finish saving before archiving it.', 'info', 2800);
+    return null;
+  }
+  const wasActive = Number(activeRecordId) === Number(id);
+  const archivedType = activeRecordType || textVal('docType') || 'ESTIMATE';
   try {
-    await deleteRecord(id, activeRecordId, (newId) => {
+    const archived = await deleteRecord(id, activeRecordId, (newId) => {
       const nextIdentity = newId
         ? { ...getActiveRecordIdentity(), activeRecordId: newId }
         : identityAfterArchivedRecord(getActiveRecordIdentity(), id);
       applyActiveRecordIdentity(nextIdentity);
+      if (wasActive && !newId) {
+        startCleanDocument(archivedType, '');
+        clearActiveRecordIdentity();
+      }
       updateActiveBar();
-    });
+      refreshInvoicePreview();
+    }, { discardUnsaved: wasActive && isDocumentDirty() });
+    if (archived && wasActive) {
+      const cleanSessionVersion = documentSessionVersion;
+      const cleanIntentVersion = documentIntentVersion;
+      api.nextNumber(archivedType).then(response => {
+        if (cleanSessionVersion !== documentSessionVersion || cleanIntentVersion !== documentIntentVersion || isDocumentDirty()) return;
+        setVal('docNumber', response?.number || '');
+        updateActiveBar();
+        refreshInvoicePreview();
+      }).catch(() => {});
+    }
+    return archived;
   }
-  catch (e) { toast('Archive failed: ' + e.message, 'error'); }
+  catch (e) { toast('Archive failed: ' + e.message, 'error'); return null; }
 }
 
 async function onRestoreRecord(id) {
@@ -872,6 +1324,8 @@ async function onImportPdfDraft(event) {
 
   return runExclusiveToolAction('pdf-draft-import', 'PDF import already in progress.', async () => {
   try {
+    const intentVersion = beginDocumentReplacementIntent('replace this document with the imported PDF draft');
+    if (intentVersion === null) return null;
     if (!await ensureApiReady()) {
       throw new Error('The invoice API is not responding. Reopen the rebuilt app and try again.');
     }
@@ -880,10 +1334,18 @@ async function onImportPdfDraft(event) {
     const result = await api.importPdfDraft(file);
     const prefill = result?.prefill;
     if (!prefill) throw new Error('The server did not return mapped invoice fields.');
+    if (!isLatestDocumentIntent(intentVersion)) {
+      toast('The PDF was mapped, but the builder changed while it was processing, so your newer work was kept.', 'info', 6500);
+      return null;
+    }
 
     const nextNumber = !prefill.docNumber
       ? await api.nextNumber(prefill.docType || 'ESTIMATE').then(r => r.number).catch(() => '')
       : '';
+    if (!isLatestDocumentIntent(intentVersion)) {
+      toast('The PDF draft was not applied because the builder changed while it was processing.', 'info', 5200);
+      return null;
+    }
     startCleanDocument(prefill.docType || 'ESTIMATE', prefill.docNumber || nextNumber);
     clearActiveRecordIdentity();
     applyDocumentPrefill(prefill);
@@ -902,7 +1364,10 @@ async function onImportPdfDraft(event) {
 // ── Local AI estimate assistant modal ─────────────────
 function ensureAiAssistantModal() {
   let modal = el('aiAssistantModal');
-  if (modal) return modal;
+  if (modal) {
+    bindAiAssistantModalEvents(modal);
+    return modal;
+  }
 
   document.body.insertAdjacentHTML('beforeend', `
     <div id="aiAssistantModal" class="ai-assistant-modal hidden" role="dialog" aria-modal="true" aria-labelledby="aiAssistantTitle">
@@ -993,47 +1458,56 @@ function ensureAiAssistantModal() {
     </div>`);
 
   modal = el('aiAssistantModal');
-  modal.querySelectorAll('[data-ai-assistant-close]').forEach(node => node.addEventListener('click', closeAiAssistantModal));
-  el('btnAiAssistantRefresh')?.addEventListener('click', () => refreshAiAssistantStatus(true));
-  el('btnAiAssistantClear')?.addEventListener('click', clearAiAssistantModal);
-  el('btnAiAssistantAsk')?.addEventListener('click', () => askAiAssistant());
-  el('btnAiAssistantMissing')?.addEventListener('click', () => askAiAssistant('What details are missing before this can become a reliable estimate or invoice draft?'));
-  el('btnAiAssistantGenerate')?.addEventListener('click', generateAiAssistantDraft);
+  bindAiAssistantModalEvents(modal);
+  renderAiAssistantChat();
+  renderAiAssistantFiles();
+  return modal;
+}
+
+function bindAiAssistantModalEvents(modal) {
+  const eventVersion = String(initVersion);
+  if (!modal || modal.dataset.epataEventsVersion === eventVersion) return;
+  modal.dataset.epataEventsVersion = eventVersion;
+  const signal = initAbortController?.signal;
+  const options = signal ? { signal } : undefined;
+
+  modal.querySelectorAll('[data-ai-assistant-close]').forEach(node => node.addEventListener('click', closeAiAssistantModal, options));
+  el('btnAiAssistantRefresh')?.addEventListener('click', () => refreshAiAssistantStatus(true), options);
+  el('btnAiAssistantClear')?.addEventListener('click', clearAiAssistantModal, options);
+  el('btnAiAssistantAsk')?.addEventListener('click', () => askAiAssistant(), options);
+  el('btnAiAssistantMissing')?.addEventListener('click', () => askAiAssistant('What details are missing before this can become a reliable estimate or invoice draft?'), options);
+  el('btnAiAssistantGenerate')?.addEventListener('click', generateAiAssistantDraft, options);
   el('aiAssistantFiles')?.addEventListener('change', e => {
     addAiAssistantFiles(Array.from(e.target?.files || []));
     e.target.value = '';
-  });
-  el('aiAssistantContext')?.addEventListener('input', updateAiAssistantTextCount);
+  }, options);
+  el('aiAssistantContext')?.addEventListener('input', updateAiAssistantTextCount, options);
   el('aiAssistantQuestion')?.addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
       e.preventDefault();
       askAiAssistant();
     }
-  });
+  }, options);
   const dropZone = el('aiAssistantDropZone');
   if (dropZone) {
-    dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragging'); });
-    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragging'));
+    dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragging'); }, options);
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragging'), options);
     dropZone.addEventListener('drop', e => {
       e.preventDefault();
       dropZone.classList.remove('dragging');
       addAiAssistantFiles(Array.from(e.dataTransfer?.files || []));
-    });
+    }, options);
     dropZone.addEventListener('keydown', e => {
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
         el('aiAssistantFiles')?.click();
       }
-    });
+    }, options);
   }
 
   document.addEventListener('keydown', e => {
     if (!modal.classList.contains('hidden') && e.key === 'Escape') closeAiAssistantModal();
-  });
-
-  renderAiAssistantChat();
-  renderAiAssistantFiles();
-  return modal;
+  }, options);
 }
 
 async function openAiAssistantModal() {
@@ -1051,6 +1525,7 @@ async function openAiAssistantModal() {
 function closeAiAssistantModal() {
   const modal = el('aiAssistantModal');
   if (!modal) return;
+  aiAssistantOperationVersion += 1;
   modal.classList.add('hidden');
   document.body.classList.remove('ai-assistant-open');
   aiAssistantState.lastFocus?.focus?.();
@@ -1058,6 +1533,7 @@ function closeAiAssistantModal() {
 
 function clearAiAssistantModal() {
   if (!confirm('Clear the assistant context, files, chat, and draft preview?')) return;
+  aiAssistantOperationVersion += 1;
   aiAssistantState.files = [];
   aiAssistantState.messages = [];
   aiAssistantState.draft = null;
@@ -1193,7 +1669,8 @@ function updateAiAssistantTextCount() {
 }
 
 async function askAiAssistant(forcedQuestion = '') {
-  return runExclusiveToolAction('ai-assistant-chat', 'The assistant is already answering.', async () => {
+  return runExclusiveToolAction('ai-assistant-request', 'The assistant is already working.', async () => {
+    const operationVersion = ++aiAssistantOperationVersion;
     const questionNode = el('aiAssistantQuestion');
     const question = (forcedQuestion || questionNode?.value || '').trim();
     if (!question) {
@@ -1210,6 +1687,7 @@ async function askAiAssistant(forcedQuestion = '') {
     try {
       const form = buildAiAssistantFormData({ question, includeChat: true });
       const answer = await api.aiEstimateChat(form);
+      if (operationVersion !== aiAssistantOperationVersion) return null;
       if (answer?.answer) aiAssistantState.messages.push({ role: 'assistant', content: answer.answer });
       if (answer?.warnings?.length) {
         aiAssistantState.messages.push({ role: 'assistant', content: `Warnings:\n- ${answer.warnings.join('\n- ')}` });
@@ -1228,7 +1706,10 @@ async function askAiAssistant(forcedQuestion = '') {
 }
 
 async function generateAiAssistantDraft() {
-  return runExclusiveToolAction('ai-assistant-draft', 'The assistant is already generating a draft.', async () => {
+  return runExclusiveToolAction('ai-assistant-request', 'The assistant is already working.', async () => {
+    const intentVersion = beginDocumentReplacementIntent('replace this document with the AI-generated draft');
+    if (intentVersion === null) return null;
+    const operationVersion = ++aiAssistantOperationVersion;
     const button = el('btnAiAssistantGenerate');
     setButtonsBusy([button], true, 'Generating...');
     try {
@@ -1237,9 +1718,14 @@ async function generateAiAssistantDraft() {
       await ensureAiAssistantReady();
       const form = buildAiAssistantFormData({ includeChat: el('aiAssistantUseChat')?.checked });
       const result = await api.aiEstimateDraft(form);
+      if (operationVersion !== aiAssistantOperationVersion) return null;
       aiAssistantState.draft = result;
       renderAiAssistantDraftPreview(result);
-      await fillAiAssistantDraft(result);
+      if (!isLatestDocumentIntent(intentVersion)) {
+        toast('The AI draft finished, but the builder changed while it was processing, so your newer work was kept.', 'info', 7000);
+        return result;
+      }
+      await fillAiAssistantDraft(result, intentVersion, operationVersion);
       return result;
     } catch (e) {
       renderAiAssistantDraftPreview({ error: friendlyAiAssistantError(e.message) });
@@ -1375,7 +1861,7 @@ function renderAiAssistantDraftPreview(result) {
     </div>`;
 }
 
-async function fillAiAssistantDraft(result) {
+async function fillAiAssistantDraft(result, intentVersion, operationVersion) {
   const prefill = result?.prefill;
   if (!prefill) throw new Error('The server did not return mapped estimate fields.');
   const requestedType = el('aiAssistantDocType')?.value || textVal('docType') || prefill.docType || 'ESTIMATE';
@@ -1386,6 +1872,10 @@ async function fillAiAssistantDraft(result) {
   const nextNumber = !prefill.docNumber
     ? await api.nextNumber(docType).then(r => r.number).catch(() => '')
     : '';
+  if (!isLatestDocumentIntent(intentVersion) || operationVersion !== aiAssistantOperationVersion) {
+    toast('The AI draft was not applied because the builder changed while it was processing.', 'info', 6000);
+    return false;
+  }
   startCleanDocument(docType, prefill.docNumber || nextNumber);
   clearActiveRecordIdentity();
   applyDocumentPrefill(prefill);
@@ -1396,6 +1886,7 @@ async function fillAiAssistantDraft(result) {
   closeAiAssistantModal();
   const warningText = (result.warnings || []).length ? ' Review warnings and questions before saving.' : '';
   toast(`AI filled an unsaved ${docType === 'INVOICE' ? 'invoice' : 'estimate'} draft.${warningText}`, 'success', 8000);
+  return true;
 }
 
 function setButtonsBusy(buttons, busy, busyText = 'Working...') {
@@ -1458,42 +1949,71 @@ async function saveSettings() {
     return null;
   }
 
-  const body = {
+  const body = captureSettingsBody();
+  if (settingsSaveInFlight) {
+    const sameAsCurrent = JSON.stringify(body) === JSON.stringify(settingsSaveInFlightBody);
+    if (!sameAsCurrent) {
+      queuedSettingsSaveBody = body;
+      toast('Saving the latest settings next…', 'info', 1800, { key: 'settings-save-status' });
+    } else {
+      // The latest click returned to the values already being saved, so an
+      // older queued edit must no longer win after this request completes.
+      queuedSettingsSaveBody = null;
+      toast('Settings are still saving…', 'info', 1600, { key: 'settings-save-status' });
+    }
+    return settingsSaveInFlight;
+  }
+
+  settingsSaveInFlight = runSettingsSaveQueue(body);
+  try {
+    return await settingsSaveInFlight;
+  } finally {
+    settingsSaveInFlight = null;
+    settingsSaveInFlightBody = null;
+    queuedSettingsSaveBody = null;
+  }
+}
+
+function captureSettingsBody() {
+  const settingNumber = (id, fallback) => {
+    const parsed = Number.parseFloat(el(id)?.value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  };
+  return {
     businessName: textVal('businessName'), businessLocation: textVal('businessLocation'),
     businessEmail: textVal('businessEmail'), businessPhone: textVal('businessPhone'),
     businessWebsite: textVal('businessWebsite'), businessEtsy: textVal('businessEtsy'),
     businessInstagram: textVal('businessInstagram'), businessFacebook: textVal('businessFacebook'),
     brandColor: textVal('brandColor') || '#17468f',
-    calcGramRate:   parseFloat(el('sCalcGramRate')?.value)   || 0.05,
-    calcHourRate:   parseFloat(el('sCalcHourRate')?.value)   || 3,
-    calcDesignRate: parseFloat(el('sCalcDesignRate')?.value) || 25,
-    calcSetupFee:   parseFloat(el('sCalcSetupFee')?.value)   || 0,
-    calcPostFee:    parseFloat(el('sCalcPostFee')?.value)    || 0,
-    calcMinimum:    parseFloat(el('sCalcMinimum')?.value)    || 15,
+    calcGramRate:   settingNumber('sCalcGramRate', 0.05),
+    calcHourRate:   settingNumber('sCalcHourRate', 3),
+    calcDesignRate: settingNumber('sCalcDesignRate', 25),
+    calcSetupFee:   settingNumber('sCalcSetupFee', 0),
+    calcPostFee:    settingNumber('sCalcPostFee', 0),
+    calcMinimum:    settingNumber('sCalcMinimum', 15),
   };
-  try {
-    appConfig = await api.saveConfig(body);
-    toast('Settings saved', 'success');
-  } catch (e) {
-    toast('Settings save failed: ' + e.message, 'error');
-  }
 }
 
-// ── Database import ───────────────────────────────────
-async function onImportDb(e) {
-  const file = e.target.files?.[0];
-  e.target.value = '';
-  if (!file) return;
-  return runExclusiveToolAction('database-import', 'Database import already in progress.', async () => {
-    if (!confirm('Importing will replace the current database. Backup first? Continue?')) return;
+async function runSettingsSaveQueue(firstBody) {
+  let body = firstBody;
+  let lastResult = null;
+  while (body) {
+    settingsSaveInFlightBody = body;
     try {
-      await api.importDb(file);
-      await refreshRecords();
-      toast('Database imported successfully', 'success');
-    } catch (err) {
-      toast('Import failed: ' + err.message, 'error');
+      lastResult = await api.saveConfig(body);
+      appConfig = lastResult;
+      if (queuedSettingsSaveBody) {
+        toast('Earlier settings saved; saving the latest changes next…', 'info', 2200, { key: 'settings-save-status' });
+      } else {
+        toast('Settings saved', 'success', 2600, { key: 'settings-save-status' });
+      }
+    } catch (error) {
+      toast('Settings save failed: ' + error.message, 'error', 5000, { key: 'settings-save-status' });
     }
-  });
+    body = queuedSettingsSaveBody;
+    queuedSettingsSaveBody = null;
+  }
+  return lastResult;
 }
 
 // ── UI helpers ────────────────────────────────────────
@@ -1502,7 +2022,8 @@ function updateActiveBar() {
   const txt = el('activeRecordText');
   if (!bar || !txt) return;
   bar.classList.remove('hidden');
-  txt.textContent = activeRecordBarText(getActiveRecordIdentity(), textVal('docNumber'));
+  const dirtySuffix = isDocumentDirty() ? ' · Unsaved changes' : '';
+  txt.textContent = `${activeRecordBarText(getActiveRecordIdentity(), textVal('docNumber'))}${dirtySuffix}`;
 }
 
 function setDbStatus(msg, state = '') {
@@ -1512,11 +2033,12 @@ function setDbStatus(msg, state = '') {
   if (txt) txt.textContent = msg;
 }
 
-function on(id, fn) {
+function on(id, fn, signal = initAbortController?.signal) {
   const e = el(id);
   if (!e) return;
-  if (e.type === 'file') e.addEventListener('change', fn);
-  else e.addEventListener('click', fn);
+  const options = signal ? { signal } : undefined;
+  if (e.type === 'file') e.addEventListener('change', fn, options);
+  else e.addEventListener('click', fn, options);
 }
 
 function setText(id, v) { const e = el(id); if (e) e.textContent = v ?? ''; }

@@ -2,7 +2,7 @@ export function getSaveIntent(forceNew, context = {}) {
   const activeRecordId = normalizeId(context.activeRecordId);
   const activeRecordType = normalizeType(context.activeRecordType);
   const requestedDocType = normalizeType(context.requestedDocType || context.docType || activeRecordType || 'ESTIMATE');
-  const typeChanged = !forceNew && !!activeRecordId && !!activeRecordType && requestedDocType !== activeRecordType;
+  const typeChanged = !!activeRecordId && !!activeRecordType && requestedDocType !== activeRecordType;
   const mode = forceNew
     ? 'create-new'
     : typeChanged

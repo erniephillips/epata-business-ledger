@@ -108,6 +108,8 @@ assert.equal(matchesStatus({ status: 'Draft', needsReview: true }, 'needs-review
 assert.equal(matchesStatus({ status: 'Needs Review', needsReview: false }, 'needs-review'), true);
 assert.equal(matchesStatus({ status: 'Refunded', needsReview: false }, 'paid'), true);
 assert.equal(matchesStatus({ status: 'Refunded', needsReview: false }, 'open'), false);
+assert.equal(matchesStatus({ status: 'Open', customerPaid: 25 }, 'paid'), false, 'Field names such as customerPaid must not make an open row match Paid.');
+assert.equal(matchesStatus({ deductibleStatus: 'Review', needsReview: false }, 'needs-review'), true, 'Secondary status fields should participate in review filtering.');
 const saleStatusRows = filterRows([
   { id: 1, status: 'Refunded', needsReview: false },
   { id: 2, status: 'Needs Review', needsReview: false },
@@ -156,8 +158,9 @@ const indexSource = await readFile(new URL('../wwwroot/index.html', import.meta.
 
 assert.ok(indexSource.includes('/js/entity-table-state.js?v=1'), 'Main shell should load the entity table helper before app.js.');
 assert.ok(appSource.includes('EpataEntityTableState?.buildEntityTableModel'), 'Generic ledger tables should use the entity table helper.');
-assert.ok(appSource.includes('appState.globalSearchTimer = setTimeout(() => showPage'), 'Global search should debounce page rendering.');
-assert.ok(appSource.includes('), 220);'), 'Global search debounce should have a stable delay.');
+assert.ok(appSource.includes('appState.globalSearchTimer = setTimeout(() => {'), 'Global search should debounce page rendering.');
+assert.ok(appSource.includes("showPage('globalSearch', { replace: true });"), 'Global search debounce should replace its current history entry.');
+assert.ok(appSource.includes('}, 220);'), 'Global search debounce should have a stable delay.');
 assert.ok(appSource.includes('pageRows.map(row =>'), 'Generic table render should render actions from the paged row set.');
 assert.ok(appSource.includes('data-edit="${row.id}"'), 'Filtered/paged rows should preserve Edit row actions.');
 assert.ok(appSource.includes('data-delete="${row.id}"'), 'Filtered/paged rows should preserve Archive row actions.');
@@ -166,6 +169,8 @@ assert.ok(appSource.includes("columns: ['name','sku','material','color','grams'"
 assert.ok(appSource.includes("'Refunded','Needs Review'"), 'Sales status options should expose Refunded and Needs Review.');
 assert.ok(appSource.includes('Paid / done / refunded'), 'Closed status filter label should mention refunded rows.');
 assert.ok(appSource.includes("v.includes('refunded')"), 'Refunded status should render as a bad badge.');
+assert.ok(appSource.includes("normalizedColumn.endsWith('at')"), 'Timestamp columns should still sort as dates.');
+assert.ok(!appSource.includes("column.toLowerCase().includes('at')"), 'Text fields such as material and platform must not be misclassified as dates.');
 
 console.log(JSON.stringify({
   EntityTableStateBehavior: 'pass',

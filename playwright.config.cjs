@@ -3,6 +3,8 @@ const { defineConfig, devices } = require('@playwright/test');
 const port = Number(process.env.EPATA_PLAYWRIGHT_PORT || 5120);
 const baseURL = process.env.EPATA_PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${port}`;
 const skipWebServer = process.env.EPATA_PLAYWRIGHT_SKIP_WEBSERVER === '1';
+const executablePath = process.env.EPATA_PLAYWRIGHT_EXECUTABLE_PATH || undefined;
+const launchOptions = executablePath ? { executablePath } : {};
 
 const config = {
   testDir: './tests/playwright',
@@ -16,6 +18,7 @@ const config = {
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
+    launchOptions,
   },
   projects: [
     {

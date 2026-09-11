@@ -35,9 +35,9 @@ public class ReceivableInvoice : AuditableEntity
     public string PaymentMethod { get; set; } = "Unknown / Review";
 
     [NotMapped]
-    public decimal BalanceDue => Status.Equals("Void", StringComparison.OrdinalIgnoreCase)
-        || Status.Equals("Paid", StringComparison.OrdinalIgnoreCase)
-        || Status.Equals("Draft", StringComparison.OrdinalIgnoreCase)
+    public decimal BalanceDue => string.Equals(Status, "Void", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(Status, "Paid", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(Status, "Draft", StringComparison.OrdinalIgnoreCase)
             ? 0
             : Math.Max(0, (InvoiceTotal ?? 0) - (AmountPaid ?? 0));
 
